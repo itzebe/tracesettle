@@ -1,0 +1,57 @@
+{
+  "_provenance": "SYNTHETIC — hand-authored for testing. NOT a real transaction. Do not present as live evidence.",
+  "status": "FAILED",
+  "updatedAt": "2026-10-19T20:20:00.000Z",
+  "correlationId": "SYNTHETIC-FAILED-0001",
+  "swapDetails": {
+    "depositedAmount": "500000000",
+    "depositedAmountUsd": "0.50",
+    "depositedAmountFormatted": "500",
+    "intentHashes": ["SYNTHETICintenthash00000000000000000000000000"],
+    "nearTxHashes": [],
+    "amountIn": "500000000",
+    "amountInFormatted": "500",
+    "amountInUsd": "0.50",
+    "amountOut": null,
+    "slippage": 0,
+    "refundedAmount": "0",
+    "refundedAmountFormatted": "0",
+    "refundedAmountUsd": "0",
+    "refundReason": null,
+    "refundFee": "0",
+    "withdrawFee": "0",
+    "originChainTxHashes": [
+      { "hash": "0xbbbb000000000000000000000000000000000000000000000000000000000010", "explorerUrl": "" }
+    ],
+    "destinationChainTxHashes": []
+  },
+  "quoteResponse": {
+    "timestamp": "2026-10-19T20:15:00.000Z",
+    "signature": "ed25519:SYNTHETIC",
+    "quoteRequest": {
+      "dry": false,
+      "swapType": "EXACT_INPUT",
+      "depositMode": "SIMPLE",
+      "slippageTolerance": 100,
+      "originAsset": "nep141:eth.omft.near",
+      "depositType": "ORIGIN_CHAIN",
+      "destinationAsset": "nep141:base-0x833589fcd6edb6e08f4c7c32d4f71b54bda02913.omft.near",
+      "amount": "500000000",
+      "refundTo": "0xdddd000000000000000000000000000000000004",
+      "refundType": "ORIGIN_CHAIN",
+      "recipient": "0xeeee000000000000000000000000000000000005",
+      "recipientType": "DESTINATION_CHAIN",
+      "deadline": "2026-10-19T20:45:00.000Z",
+      "referral": "synthetic-test",
+      "confidentiality": "public"
+    },
+    "quote": {
+      "amountIn": "500000000",
+      "amountOut": "490000000",
+      "depositAddress": "0xffff000000000000000000000000000000000006",
+      "deadline": "2026-10-22T20:45:00.000Z",
+      "refundFee": "0",
+      "withdrawFee": "0"
+    }
+  }
+}

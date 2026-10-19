@@ -1,0 +1,59 @@
+{
+  "_provenance": "SYNTHETIC — hand-authored for testing. NOT a real transaction. Do not present as live evidence.",
+  "status": "REFUNDED",
+  "updatedAt": "2026-10-19T20:10:00.000Z",
+  "correlationId": "SYNTHETIC-REFUND-0001",
+  "swapDetails": {
+    "depositedAmount": "1000000000",
+    "depositedAmountUsd": "1.00",
+    "depositedAmountFormatted": "1000",
+    "intentHashes": [],
+    "nearTxHashes": [],
+    "amountIn": "1000000000",
+    "amountInFormatted": "1000",
+    "amountInUsd": "1.00",
+    "amountOut": null,
+    "amountOutFormatted": null,
+    "amountOutUsd": null,
+    "slippage": 0,
+    "refundedAmount": "1000000000",
+    "refundedAmountFormatted": "1000",
+    "refundedAmountUsd": "1.00",
+    "refundReason": "SYNTHETIC: deposit below minimum",
+    "refundFee": "0",
+    "withdrawFee": "0",
+    "originChainTxHashes": [
+      { "hash": "0xaaaa000000000000000000000000000000000000000000000000000000000001", "explorerUrl": "" }
+    ],
+    "destinationChainTxHashes": []
+  },
+  "quoteResponse": {
+    "timestamp": "2026-10-19T20:00:00.000Z",
+    "signature": "ed25519:SYNTHETIC",
+    "quoteRequest": {
+      "dry": false,
+      "swapType": "EXACT_INPUT",
+      "depositMode": "SIMPLE",
+      "slippageTolerance": 100,
+      "originAsset": "nep141:eth-0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48.omft.near",
+      "depositType": "ORIGIN_CHAIN",
+      "destinationAsset": "nep141:base-0x833589fcd6edb6e08f4c7c32d4f71b54bda02913.omft.near",
+      "amount": "1000000000",
+      "refundTo": "0xaaaa000000000000000000000000000000000001",
+      "refundType": "ORIGIN_CHAIN",
+      "recipient": "0xbbbb000000000000000000000000000000000002",
+      "recipientType": "DESTINATION_CHAIN",
+      "deadline": "2026-10-19T20:30:00.000Z",
+      "referral": "synthetic-test",
+      "confidentiality": "public"
+    },
+    "quote": {
+      "amountIn": "1000000000",
+      "amountOut": "990000000",
+      "depositAddress": "0xcccc000000000000000000000000000000000003",
+      "deadline": "2026-10-22T20:30:00.000Z",
+      "refundFee": "0",
+      "withdrawFee": "0"
+    }
+  }
+}

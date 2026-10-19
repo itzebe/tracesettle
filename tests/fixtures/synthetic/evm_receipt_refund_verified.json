@@ -1,0 +1,30 @@
+{
+  "_provenance": "SYNTHETIC — hand-authored for testing. NOT a real transaction. Do not present as live evidence.",
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "type": "0x2",
+    "status": "0x1",
+    "cumulativeGasUsed": "0x5208",
+    "logs": [
+      {
+        "address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+        "topics": [
+          "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+          "0x000000000000000000000000cccc000000000000000000000000000000000003",
+          "0x000000000000000000000000aaaa000000000000000000000000000000000001"
+        ],
+        "data": "0x000000000000000000000000000000000000000000000000000000003b9aca00",
+        "blockNumber": "0x1903ac4",
+        "transactionHash": "0xaaaa000000000000000000000000000000000000000000000000000000000001",
+        "logIndex": "0x1",
+        "removed": false
+      }
+    ],
+    "transactionHash": "0xaaaa000000000000000000000000000000000000000000000000000000000001",
+    "blockNumber": "0x1903ac4",
+    "from": "0xcccc000000000000000000000000000000000003",
+    "to": "0xaaaa000000000000000000000000000000000001",
+    "contractAddress": null
+  }
+}
