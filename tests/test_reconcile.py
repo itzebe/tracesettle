@@ -16,6 +16,11 @@ from tracesettle.reconcile import reconcile
 from conftest import ev
 
 
+def _assert_no_invariant_violated(result):
+    violated = [name for name, ok in result.safety.items() if not ok]
+    assert not violated, f"safety invariants violated: {violated}"
+
+
 def _full_happy_path():
     return [
         ev(
@@ -204,6 +209,237 @@ def test_zero_refund_is_not_proof_of_no_refund():
     assert result.stage(Stage.REFUND).state is not StageState.CONFIRMED
     assert result.safety["zero_refund_is_not_proof_of_no_refund"] is True
     assert result.safety["reported_failure_is_not_loss"] is True
+
+
+# --- Refund coverage: the eight required cases ------------------------------
+#
+# 1. failed intent with an independently verified refund            -> REFUND_VERIFIED
+# 2. reported refund without independent evidence                  -> REFUND_REPORTED_UNVERIFIED
+# 3. failed intent with no refund evidence                         -> REFUND MISSING
+# 4. reported zero refund amount                                   -> never "no refund"
+# 5. unavailable refund-verification source                        -> REFUND UNAVAILABLE
+# 6. conflicting refund claims                                     -> CONTRADICTORY / not confirmed
+# 7. refund tx succeeds on-chain but cannot be linked to the intent -> not confirmed
+# 8. refund tx exists but wrong asset or wrong recipient           -> not confirmed
+
+
+def test_refund_case_3_failed_intent_no_refund_evidence():
+    """A failed intent with no refund evidence leaves REFUND MISSING, not 'no refund'."""
+    result = reconcile(
+        [
+            ev(
+                "ev-failed",
+                Stage.NEAR_SETTLEMENT,
+                EventType.UPSTREAM_STATUS,
+                Verification.REPORTED,
+                reported_status="FAILED",
+            )
+        ],
+        {"oneclick_status": SourceStatus.OK},
+    )
+    assert result.stage(Stage.REFUND).state is StageState.MISSING
+    assert result.outcome is not OverallOutcome.REFUND_VERIFIED
+    assert "does not mean" in result.stage(Stage.REFUND).summary.lower()
+    _assert_no_invariant_violated(result)
+
+
+def test_refund_case_4_reported_zero_amount():
+    """refundedAmount '0' must never be reported as proof no refund can occur."""
+    result = reconcile(
+        [
+            ev(
+                "ev-refund",
+                Stage.REFUND,
+                EventType.REFUND_CLAIMED,
+                Verification.REPORTED,
+                reported_status="REFUNDED",
+                details={"refunded_amount": "0"},
+            )
+        ],
+        {"oneclick_status": SourceStatus.OK},
+    )
+    assert result.stage(Stage.REFUND).state is not StageState.CONFIRMED
+    assert result.outcome is not OverallOutcome.REFUND_VERIFIED
+    _assert_no_invariant_violated(result)
+
+
+def test_refund_case_5_unavailable_refund_verification_source():
+    """A reported refund whose origin RPC was unreachable is UNAVAILABLE, not confirmed."""
+    result = reconcile(
+        [
+            ev(
+                "ev-refund",
+                Stage.REFUND,
+                EventType.REFUND_CLAIMED,
+                Verification.REPORTED,
+                reported_status="REFUNDED",
+                details={"refunded_amount": "1000000"},
+            ),
+            ev(
+                "ev-refund-unavailable",
+                Stage.REFUND,
+                EventType.REFUND_TX_CONFIRMED,
+                Verification.UNAVAILABLE,
+                details={"reason": "TIMEOUT"},
+            ),
+        ],
+        {"oneclick_status": SourceStatus.OK, "evm_rpc": SourceStatus.TIMEOUT},
+    )
+    stage = result.stage(Stage.REFUND)
+    assert stage.state is StageState.UNAVAILABLE
+    assert result.outcome is not OverallOutcome.REFUND_VERIFIED
+    assert "unavailable" in stage.summary.lower()
+    _assert_no_invariant_violated(result)
+
+
+def test_refund_case_6_conflicting_refund_claims():
+    """A confirmed refund transaction alongside a reported failure is a contradiction."""
+    result = reconcile(
+        [
+            ev(
+                "ev-refund-claim",
+                Stage.REFUND,
+                EventType.REFUND_CLAIMED,
+                Verification.REPORTED,
+                reported_status="REFUNDED",
+                details={"refunded_amount": "1000000"},
+            ),
+            ev(
+                "ev-refund-tx",
+                Stage.REFUND,
+                EventType.REFUND_TX_CONFIRMED,
+                Verification.CONFIRMED,
+                tx_hash="0xrefund",
+                chain="eth",
+            ),
+            # A destination transfer independently confirmed at the same time.
+            ev(
+                "ev-delivery",
+                Stage.DESTINATION_CHAIN_DELIVERY,
+                EventType.DESTINATION_TRANSFER_OBSERVED,
+                Verification.CONFIRMED,
+                tx_hash="0xdest",
+                chain="eth",
+            ),
+        ],
+        {"oneclick_status": SourceStatus.OK},
+    )
+    # A refund confirmed while delivery is also confirmed is contradictory and must
+    # be surfaced, not silently resolved.
+    assert result.contradictions, "expected a contradiction to be reported"
+    assert result.outcome is OverallOutcome.CONTRADICTORY
+
+
+def test_refund_case_7_tx_succeeds_but_cannot_be_linked():
+    """A successful origin tx that cannot be linked to the intent must not confirm a refund.
+
+    The refund stage can only be confirmed from evidence explicitly tied to the
+    investigated swap. A receipt that exists but was never attributed to the
+    refund address is not refund evidence.
+    """
+    result = reconcile(
+        [
+            ev(
+                "ev-refund-claim",
+                Stage.REFUND,
+                EventType.REFUND_CLAIMED,
+                Verification.REPORTED,
+                reported_status="REFUNDED",
+                details={"refunded_amount": "1000000"},
+            ),
+            # The origin tx was observed but explicitly not attributed to this swap.
+            ev(
+                "ev-origin-unattributed",
+                Stage.SOURCE_CHAIN_DEPOSIT,
+                EventType.SOURCE_TX_INCLUDED,
+                Verification.UNAVAILABLE,
+                details={"reason": "NOT_ATTRIBUTABLE"},
+            ),
+        ],
+        {"oneclick_status": SourceStatus.OK},
+    )
+    assert result.stage(Stage.REFUND).state is not StageState.CONFIRMED
+    assert result.outcome is OverallOutcome.REFUND_REPORTED_UNVERIFIED
+    _assert_no_invariant_violated(result)
+
+
+def test_refund_case_8_wrong_asset_or_recipient_not_confirmed():
+    """A confirmed refund requires a matching transfer; wrong asset/recipient is not one.
+
+    This asserts the contract at the engine boundary: REFUND_TX_CONFIRMED is only
+    ever produced by the adapter's transfer matcher, which requires the expected
+    token contract AND recipient. A transfer to a different address, or of a
+    different token, produces no such item.
+    """
+    from tracesettle.adapters import evm_rpc
+
+    refund_address = "0xaaaa000000000000000000000000000000000001"
+    padded = "0x" + "0" * 24 + refund_address[2:]  # 32-byte left-padded topic
+
+    def transfer_log(token: str, to_topic: str) -> dict:
+        return {
+            "address": token,
+            "topics": [evm_rpc.TRANSFER_TOPIC, "0x" + "0" * 24 + "b" * 40, to_topic],
+            "data": "0x" + format(1000000, "x"),
+        }
+
+    receipt = evm_rpc.EvmReceiptData(
+        tx_hash="0xrefund",
+        chain="eth",
+        status="0x1",
+        to_address=refund_address,
+        from_address="0xbbbb000000000000000000000000000000000002",
+        logs=[
+            transfer_log(
+                "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",  # USDC
+                "0x" + "0" * 24 + "9" * 40,  # WRONG recipient
+            )
+        ],
+    )
+    # Expecting the refund address, not 0x999...
+    expectation = evm_rpc.ExpectedTransfer(
+        token_contract="0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+        recipient=refund_address,
+        amount_base_units="1000000",
+    )
+    match = evm_rpc.match_expected_transfer(receipt, expectation)
+    assert match.matched is False
+    assert "recipient" in match.reason.lower()
+
+    # A different token to the right recipient must also fail to match.
+    wrong_token = evm_rpc.EvmReceiptData(
+        tx_hash="0xrefund2",
+        chain="eth",
+        status="0x1",
+        to_address=refund_address,
+        from_address="0xbbbb000000000000000000000000000000000002",
+        logs=[
+            transfer_log(
+                "0xdead00000000000000000000000000000000beef",  # WRONG token
+                padded,  # right recipient
+            )
+        ],
+    )
+    match2 = evm_rpc.match_expected_transfer(wrong_token, expectation)
+    assert match2.matched is False
+    assert "token" in match2.reason.lower() or "recipient" in match2.reason.lower()
+
+    # The correct asset to the correct recipient does match, so the negative cases
+    # above are meaningful rather than passing vacuously.
+    correct = evm_rpc.EvmReceiptData(
+        tx_hash="0xrefund3",
+        chain="eth",
+        status="0x1",
+        to_address=refund_address,
+        from_address="0xbbbb000000000000000000000000000000000002",
+        logs=[
+            transfer_log(
+                "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+                padded,
+            )
+        ],
+    )
+    assert evm_rpc.match_expected_transfer(correct, expectation).matched is True
 
 
 def test_reported_failure_is_not_funds_lost():

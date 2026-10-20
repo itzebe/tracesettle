@@ -96,3 +96,31 @@ when evidence is insufficient.
   mixed-case input, otherwise `0x...` strings are misclassified as NEAR accounts.
 - **Lint:** `python3 -m pyflakes tracesettle/ tests/` must be clean.
 
+## Audit findings (pre-submission, post-Phase-2)
+
+- **Correlation is identifier-based, never amount/timestamp-based.** Two on-chain
+  event streams can be linked only when they share an explicit identifier:
+  - Settlement: the `intent_hash` in DIP-4 `EVENT_JSON` logs must equal one of the
+    investigation's `expected_intent_hashes` (from 1Click or the input identifier).
+    A NEAR tx can carry several intents; an unrelated one must not confirm ours.
+  - Bridge credit: the `omft.near` -> `intents.near` `ft_transfer` memo
+    `BRIDGED_FROM:{"txHash":"0x…"}` must name one of the investigation's
+    `expected_origin_tx_hashes`. This is the authoritative on-chain evidence for
+    `BRIDGE_DEPOSIT_CREDIT` (previously `REPORTED`-only).
+  - When an expectation set is empty, no naming requirement is imposed. Passing the
+    expectation is what makes confirmation meaningful, so always thread it from the
+    orchestrator.
+- **`reconcile()` signature** is
+  `reconcile(evidence, source_statuses, expected_intent_hashes, expected_origin_tx_hashes)`.
+  Off-target decisive evidence yields `REPORTED` with an explicit explanation, never
+  `CONFIRMED`.
+- **Refund availability:** a reported refund whose verification source was
+  unreachable resolves the REFUND stage to `UNAVAILABLE` (outcome
+  `REFUND_REPORTED_UNVERIFIED`), so the gap is visible rather than looking like a
+  plain unverified report.
+- **Live reproduction (2026-10-19):** deposit address
+  `0xb741c00f6d63b6ded0ccada1a82bcbadc38a572b` reproduces `SETTLED_VERIFIED` with all
+  four stages `CONFIRMED` and REFUND `MISSING`. Note 1Click nests the hash arrays under
+  `swapDetails` in `/v0/status`.
+- **Tests:** `python3 -m pytest tests/ -q` (133 tests).
+

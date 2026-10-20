@@ -102,19 +102,39 @@ DECISIVE_EVENT_TYPES: dict[Stage, EventType] = {
 def reconcile(
     evidence: list[EvidenceItem],
     source_statuses: dict[str, SourceStatus] | None = None,
+    expected_intent_hashes: list[str] | None = None,
+    expected_origin_tx_hashes: list[str] | None = None,
 ) -> ReconciliationResult:
-    """Reconcile normalized evidence into a deterministic result."""
+    """Reconcile normalized evidence into a deterministic result.
+
+    ``expected_intent_hashes`` are the intent hashes this investigation is about.
+    When supplied, on-chain settlement evidence must name one of them to confirm
+    the settlement stage: an unrelated intent in the same NEAR transaction must not
+    be able to confirm it.
+
+    ``expected_origin_tx_hashes`` are the origin-chain transaction hashes this
+    investigation is about. When supplied, bridge-credit evidence must name one of
+    them (via its ``BRIDGED_FROM`` memo) to confirm the bridge-deposit-credit stage.
+
+    When an expectation is omitted, no naming requirement is imposed for that stage
+    (the caller has not told us which transaction we are investigating).
+    """
     source_statuses = source_statuses or {}
+    expected = {h for h in (expected_intent_hashes or []) if h}
+    expected_origin = {h.lower() for h in (expected_origin_tx_hashes or []) if h}
     items = sorted(evidence, key=lambda e: e.id)
 
     # REFUND is off the happy path, so it is assessed but excluded from ordering.
     assessed_stages = (*STAGE_ORDER, Stage.REFUND)
-    stages = tuple(_assess_stage(stage, items, source_statuses) for stage in assessed_stages)
+    stages = tuple(
+        _assess_stage(stage, items, source_statuses, expected, expected_origin)
+        for stage in assessed_stages
+    )
     contradictions = tuple(_detect_contradictions(items))
     last_confirmed = _last_confirmed_stage(stages)
 
     has_simulated = any(e.provenance is Provenance.SIMULATED for e in items)
-    outcome = _derive_outcome(stages, items, source_statuses, contradictions, has_simulated)
+    outcome = _derive_outcome(stages, items, source_statuses, contradictions, has_simulated, expected)
     unresolved = _unresolved_questions(stages, items, source_statuses, contradictions)
     safety = _safety_report(items, stages, outcome)
     summary = _summarize(outcome, stages, items, source_statuses, has_simulated)
@@ -137,7 +157,11 @@ def reconcile(
 
 
 def _assess_stage(
-    stage: Stage, items: list[EvidenceItem], source_statuses: dict[str, SourceStatus]
+    stage: Stage,
+    items: list[EvidenceItem],
+    source_statuses: dict[str, SourceStatus],
+    expected_intent_hashes: set[str] | None = None,
+    expected_origin_tx_hashes: set[str] | None = None,
 ) -> StageAssessment:
     stage_items = [e for e in items if e.stage is stage]
 
@@ -156,6 +180,23 @@ def _assess_stage(
     confirmed = [e for e in stage_items if e.verification is Verification.CONFIRMED]
     decisive = DECISIVE_EVENT_TYPES.get(stage)
     decisive_confirmed = [e for e in confirmed if e.event_type is decisive]
+
+    # Decisive evidence may only confirm the stage when it names *this*
+    # investigation's transaction. A NEAR transaction can carry several intents and
+    # several bridge credits; one belonging to an unrelated swap must not confirm
+    # ours.
+    off_target: list[EvidenceItem] = []
+    if stage is Stage.NEAR_SETTLEMENT and expected_intent_hashes:
+        on_target = [e for e in decisive_confirmed if _names_expected_intent(e, expected_intent_hashes)]
+        off_target = [e for e in decisive_confirmed if e not in on_target]
+        decisive_confirmed = on_target
+    elif stage is Stage.BRIDGE_DEPOSIT_CREDIT and expected_origin_tx_hashes:
+        on_target = [
+            e for e in decisive_confirmed if _names_expected_origin_tx(e, expected_origin_tx_hashes)
+        ]
+        off_target = [e for e in decisive_confirmed if e not in on_target]
+        decisive_confirmed = on_target
+
     supporting_confirmed = [e for e in confirmed if e.event_type is not decisive]
     reported = [e for e in stage_items if e.verification is Verification.REPORTED]
     simulated = [e for e in stage_items if e.provenance is Provenance.SIMULATED]
@@ -176,6 +217,30 @@ def _assess_stage(
             summary=summary,
             supporting_evidence_ids=tuple(e.id for e in decisive_confirmed),
         )
+
+    # Decisive evidence exists but names a different transaction: this is exactly
+    # the case that must never be read as confirmation.
+    if off_target:
+        if stage is Stage.NEAR_SETTLEMENT:
+            summary = (
+                "On-chain intent-execution logs were found, but they name a different intent "
+                "than the one under investigation, so settlement is not confirmed. Correlating "
+                "them would require an explicit shared identifier, which was not observed."
+            )
+        else:
+            summary = (
+                "On-chain bridge-credit evidence was found, but it names a different origin "
+                "transaction than the one under investigation, so the deposit credit is not "
+                "confirmed. Correlating them would require an explicit shared identifier, which "
+                "was not observed."
+            )
+        return StageAssessment(
+            stage=stage,
+            state=StageState.REPORTED,
+            summary=summary,
+            supporting_evidence_ids=tuple(e.id for e in off_target),
+        )
+
     if simulated:
         return StageAssessment(
             stage=stage,
@@ -248,6 +313,21 @@ def _assess_refund(items: list[EvidenceItem]) -> StageAssessment:
             supporting_evidence_ids=tuple(e.id for e in confirmed),
         )
     claimed = [e for e in items if e.event_type is EventType.REFUND_CLAIMED]
+    unavailable = [e for e in items if e.verification is Verification.UNAVAILABLE]
+    # A reported refund whose verification source was unreachable is reported *and*
+    # unverifiable. That must be visible, not silently reduced to a plain report.
+    if claimed and unavailable:
+        reasons = sorted({str(e.details.get("reason") or e.source) for e in unavailable})
+        return StageAssessment(
+            stage=Stage.REFUND,
+            state=StageState.UNAVAILABLE,
+            summary=(
+                "A refund is reported by an upstream service, but the source needed to verify "
+                f"it was unavailable ({'; '.join(reasons)}), so the refund transaction could not "
+                "be checked. This is a source-availability problem, not proof the refund failed."
+            ),
+            supporting_evidence_ids=tuple(e.id for e in claimed + unavailable),
+        )
     if claimed:
         return StageAssessment(
             stage=Stage.REFUND,
@@ -257,6 +337,17 @@ def _assess_refund(items: list[EvidenceItem]) -> StageAssessment:
                 "confirmed; the refund transaction has not been verified on-chain."
             ),
             supporting_evidence_ids=tuple(e.id for e in claimed),
+        )
+    if unavailable:
+        reasons = sorted({str(e.details.get("reason") or e.source) for e in unavailable})
+        return StageAssessment(
+            stage=Stage.REFUND,
+            state=StageState.UNAVAILABLE,
+            summary=(
+                "Whether a refund occurred could not be checked because a required source was "
+                f"unavailable ({'; '.join(reasons)}). This is not evidence that no refund occurred."
+            ),
+            supporting_evidence_ids=tuple(e.id for e in unavailable),
         )
     return StageAssessment(
         stage=Stage.REFUND,
@@ -296,11 +387,30 @@ def _missing_or_unavailable(
     )
 
 
+def _names_expected_intent(item: EvidenceItem, expected: set[str]) -> bool:
+    """True when an intent-event evidence item names one of the expected intents."""
+    observed = item.details.get("intent_hashes")
+    if not isinstance(observed, (list, tuple)):
+        return False
+    return any(isinstance(h, str) and h in expected for h in observed)
+
+
+def _names_expected_origin_tx(item: EvidenceItem, expected: set[str]) -> bool:
+    """True when bridge-credit evidence names one of the expected origin tx hashes."""
+    observed = item.details.get("bridged_from_origin_hashes")
+    if not isinstance(observed, (list, tuple)):
+        return False
+    return any(isinstance(h, str) and h.lower() in expected for h in observed)
+
+
 def _confirmed_summary(stage: Stage, confirmed: list[EvidenceItem]) -> str:
     if stage is Stage.SOURCE_CHAIN_DEPOSIT:
         return "The source-chain deposit transaction was independently confirmed."
     if stage is Stage.BRIDGE_DEPOSIT_CREDIT:
-        return "The deposit was observed by an authoritative source."
+        return (
+            "The deposit credit was independently confirmed on-chain: a bridge transfer to "
+            "intents.near carries a BRIDGED_FROM memo naming this deposit's origin transaction."
+        )
     if stage is Stage.NEAR_SETTLEMENT:
         # Distinguish inclusion from semantic settlement evidence.
         if any(e.event_type is EventType.INTENT_EVENT_OBSERVED for e in confirmed):
@@ -460,13 +570,20 @@ def _state(stages: tuple[StageAssessment, ...], stage: Stage) -> StageState | No
 _FAILURE_STATUSES = frozenset({"FAILED", "INCOMPLETE_DEPOSIT", "REFUNDED", "NOT_FOUND_OR_NOT_VALID"})
 
 
-def _has_successful_settlement_claim(items: list[EvidenceItem]) -> bool:
+def _has_successful_settlement_claim(
+    items: list[EvidenceItem], expected_intent_hashes: set[str] | None = None
+) -> bool:
     """True when a source positively claims settlement (not merely 'a status exists')."""
+    expected = expected_intent_hashes or set()
     for item in items:
         if item.stage is not Stage.NEAR_SETTLEMENT:
             continue
         if item.event_type is EventType.INTENT_EVENT_OBSERVED:
-            return True
+            # When we know which intent we are investigating, only an observation
+            # naming it counts as a settlement claim.
+            if not expected or _names_expected_intent(item, expected):
+                return True
+            continue
         if item.reported_status in {"SUCCESS", "SETTLED", "PROCESSING"}:
             return True
     return False
@@ -493,6 +610,7 @@ def _derive_outcome(
     source_statuses: dict[str, SourceStatus],
     contradictions: list[Contradiction],
     has_simulated: bool,
+    expected_intent_hashes: set[str] | None = None,
 ) -> OverallOutcome:
     src = _state(stages, Stage.SOURCE_CHAIN_DEPOSIT)
     settle = _state(stages, Stage.NEAR_SETTLEMENT)
@@ -514,6 +632,12 @@ def _derive_outcome(
     if refund is StageState.CONFIRMED:
         return OverallOutcome.REFUND_VERIFIED
     if refund is StageState.REPORTED:
+        return OverallOutcome.REFUND_REPORTED_UNVERIFIED
+    # A reported refund whose verification source was unreachable is still an
+    # unverified refund claim; the stage state carries the availability gap.
+    if refund is StageState.UNAVAILABLE and any(
+        e.event_type is EventType.REFUND_CLAIMED for e in items
+    ):
         return OverallOutcome.REFUND_REPORTED_UNVERIFIED
 
     # Failure, only when independently established.
@@ -541,7 +665,7 @@ def _derive_outcome(
     # not be read as a successful settlement claim.
     if settle is StageState.CONFIRMED:
         return OverallOutcome.DELIVERY_UNVERIFIED
-    if settle is StageState.REPORTED and _has_successful_settlement_claim(items):
+    if settle is StageState.REPORTED and _has_successful_settlement_claim(items, expected_intent_hashes):
         return OverallOutcome.SETTLED_REPORTED_ONLY
     if settle is StageState.CONTRADICTORY:
         return OverallOutcome.CONTRADICTORY

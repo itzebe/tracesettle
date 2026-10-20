@@ -33,9 +33,11 @@ from conftest import (
 CREATED_AT = "2026-10-19T22:00:00Z"
 
 
-def _wire_full_success(opener: FakeOpener) -> FakeOpener:
+def _wire_full_success(opener: FakeOpener, status_payload=None) -> FakeOpener:
     """Wire every real fixture for the verified ETH -> USDC swap."""
-    opener.json("GET", "/v0/status", load_raw("oneclick_status_SUCCESS.json"))
+    opener.json(
+        "GET", "/v0/status", status_payload or load_raw("oneclick_status_SUCCESS.json")
+    )
     opener.json("POST", "ethereum-rpc", load_raw("evm_receipt_origin.json"), once=True)
     opener.json("POST", "ethereum-rpc", load_raw("evm_receipt_destination.json"))
     opener.json("POST", "solver-relay", load_raw("solver_relay_get_status_SETTLED.json"))
@@ -61,11 +63,40 @@ def test_full_success_investigation(opener: FakeOpener):
     assert result.stage(Stage.DESTINATION_CHAIN_DELIVERY).state is StageState.CONFIRMED
     assert result.contradictions == ()
 
+    # The bridge credit is confirmed from on-chain BRIDGED_FROM evidence, not just
+    # the upstream report.
+    assert result.stage(Stage.BRIDGE_DEPOSIT_CREDIT).state is StageState.CONFIRMED
+    credit = [e for e in inv.evidence if e.stage is Stage.BRIDGE_DEPOSIT_CREDIT
+              and e.verification is Verification.CONFIRMED]
+    assert credit, "expected a confirmed on-chain bridge-credit evidence item"
+    assert REAL_ORIGIN_TX in credit[0].details["bridged_from_origin_hashes"]
+
     # Correlation is via explicit identifiers only.
     intent_items = [
         e for e in inv.evidence if e.event_type.value == "INTENT_EVENT_OBSERVED"
     ]
     assert intent_items and REAL_INTENT_HASH in intent_items[0].details["intent_hashes"]
+
+
+def test_bridge_credit_not_confirmed_when_origin_tx_differs(opener: FakeOpener):
+    """If 1Click reports an origin tx the bridge memo does not name, no confirmation.
+
+    The bridge stage must stay unconfirmed. The overall outcome may still be
+    SETTLED_VERIFIED when settlement and delivery are independently confirmed, since
+    an executed intent implies the deposit was credited; the point of this test is
+    that the *stage* is not confirmed from an unrelated memo.
+    """
+    # Point 1Click at a different origin tx hash than the one in the BRIDGED_FROM memo.
+    status = load_raw("oneclick_status_SUCCESS.json")
+    status["swapDetails"]["originChainTxHashes"] = [
+        {"hash": "0x" + "9" * 64, "explorerUrl": ""}
+    ]
+    _wire_full_success(opener, status_payload=status)
+    inv = investigate(REAL_DEPOSIT_ADDRESS, client_for(opener))
+    result = build_result(inv)
+    stage = result.stage(Stage.BRIDGE_DEPOSIT_CREDIT)
+    assert stage.state is not StageState.CONFIRMED
+    assert "different origin" in stage.summary.lower()
 
 
 def test_full_success_report_is_exportable(opener: FakeOpener):

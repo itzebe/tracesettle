@@ -19,6 +19,7 @@ from conftest import (
     REAL_DESTINATION_TX,
     REAL_INTENT_HASH,
     REAL_NEAR_TX,
+    REAL_NEAR_TX_BRIDGE,
     REAL_ORIGIN_TX,
     client_for,
     load_raw,
@@ -207,6 +208,44 @@ def test_near_rpc_unavailable_short_circuits(opener: FakeOpener):
     report, data = near_rpc.fetch_tx(REAL_NEAR_TX, client_for(opener))
     assert report.status is SourceStatus.TIMEOUT
     assert data is None
+
+
+def test_near_rpc_bridge_leg_yields_confirmed_deposit_credit(opener: FakeOpener):
+    """The bridge mint leg carries a BRIDGED_FROM memo naming the origin tx."""
+    opener.json("POST", "/", load_raw("near_rpc_tx_omft.json"))
+    report, data = near_rpc.fetch_tx(REAL_NEAR_TX_BRIDGE, client_for(opener))
+    assert report.status is SourceStatus.OK
+    assert REAL_ORIGIN_TX in data.bridged_from_origin_hashes
+    credit = [i for i in report.evidence if i.event_type.value == "DEPOSIT_OBSERVED"]
+    assert credit, "expected a bridge deposit-credit evidence item"
+    assert credit[0].stage.value == "BRIDGE_DEPOSIT_CREDIT"
+    assert credit[0].verification is Verification.CONFIRMED
+    assert REAL_ORIGIN_TX in credit[0].details["bridged_from_origin_hashes"]
+
+
+def test_near_rpc_settlement_leg_yields_no_bridge_credit(opener: FakeOpener):
+    """The settlement leg has no BRIDGED_FROM memo, so it must not claim a credit."""
+    opener.json("POST", "/", load_raw("near_rpc_tx.json"))
+    report, data = near_rpc.fetch_tx(REAL_NEAR_TX, client_for(opener))
+    assert data.bridged_from_origin_hashes == []
+    assert not any(i.event_type.value == "DEPOSIT_OBSERVED" for i in report.evidence)
+
+
+def test_near_rpc_malformed_bridged_from_memo_is_ignored(opener: FakeOpener):
+    """A malformed BRIDGED_FROM memo must not crash or fabricate a hash."""
+    payload = load_raw("near_rpc_tx_omft.json")
+    for receipt in payload["result"]["receipts_outcome"]:
+        logs = receipt["outcome"].get("logs") or []
+        receipt["outcome"]["logs"] = [
+            'EVENT_JSON:{"standard":"nep141","event":"ft_transfer","data":[{"memo":"BRIDGED_FROM:{not json"}]}'
+            if "BRIDGED_FROM" in log
+            else log
+            for log in logs
+        ]
+    opener.json("POST", "/", payload)
+    report, data = near_rpc.fetch_tx(REAL_NEAR_TX_BRIDGE, client_for(opener))
+    assert report.status is SourceStatus.OK
+    assert data.bridged_from_origin_hashes == []
 
 
 # --- EVM RPC ----------------------------------------------------------------

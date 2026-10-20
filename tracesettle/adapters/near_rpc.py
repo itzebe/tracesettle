@@ -65,6 +65,8 @@ class NearTxData:
     block_hash: str | None = None
     logs: list[str] = field(default_factory=list)
     found_intent_hashes: list[str] = field(default_factory=list)
+    #: Origin-chain transaction hashes found in bridge ``BRIDGED_FROM`` memos.
+    bridged_from_origin_hashes: list[str] = field(default_factory=list)
     error_message: str | None = None
 
 
@@ -120,6 +122,44 @@ def _intent_hashes_in_logs(logs: list[str]) -> list[str]:
             value = entry.get("intent_hash")
             if isinstance(value, str) and value and value not in found:
                 found.append(value)
+    return found
+
+
+def _bridged_from_origin_hashes(logs: list[str]) -> list[str]:
+    """Collect origin-chain tx hashes from bridge ``BRIDGED_FROM`` memos.
+
+    When the bridge credits a deposit, the ``omft.near`` transfer to ``intents.near``
+    carries a memo of the form ``BRIDGED_FROM:{"chainId":"1","txHash":"0x…"}``. That
+    memo is the explicit identifier linking the origin-chain transaction to the NEAR
+    bridge credit — it is not inferred from amount or timestamp.
+    """
+    found: list[str] = []
+    marker = "EVENT_JSON:"
+    for log in logs:
+        if marker not in log or "BRIDGED_FROM" not in log:
+            continue
+        try:
+            parsed = json.loads(log.split(marker, 1)[1])
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(parsed, dict):
+            continue
+        for entry in parsed.get("data") or []:
+            if not isinstance(entry, dict):
+                continue
+            memo = entry.get("memo")
+            if not isinstance(memo, str) or "BRIDGED_FROM:" not in memo:
+                continue
+            payload = memo.split("BRIDGED_FROM:", 1)[1]
+            try:
+                decoded = json.loads(payload)
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(decoded, dict):
+                continue
+            tx_hash = decoded.get("txHash")
+            if isinstance(tx_hash, str) and tx_hash and tx_hash not in found:
+                found.append(tx_hash)
     return found
 
 
@@ -194,6 +234,7 @@ def fetch_tx(tx_hash: str, client: HttpClient) -> tuple[SourceReport, NearTxData
             ),
             logs=logs,
             found_intent_hashes=_intent_hashes_in_logs(logs),
+            bridged_from_origin_hashes=_bridged_from_origin_hashes(logs),
         )
         return (
             SourceReport(
@@ -313,6 +354,32 @@ def _build_evidence(data: NearTxData, endpoint: str) -> list[EvidenceItem]:
                 limitations=(
                     "Confirms the named intent appears in on-chain event logs; it does not "
                     "by itself establish the real-world meaning of the transfer.",
+                ),
+            )
+        )
+
+    if data.bridged_from_origin_hashes:
+        items.append(
+            EvidenceItem(
+                id=f"ev-near-bridge-credit-{data.tx_hash}",
+                stage=Stage.BRIDGE_DEPOSIT_CREDIT,
+                event_type=EventType.DEPOSIT_OBSERVED,
+                source=SOURCE,
+                verification=Verification.CONFIRMED,
+                provenance=Provenance.REAL,
+                tx_hash=data.tx_hash,
+                chain="near",
+                evidence_url=url,
+                details={
+                    "bridge_contract": "omft.near",
+                    "credited_to": "intents.near",
+                    "bridged_from_origin_hashes": data.bridged_from_origin_hashes,
+                    "memo_marker": "BRIDGED_FROM",
+                },
+                limitations=(
+                    "Confirms an on-chain bridge credit carrying a BRIDGED_FROM memo. The memo "
+                    "links the origin transaction hash explicitly; it is corroborating evidence, "
+                    "not proof of the wider settlement claim.",
                 ),
             )
         )

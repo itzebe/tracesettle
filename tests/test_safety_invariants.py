@@ -299,6 +299,195 @@ def test_no_failed_verified_without_confirmed_failure_evidence():
     assert result.outcome is not OverallOutcome.FAILED_VERIFIED
 
 
+# Additional: settlement evidence must name the investigated intent, not any intent.
+
+
+_OTHER_INTENT = "SomeoneElsesIntentHash111111111111111111111"
+_OUR_INTENT = "OurIntentHash9999999999999999999999999999"
+
+
+def _intent_event(item_id: str, hashes: list[str]):
+    return ev(
+        item_id,
+        Stage.NEAR_SETTLEMENT,
+        EventType.INTENT_EVENT_OBSERVED,
+        Verification.CONFIRMED,
+        tx_hash="nearTx",
+        details={"intent_hashes": hashes, "standard": "dip4"},
+    )
+
+
+def test_settlement_requires_the_investigated_intent():
+    """Logs naming a different intent must not confirm *our* settlement."""
+    result = reconcile(
+        [_intent_event("ev-other", [_OTHER_INTENT])],
+        {"near_rpc": SourceStatus.OK},
+        expected_intent_hashes=[_OUR_INTENT],
+    )
+    stage = result.stage(Stage.NEAR_SETTLEMENT)
+    assert stage.state is not StageState.CONFIRMED, (
+        "settlement was confirmed from an unrelated intent in the same transaction"
+    )
+    assert result.outcome is not OverallOutcome.SETTLED_VERIFIED
+    assert "different intent" in stage.summary.lower()
+    _assert_no_invariant_violated(result)
+
+
+def test_settlement_confirms_when_investigated_intent_present():
+    """The same shape of evidence confirms when it names our intent."""
+    result = reconcile(
+        [_intent_event("ev-ours", [_OTHER_INTENT, _OUR_INTENT])],
+        {"near_rpc": SourceStatus.OK},
+        expected_intent_hashes=[_OUR_INTENT],
+    )
+    assert result.stage(Stage.NEAR_SETTLEMENT).state is StageState.CONFIRMED
+
+
+def test_settlement_without_expectation_is_backwards_compatible():
+    """When no intent expectation is supplied, behaviour is unchanged."""
+    result = reconcile(
+        [_intent_event("ev-any", [_OTHER_INTENT])],
+        {"near_rpc": SourceStatus.OK},
+    )
+    assert result.stage(Stage.NEAR_SETTLEMENT).state is StageState.CONFIRMED
+
+
+# Additional: determinism. Identical evidence must produce identical results.
+
+
+def test_reconciliation_is_deterministic():
+    evidence = [
+        ev(
+            "ev-b",
+            Stage.NEAR_SETTLEMENT,
+            EventType.INTENT_EVENT_OBSERVED,
+            Verification.CONFIRMED,
+            tx_hash="nearTx",
+            details={"intent_hashes": [_OUR_INTENT], "standard": "dip4"},
+        ),
+        ev(
+            "ev-a",
+            Stage.SOURCE_CHAIN_DEPOSIT,
+            EventType.SOURCE_TX_EXECUTED,
+            Verification.CONFIRMED,
+            tx_hash="0xorigin",
+        ),
+        ev(
+            "ev-c",
+            Stage.REFUND,
+            EventType.REFUND_CLAIMED,
+            Verification.REPORTED,
+            reported_status="REFUNDED",
+        ),
+    ]
+    statuses = {"oneclick_status": SourceStatus.OK, "near_rpc": SourceStatus.OK}
+    first = reconcile(evidence, statuses, expected_intent_hashes=[_OUR_INTENT])
+    # Shuffle the input order; the engine sorts internally, so results must match.
+    second = reconcile(list(reversed(evidence)), statuses, expected_intent_hashes=[_OUR_INTENT])
+    assert first.to_dict() == second.to_dict(), "reconciliation is not deterministic"
+
+
+# Additional: an unsupported chain yields UNAVAILABLE, never a failure.
+
+
+def test_unsupported_chain_is_unavailable_not_failure():
+    result = reconcile(
+        [
+            ev(
+                "ev-origin-unsupported",
+                Stage.SOURCE_CHAIN_DEPOSIT,
+                EventType.SOURCE_TX_INCLUDED,
+                Verification.UNAVAILABLE,
+                details={"reason": "UNSUPPORTED_CHAIN"},
+            )
+        ],
+        {"oneclick_status": SourceStatus.OK, "evm_rpc": SourceStatus.UNSUPPORTED},
+    )
+    assert result.stage(Stage.SOURCE_CHAIN_DEPOSIT).state is StageState.UNAVAILABLE
+    assert result.outcome is not OverallOutcome.FAILED_VERIFIED
+    assert result.outcome is not OverallOutcome.FAILED_REPORTED_UNVERIFIED
+    _assert_no_invariant_violated(result)
+
+
+# Additional: a transaction hash alone never establishes a semantic transfer.
+
+
+def test_hash_alone_is_not_a_transfer():
+    """Inclusion and execution of a hash is not the same as an observed transfer."""
+    result = reconcile(
+        [
+            ev(
+                "ev-inc",
+                Stage.DESTINATION_CHAIN_DELIVERY,
+                EventType.DESTINATION_TX_INCLUDED,
+                Verification.CONFIRMED,
+                tx_hash="0xdest",
+            ),
+            ev(
+                "ev-exec",
+                Stage.DESTINATION_CHAIN_DELIVERY,
+                EventType.DESTINATION_TX_EXECUTED,
+                Verification.CONFIRMED,
+                tx_hash="0xdest",
+            ),
+        ],
+        {"evm_rpc": SourceStatus.OK},
+    )
+    assert result.stage(Stage.DESTINATION_CHAIN_DELIVERY).state is not StageState.CONFIRMED
+    assert result.outcome is not OverallOutcome.SETTLED_VERIFIED
+    _assert_no_invariant_violated(result)
+
+
+# Additional: bridge-deposit-credit evidence must name the investigated origin tx.
+
+
+def _bridge_credit(item_id: str, origin_hashes: list[str]):
+    return ev(
+        item_id,
+        Stage.BRIDGE_DEPOSIT_CREDIT,
+        EventType.DEPOSIT_OBSERVED,
+        Verification.CONFIRMED,
+        tx_hash="nearBridgeTx",
+        details={"bridged_from_origin_hashes": origin_hashes, "memo_marker": "BRIDGED_FROM"},
+    )
+
+
+def test_bridge_credit_requires_the_investigated_origin_tx():
+    """A bridge credit naming another deposit's origin tx must not confirm ours."""
+    other = "0x" + "1" * 64
+    ours = "0x" + "2" * 64
+    result = reconcile(
+        [_bridge_credit("ev-bridge-other", [other])],
+        {"near_rpc": SourceStatus.OK},
+        expected_origin_tx_hashes=[ours],
+    )
+    stage = result.stage(Stage.BRIDGE_DEPOSIT_CREDIT)
+    assert stage.state is not StageState.CONFIRMED, (
+        "bridge credit was confirmed from an unrelated deposit's origin transaction"
+    )
+    assert "different origin" in stage.summary.lower()
+    _assert_no_invariant_violated(result)
+
+
+def test_bridge_credit_confirms_when_origin_tx_matches():
+    ours = "0x" + "2" * 64
+    result = reconcile(
+        [_bridge_credit("ev-bridge-ours", [ours])],
+        {"near_rpc": SourceStatus.OK},
+        expected_origin_tx_hashes=[ours],
+    )
+    assert result.stage(Stage.BRIDGE_DEPOSIT_CREDIT).state is StageState.CONFIRMED
+
+
+def test_bridge_credit_without_expectation_is_backwards_compatible():
+    other = "0x" + "1" * 64
+    result = reconcile(
+        [_bridge_credit("ev-bridge-any", [other])],
+        {"near_rpc": SourceStatus.OK},
+    )
+    assert result.stage(Stage.BRIDGE_DEPOSIT_CREDIT).state is StageState.CONFIRMED
+
+
 # THE GATE: the engine must never claim a refund or a destination delivery
 # without the required evidence, across a broad matrix of partial evidence.
 

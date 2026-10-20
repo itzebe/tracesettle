@@ -53,6 +53,15 @@ class Investigation:
     source_reports: list[SourceReport] = field(default_factory=list)
     evidence: list[EvidenceItem] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    #: Intent hashes this investigation is actually about. Populated from the 1Click
+    #: status record (deposit-address path) or the identifier itself (intent-hash
+    #: path). The engine requires settlement evidence to name one of these, so that
+    #: an unrelated intent in the same NEAR transaction cannot confirm settlement.
+    expected_intent_hashes: list[str] = field(default_factory=list)
+    #: Origin-chain transaction hashes this investigation is about. Populated from the
+    #: 1Click status record. The engine requires bridge-credit evidence to name one of
+    #: these (via its BRIDGED_FROM memo) to confirm the bridge-deposit-credit stage.
+    expected_origin_tx_hashes: list[str] = field(default_factory=list)
 
     @property
     def source_statuses(self) -> dict[str, SourceStatus]:
@@ -64,6 +73,7 @@ class Investigation:
             if existing is None or _severity(report.status) > _severity(existing):
                 out[report.source] = report.status
         return out
+
 
 
 def _severity(status: SourceStatus) -> int:
@@ -141,6 +151,13 @@ def _investigate_by_deposit_address(
 
     if status is None:
         return
+
+    # The intent hashes this investigation is about, as reported by 1Click. The
+    # engine requires on-chain settlement evidence to name one of these.
+    inv.expected_intent_hashes = list(status.intent_hashes)
+    # Likewise the origin-chain transaction hashes, used to gate bridge-credit
+    # confirmation on the BRIDGED_FROM memo naming this deposit's origin tx.
+    inv.expected_origin_tx_hashes = list(status.origin_chain_tx_hashes)
 
     if status.deposit_type and status.deposit_type != "ORIGIN_CHAIN":
         inv.notes.append(
@@ -380,6 +397,33 @@ def _verify_refund(
                 f"No public RPC is configured for origin chain '{origin_chain or 'unknown'}', so a "
                 "refund transaction could not be searched for at all."
             )
+            inv.evidence.append(
+                _unavailable(
+                    "ev-refund-unavailable",
+                    Stage.REFUND,
+                    EventType.REFUND_TX_CONFIRMED,
+                    "evm_rpc",
+                    "UNSUPPORTED_CHAIN",
+                    None,
+                    origin_chain,
+                )
+            )
+        elif not refund_candidates and not any(
+            r.source == "evm_rpc" and r.status is SourceStatus.OK for r in inv.source_reports
+        ):
+            # The origin chain has an RPC, but no receipt could be retrieved for the
+            # reported origin transactions. The refund cannot be checked.
+            inv.evidence.append(
+                _unavailable(
+                    "ev-refund-unavailable",
+                    Stage.REFUND,
+                    EventType.REFUND_TX_CONFIRMED,
+                    "evm_rpc",
+                    "SOURCE_UNAVAILABLE",
+                    None,
+                    origin_chain,
+                )
+            )
 
 
 def _unavailable(
@@ -451,6 +495,8 @@ def _investigate_by_intent_hash(inv: Investigation, client: HttpClient) -> None:
         inv.notes.append("The identifier is not a valid base58 intent hash.")
         return
 
+    inv.expected_intent_hashes = [inv.identifier]
+
     report, _ = solver_relay.investigate(inv.identifier, client)
     inv.source_reports.append(report)
     inv.evidence.extend(report.evidence)
@@ -464,4 +510,9 @@ def _investigate_by_intent_hash(inv: Investigation, client: HttpClient) -> None:
 
 def build_result(inv: Investigation):
     """Reconcile an investigation's collected evidence."""
-    return reconcile(inv.evidence, inv.source_statuses)
+    return reconcile(
+        inv.evidence,
+        inv.source_statuses,
+        inv.expected_intent_hashes,
+        inv.expected_origin_tx_hashes,
+    )
