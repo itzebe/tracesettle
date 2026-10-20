@@ -66,6 +66,10 @@ SAFETY_INVARIANTS: dict[str, str] = {
     "hash_commitment_is_not_proof": (
         "A hash commitment is not represented as proof that the committed real-world event is true."
     ),
+    "simulated_evidence_never_confirms": (
+        "Evidence whose provenance is simulated is never treated as confirmation, even if it "
+        "carries a CONFIRMED verification label."
+    ),
 }
 
 
@@ -177,7 +181,12 @@ def _assess_stage(
             conflicting_evidence_ids=tuple(e.id for e in stage_items),
         )
 
-    confirmed = [e for e in stage_items if e.verification is Verification.CONFIRMED]
+    confirmed = [
+        e
+        for e in stage_items
+        if e.verification is Verification.CONFIRMED
+        and e.provenance is not Provenance.SIMULATED
+    ]
     decisive = DECISIVE_EVENT_TYPES.get(stage)
     decisive_confirmed = [e for e in confirmed if e.event_type is decisive]
 
@@ -831,4 +840,11 @@ def _safety_report(
         "no_amount_or_time_correlation": True,
         # A hash commitment is never presented as proof of the committed event.
         "hash_commitment_is_not_proof": True,
+        # Simulated evidence never confirms a stage, regardless of its verification
+        # label. Confirmation is derived from authoritative, non-simulated evidence.
+        "simulated_evidence_never_confirms": not any(
+            s.state is StageState.CONFIRMED
+            and any(e.provenance is Provenance.SIMULATED for e in items if e.id in s.supporting_evidence_ids)
+            for s in stages
+        ),
     }

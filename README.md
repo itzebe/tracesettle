@@ -43,6 +43,8 @@ A stage is confirmed **only** by its decisive evidence, never by a neighbouring
 signal:
 
 - source deposit: the origin-chain transaction executed;
+- bridge deposit credit: an on-chain bridge transfer to `intents.near` carries a
+  `BRIDGED_FROM` memo naming **this** deposit's origin transaction hash;
 - settlement: the investigated intent hash appears in on-chain intent-execution
   event logs (a NEAR transaction merely being included or final is not enough);
 - destination delivery: the expected asset transfer to the expected recipient
@@ -62,7 +64,7 @@ No API keys, no paid services, no database. Python 3.11+ standard library only.
 ```sh
 python3 -m pytest tests/ -q
 ```
-→ `115 passed`.
+→ `135 passed`.
 
 **2. Investigate a real, known-good swap from the command line.**
 
@@ -70,8 +72,8 @@ python3 -m pytest tests/ -q
 python3 -m tracesettle investigate 0xB741c00f6D63b6dEd0cCADA1a82bCBADc38A572B
 ```
 → a Markdown report whose outcome is `SETTLED_VERIFIED`, with the source
-deposit, NEAR settlement, and destination delivery each marked `CONFIRMED` and
-each linking to its real explorer page.
+deposit, bridge deposit credit, NEAR settlement, and destination delivery each
+marked `CONFIRMED` and each linking to its real explorer page.
 
 **3. See conservative handling of an unknown address.**
 
@@ -135,7 +137,7 @@ investigation.py ── orchestrates adapters, correlates via explicit ids
 model.py ── normalized EvidenceItem stream
    │
    ▼
-reconcile.py ── deterministic engine, 8 safety invariants
+reconcile.py ── deterministic engine, 9 safety invariants
    │
    ▼
 report.py ── JSON + Markdown investigation report
@@ -162,7 +164,7 @@ No LLM decides whether a transaction is confirmed.
 | `tracesettle/report.py` | Report generation. |
 | `tracesettle/ui.py` | Standard-library web interface. |
 | `tracesettle/__main__.py` | CLI. |
-| `tests/` | 115 tests. `evidence/raw/` fixtures are real captures. |
+| `tests/` | 135 tests. `evidence/raw/` fixtures are real captures. |
 | `PHASE1_FEASIBILITY.md` | Phase 1 feasibility and API verification. |
 | `docs/official/` | NEAR documentation captured during Phase 1. |
 
@@ -182,7 +184,7 @@ No LLM decides whether a transaction is confirmed.
 ## Tests
 
 ```sh
-python3 -m pytest tests/ -q          # all 115
+python3 -m pytest tests/ -q          # all 135
 python3 -m pytest tests/test_safety_invariants.py -q
 python3 -m pytest tests/test_ui.py -q
 ```

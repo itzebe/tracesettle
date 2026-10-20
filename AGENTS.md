@@ -71,7 +71,7 @@ when evidence is insufficient.
 
 - **Runtime:** Python 3.13 standard library only at runtime. `pytest` and `pyflakes`
   are dev-only. Do not add runtime dependencies (free infra, no DB).
-- **Tests:** `python3 -m pytest tests/ -q` (115 tests). `tests/conftest.py` provides
+- **Tests:** `python3 -m pytest tests/ -q` (135 tests). `tests/conftest.py` provides
   `FakeOpener`, which substitutes only `urllib`'s opener; adapters, engine, report,
   and UI are the real code paths. Real captures are loaded from `evidence/raw/`;
   synthetic fixtures live in `tests/fixtures/synthetic/` and carry a `_provenance`
@@ -118,9 +118,25 @@ when evidence is insufficient.
   unreachable resolves the REFUND stage to `UNAVAILABLE` (outcome
   `REFUND_REPORTED_UNVERIFIED`), so the gap is visible rather than looking like a
   plain unverified report.
-- **Live reproduction (2026-10-19):** deposit address
-  `0xb741c00f6d63b6ded0ccada1a82bcbadc38a572b` reproduces `SETTLED_VERIFIED` with all
-  four stages `CONFIRMED` and REFUND `MISSING`. Note 1Click nests the hash arrays under
-  `swapDetails` in `/v0/status`.
-- **Tests:** `python3 -m pytest tests/ -q` (133 tests).
+- **Tests:** `python3 -m pytest tests/ -q` (135 tests).
+
+## Independent verification (pre-submission)
+
+- **Verified (2026-10-20):** full suite `135 passed`; `pyflakes` clean over
+  `tracesettle/ tests/ demo/`; `compileall` OK; no non-stdlib runtime imports.
+- **Live reproduction confirmed** through the HTTP interface: deposit address
+  `0xb741c00f6d63b6ded0ccada1a82bcbadc38a572b` -> `SETTLED_VERIFIED`, all four stages
+  `CONFIRMED`, REFUND `MISSING`, 17 evidence items, 9 safety invariants all PASS.
+  Note 1Click nests the hash arrays under `swapDetails` in `/v0/status`.
+- **Defect found and fixed in this pass:** `_assess_stage` treated any
+  `Verification.CONFIRMED` item as confirming its stage, even when its provenance was
+  `Provenance.SIMULATED`. A fully simulated evidence set could therefore produce
+  `SETTLED_VERIFIED`. Confirmed items now require
+  `provenance is not Provenance.SIMULATED`. No production adapter emits `SIMULATED`
+  (all emit `Provenance.REAL`), so this was latent, not reachable at runtime, but the
+  invariant is now structural. New safety invariant
+  `simulated_evidence_never_confirms` plus a regression test guard it.
+- **Read-only re-confirmed:** the only non-GET upstream calls are JSON-RPC reads
+  (`eth_getTransactionReceipt`, NEAR `tx`, solver `get_status`). No signing,
+  custody, transaction submission, or recovery code exists.
 

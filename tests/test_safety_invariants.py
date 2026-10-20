@@ -31,6 +31,7 @@ def test_all_documented_invariants_are_present():
         "unavailable_rpc_is_not_failure",
         "no_amount_or_time_correlation",
         "hash_commitment_is_not_proof",
+        "simulated_evidence_never_confirms",
     }
     assert expected == set(SAFETY_INVARIANTS)
 
@@ -278,6 +279,38 @@ def test_simulated_never_produces_verified_outcome():
     )
     assert result.outcome not in {OverallOutcome.SETTLED_VERIFIED, OverallOutcome.REFUND_VERIFIED}
     assert "simulated" in result.summary.lower()
+
+
+def test_simulated_evidence_with_confirmed_label_never_confirms():
+    """Simulated provenance must dominate a CONFIRMED verification label.
+
+    A stage can only be confirmed by authoritative, non-simulated evidence. This
+    holds even when simulated evidence is mislabelled as CONFIRMED, so no future
+    adapter or fixture can accidentally produce a verified outcome from test data.
+    """
+    sim = lambda i, stage, evt: ev(  # noqa: E731
+        i, stage, evt, Verification.CONFIRMED, provenance=Provenance.SIMULATED
+    )
+    result = reconcile(
+        [
+            sim("ev-sim-src", Stage.SOURCE_CHAIN_DEPOSIT, EventType.SOURCE_TX_EXECUTED),
+            sim("ev-sim-bridge", Stage.BRIDGE_DEPOSIT_CREDIT, EventType.DEPOSIT_OBSERVED),
+            sim("ev-sim-settle", Stage.NEAR_SETTLEMENT, EventType.INTENT_EVENT_OBSERVED),
+            sim("ev-sim-dest", Stage.DESTINATION_CHAIN_DELIVERY, EventType.DESTINATION_TRANSFER_OBSERVED),
+        ],
+        {"near_rpc": SourceStatus.OK, "evm_rpc": SourceStatus.OK},
+    )
+    for stage in (
+        Stage.SOURCE_CHAIN_DEPOSIT,
+        Stage.BRIDGE_DEPOSIT_CREDIT,
+        Stage.NEAR_SETTLEMENT,
+        Stage.DESTINATION_CHAIN_DELIVERY,
+    ):
+        assert result.stage(stage).state is not StageState.CONFIRMED, (
+            f"{stage} was confirmed from simulated evidence"
+        )
+    assert result.outcome is not OverallOutcome.SETTLED_VERIFIED
+    _assert_no_invariant_violated(result)
 
 
 # Additional: the engine never invents a failure outcome without confirmed failure.
