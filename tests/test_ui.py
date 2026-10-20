@@ -89,6 +89,10 @@ def test_index_page_renders():
     assert "default-src 'none'" in headers.get("Content-Security-Policy", "")
     # Responsive viewport declared.
     assert "width=device-width" in html
+    # The narrow-screen rule hides a column by class, not by position, so adding
+    # an evidence column can never silently hide the wrong one.
+    assert ".col-secondary { display: none; }" in html
+    assert "nth-child" not in html
     # No fabricated live-status badges.
     assert "LIVE" not in html
     # The result summary surfaces the supplied identifier and its type, so a
@@ -137,6 +141,13 @@ def test_investigate_success_end_to_end():
     blob = body.decode().lower()
     for needle in ("x-api-key", "api_key", "authorization", "bearer ", "private_key"):
         assert needle not in blob
+    # Every evidence item carries a verification method, so a reader can see how
+    # each classification was reached rather than only what was concluded.
+    items = payload["data"]["evidence"]
+    assert items
+    assert all(e.get("verification_method") for e in items)
+    # The Markdown export states the method in its own column.
+    assert "| Method |" in payload["markdown"]
 
 
 def test_investigate_not_found_is_graceful():

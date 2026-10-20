@@ -98,7 +98,7 @@ _INDEX_HTML = """<!DOCTYPE html>
   @media (max-width: 640px) {
     h1 { font-size: 17px; }
     table { font-size: 12px; }
-    th:nth-child(6), td:nth-child(6) { display: none; }
+    .col-secondary { display: none; }
   }
 </style>
 </head>
@@ -204,7 +204,8 @@ function render(d) {
     String(a.timestamp || '').localeCompare(String(b.timestamp || '')) || a.id.localeCompare(b.id));
   if (evidence.length) {
     let rows = '<table><thead><tr><th>Stage</th><th>Event</th><th>Source</th><th>Class</th>' +
-      '<th>Method</th><th>Hash</th><th>Timestamp</th><th>Record</th></tr></thead><tbody>';
+      '<th>Method</th><th>Hash</th><th class="col-secondary">Timestamp</th>' +
+      '<th>Record</th></tr></thead><tbody>';
     evidence.forEach(e => {
       const link = e.evidence_url
         ? '<a href="' + esc(e.evidence_url) + '" target="_blank" rel="noopener noreferrer">open</a>'
@@ -212,7 +213,8 @@ function render(d) {
       rows += '<tr><td>' + esc(e.stage) + '</td><td>' + esc(e.event_type) + '</td><td>' +
         esc(e.source) + '</td><td>' + pill(e.verification) + '</td><td>' +
         esc(e.verification_method || '') + '</td><td><code>' +
-        esc(e.tx_hash || '') + '</code></td><td>' + esc(e.timestamp || '') + '</td><td>' + link +
+        esc(e.tx_hash || '') + '</code></td><td class="col-secondary">' +
+        esc(e.timestamp || '') + '</td><td>' + link +
         '</td></tr>';
     });
     rows += '</tbody></table>';
