@@ -162,3 +162,30 @@ when evidence is insufficient.
   README carries the current count (136), a runtime-dependencies section, and the
   "no real refunded transaction independently verified yet" limitation.
 
+## Judge-ready demonstration pass
+
+- **Second and third live cases verified (2026-10-20).** Both were taken from the
+  public NEAR Intents explorer's embedded recent-transactions feed (a traceable
+  source), then re-checked against 1Click status and NEAR RPC directly:
+  - `bc1qjrkwt3v42j4am6csmkaelmpwd9shufl4laxkxm` — a real **refunded** BTC→TRON
+    swap. Outcome `REFUND_REPORTED_UNVERIFIED`; refund is `UNAVAILABLE`
+    (`UNSUPPORTED_CHAIN`, Bitcoin has no configured RPC), deposit credit
+    `REPORTED`, destination `MISSING`, NEAR settlement `CONFIRMED`. This is now
+    demo Case 3 and a README reproduction step.
+  - `494d57e5e385f36b1b4953a863f4c53785e000b9e72b61ac7fe4be47bdbed7ea` — an
+    ETH→Base swap whose destination RPC returns HTTP 403, producing
+    `DELIVERY_UNVERIFIED` with `UNAVAILABLE` stages. Not added to the demo
+    because the 403 is an archive-gating artefact, not a stable capability test.
+- **Free RPC archive gating (limitation, not a defect).** `publicnode.com` free
+  endpoints return HTTP 403 (`Archive requests require a personal token`) for
+  `eth_getTransactionReceipt` on some chains (observed on `base`, `arb`). The
+  client classifies this as `UNAUTHORIZED` → the stage is `UNAVAILABLE`, never
+  `FAILED`. This is exactly the honest-uncertainty behaviour the tool intends.
+  The primary demo case is unaffected (its ETH RPC answers normally).
+- **UI change (justified, minimal):** the Result panel now shows the supplied
+  identifier, its detected type, and the supported path, which Phase 4A requires.
+  `tests/test_ui.py::test_index_page_renders` asserts those labels are present.
+- **Demo now shows three cases** (verified / reported-only / reported refund) and
+  derives each explanation from the actual result, printing an honest NOTE if a
+  run does not reproduce the expected outcome.
+

@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
-"""TRACESETTLE demonstration: one verified investigation, one incomplete one.
+"""TRACESETTLE demonstration: verified, incomplete, and refund cases.
 
-This is a read-only walkthrough. It runs two investigations through the real
+This is a read-only walkthrough. It runs three investigations through the real
 adapter/engine/report code paths:
 
   1. A real, independently verified ETH->USDC swap, showing all four confirmed
      stages and their decisive evidence, ending in SETTLED_VERIFIED.
-  2. An intent-hash-only lookup, which cannot reach the whole path, ending in
-     SETTLED_REPORTED_ONLY. It shows the tool refusing to overstate what it can
-     establish.
+  2. An intent-hash-only lookup, which cannot reach the whole path. It shows the
+     tool refusing to overstate what it can establish.
+  3. A real, refunded Bitcoin->TRON swap. It shows the tool reporting a refund
+     that it cannot independently verify (the origin chain has no configured
+     RPC), keeping REPORTED, MISSING and UNAVAILABLE distinct.
 
-The verified case uses live public endpoints when they are reachable. If the
-network is unavailable, the script says so plainly and does not fabricate a
-result. Nothing here signs, submits, or moves funds, and no key is requested.
+The live cases use public endpoints when they are reachable. If the network is
+unavailable, the script says so plainly and does not fabricate a result. Nothing
+here signs, submits, or moves funds, and no key is requested.
 
 Usage:
     python3 demo/demonstrate.py
@@ -34,6 +36,10 @@ VERIFIED_DEPOSIT_ADDRESS = "0xB741c00f6D63b6dEd0cCADA1a82bCBADc38A572B"
 #: The intent hash of that same swap. On its own it can only reach the service
 #: statement, because no reverse lookup from intent hash to deposit address exists.
 INCOMPLETE_INTENT_HASH = "7ypUiXpjHmDoFFzo8nRWvY4BMfcKR5YkF5Cez28N94dG"
+#: A real refunded swap (BTC origin -> TRON destination) found on the public
+#: NEAR Intents explorer. Its origin chain has no configured RPC, so the refund
+#: can be reported but not independently verified.
+REFUNDED_DEPOSIT_ADDRESS = "bc1qjrkwt3v42j4am6csmkaelmpwd9shufl4laxkxm"
 
 RULE = "=" * 78
 
@@ -130,8 +136,32 @@ def main() -> int:
         "  invent the missing stages."
     )
 
+    # --- Case 3: a real refund that cannot be independently verified ---------
     print(f"\n{RULE}")
-    print("Neither case signs, submits, or moves funds. No key was requested.")
+    print("CASE 3 - a real refunded swap, reported but not independently verifiable")
+    print(f"identifier: {REFUNDED_DEPOSIT_ADDRESS}\n")
+    inv3 = investigate(REFUNDED_DEPOSIT_ADDRESS, client)
+    result3 = build_result(inv3)
+    _show(result3)
+    print(f"\n  summary: {result3.summary}")
+    if result3.outcome.value == "REFUND_REPORTED_UNVERIFIED":
+        print(
+            "\n  A refund is reported by the upstream service, but the origin chain has no\n"
+            "  configured public RPC, so the refund transaction cannot be checked on-chain.\n"
+            "  The tool keeps the states apart: the deposit credit is REPORTED (not\n"
+            "  independently confirmed), the refund is UNAVAILABLE (a source problem, not\n"
+            "  a failed refund), and destination delivery is MISSING. It does not claim the\n"
+            "  refund was verified, and it does not claim the refund failed."
+        )
+    else:
+        print(
+            f"\n  NOTE: this run returned {result3.outcome.value}, not the expected\n"
+            "  REFUND_REPORTED_UNVERIFIED. An upstream source may be unreachable or the\n"
+            "  record may have changed. The states above are what was actually observed."
+        )
+
+    print(f"\n{RULE}")
+    print("No case signs, submits, or moves funds. No key was requested.")
     print(RULE)
     return 0
 

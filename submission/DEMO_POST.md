@@ -26,6 +26,13 @@ Then it shows the opposite: given only an intent hash, it refuses to overstate t
 result. It returns SETTLED_REPORTED_ONLY and says exactly which stages it cannot
 reach and why.
 
+Then a real refunded swap: the service reports a refund, but the origin chain
+(Bitcoin) has no configured RPC, so the refund cannot be checked on-chain. The
+tool returns REFUND_REPORTED_UNVERIFIED and keeps three states apart — the deposit
+credit is REPORTED, the refund is UNAVAILABLE (a missing source, not a failed
+refund), and delivery is MISSING. It does not claim the refund was verified, and
+it does not claim the refund failed.
+
 The part I care about most: a reported failure is not treated as proof funds were
 lost, a reported refund of zero is not treated as proof no refund can occur, and a
 transaction hash is never treated as proof that the event it describes is true.
@@ -44,9 +51,10 @@ Notes for the human:
 - Do not claim cryptographic proof. The bridge credit is strong, identifier-based,
   on-chain corroboration; the memo is the bridge's own statement of which origin
   transaction it credited.
-- Do not claim a live refund was verified. No real refunded transaction has been
-  independently verified yet; refund handling is covered by labelled synthetic
-  tests only. The demo does not show a refund.
+- Do not claim a live refund was verified. The demo includes a real refunded swap,
+  but its origin chain has no configured RPC, so the refund stays UNAVAILABLE
+  rather than CONFIRMED. The tool never claims a refund is verified without the
+  refund transaction.
 - The demo's verified case is a real swap, but it depends on public endpoints being
   reachable at recording time. If a source is down the tool says so rather than
   showing a cached result, so record the demo while the endpoints respond.

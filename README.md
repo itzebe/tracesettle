@@ -107,7 +107,19 @@ python3 -m tracesettle investigate 7ypUiXpjHmDoFFzo8nRWvY4BMfcKR5YkF5Cez28N94dG 
 → outcome `SETTLED_REPORTED_ONLY`: the intent hash path can read a service
 statement but cannot reach the whole path, and the report says so.
 
-**5. Run the web interface.**
+**5. See a real refund that is reported but cannot be independently verified.**
+
+```sh
+python3 -m tracesettle investigate bc1qjrkwt3v42j4am6csmkaelmpwd9shufl4laxkxm
+```
+→ outcome `REFUND_REPORTED_UNVERIFIED`. The upstream service reports a refund
+(the swap's origin chain is Bitcoin, for which no public RPC is configured), so
+the report keeps three states distinct: the deposit credit is `REPORTED`, the
+refund is `UNAVAILABLE` (a missing source, not a failed refund), and destination
+delivery is `MISSING`. It does not claim the refund was verified, and it does not
+claim the refund failed.
+
+**6. Run the web interface.**
 
 ```sh
 python3 -m tracesettle serve --host 127.0.0.1 --port 8000
@@ -115,6 +127,16 @@ python3 -m tracesettle serve --host 127.0.0.1 --port 8000
 → open `http://127.0.0.1:8000`, enter a deposit address, press **Investigate**,
 and read the evidence in chronological order with links to every source record.
 Copy or download the report as JSON or Markdown.
+
+**7. Or run all three cases at once.**
+
+```sh
+python3 demo/demonstrate.py
+```
+→ prints the verified swap, the intent-hash-only lookup, and the real refunded
+swap side by side, with the decisive evidence for each confirmed stage. It uses
+live public endpoints; if one is unreachable it says so and does not fabricate a
+result.
 
 ## Supported input and honest limits
 
@@ -132,9 +154,11 @@ Other limits, stated in every report:
 - A reported failure is not proof funds were lost.
 - A reported refund of zero is not proof no refund can occur.
 - Simulated test evidence is always labelled.
-- **No real refunded transaction has yet been independently verified.** Refund
-  handling is exercised only against clearly-labelled synthetic fixtures, because
-  no completed-refund sample was captured during feasibility work.
+- **No refund has yet been independently verified.** A real refunded swap is
+  included in the demo (`bc1qjrkwt3v42j4am6csmkaelmpwd9shufl4laxkxm`), but its
+  origin chain is Bitcoin, which has no configured RPC, so the refund stays
+  `UNAVAILABLE` rather than `CONFIRMED`. Synthetic fixtures cover the
+  `CONFIRMED`-refund classification path.
 - The bridge credit is confirmed from an on-chain `BRIDGED_FROM` memo that names
   the origin transaction hash. That memo is emitted by the bridge service, so it is
   strong identifier-based, on-chain corroboration — **not** cryptographic proof of

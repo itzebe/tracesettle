@@ -150,9 +150,13 @@ function render(d) {
       'At least one item below is simulated test data, not a live transaction.</div>';
   }
 
+  const inp = d.input || {};
   let summary = '<div class="kv">' +
     '<dt>Outcome</dt><dd class="outcome">' + esc(d.outcome) + '</dd>' +
     '<dt>Last confirmed stage</dt><dd>' + esc(d.last_confirmed_stage || 'none') + '</dd>' +
+    '<dt>Supplied identifier</dt><dd><code>' + esc(inp.identifier || '') + '</code></dd>' +
+    '<dt>Identifier type</dt><dd>' + esc(inp.identifier_type || 'unknown') + '</dd>' +
+    '<dt>Supported path</dt><dd>' + esc(d.supported_path || 'unknown') + '</dd>' +
     '<dt>Investigation</dt><dd><code>' + esc(d.investigation_id) + '</code></dd>' +
     '<dt>Observed at</dt><dd>' + esc(d.created_at) + '</dd>' +
     '</div>';

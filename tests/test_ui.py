@@ -91,6 +91,11 @@ def test_index_page_renders():
     assert "width=device-width" in html
     # No fabricated live-status badges.
     assert "LIVE" not in html
+    # The result summary surfaces the supplied identifier and its type, so a
+    # judge can see exactly what was investigated and under what interpretation.
+    assert "Supplied identifier" in html
+    assert "Identifier type" in html
+    assert "Supported path" in html
 
 
 def test_health_endpoint():

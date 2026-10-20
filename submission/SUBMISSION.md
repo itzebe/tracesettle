@@ -41,8 +41,9 @@ report. NEAR is central: the tool reads NEAR RPC transaction and DIP-4
 intent-execution event logs to confirm settlement by finding the investigated
 intent hash on-chain, and reads the bridge transfer memo to link an origin-chain
 transaction to the NEAR deposit credit by an explicit identifier rather than by
-amount or timestamp. It is deterministic, standard-library only, and never signs,
-submits, or moves funds.
+amount or timestamp. It keeps "missing" and "unavailable" distinct from "failed":
+a refund it cannot check stays UNAVAILABLE, never "no refund". It is deterministic,
+standard-library only, and never signs, submits, or moves funds.
 
 ## Send command (only after confirmation)
 
