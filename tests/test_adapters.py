@@ -9,12 +9,13 @@ from __future__ import annotations
 import pytest
 
 from tracesettle import config
-from tracesettle.adapters import evm_rpc, near_rpc, oneclick, solver_relay
+from tracesettle.adapters import btc_rpc, evm_rpc, near_rpc, oneclick, solver_relay
 from tracesettle.assets import parse_asset_id
 from tracesettle.model import SourceStatus, Verification
 
 from conftest import (
     FakeOpener,
+    RAW_DIR,
     REAL_DEPOSIT_ADDRESS,
     REAL_DESTINATION_TX,
     REAL_INTENT_HASH,
@@ -321,6 +322,392 @@ def test_evm_reverted_receipt_is_confirmed_revert(opener: FakeOpener):
     assert data.executed_successfully is False
     exec_items = [i for i in report.evidence if i.event_type.value == "SOURCE_TX_EXECUTED"]
     assert exec_items[0].reported_status == "REVERTED"
+
+
+# --- Bitcoin (Esplora) adapter ---------------------------------------------
+
+BTC_REFUND_TXID = "377b55cbc30363d991838b4803c8c83b231d0193e4b31f8e527728520469721f"
+BTC_DEPOSIT_TXID = "9a80de61146553e809f2e57a7b789ae5e64de7aa67fa06009881eac638051226"
+#: The address the real refund transaction actually pays.
+BTC_REFUND_PAYS = "bc1q77w5l5fhkrsq7m05eykug59ks7r8tf6ptmdrgw"
+#: The swap's BTC deposit address, which the refund transaction does NOT pay.
+BTC_DEPOSIT_ADDRESS = "bc1qjrkwt3v42j4am6csmkaelmpwd9shufl4laxkxm"
+
+
+def test_btc_fetch_tx_real_refund_fixture(opener: FakeOpener):
+    opener.json("GET", "mempool.space/api/tx", load_raw("btc_tx_refund.json"))
+    report, data = btc_rpc.fetch_tx(BTC_REFUND_TXID, client_for(opener))
+    assert report.status is SourceStatus.OK
+    assert data is not None
+    assert data.txid == BTC_REFUND_TXID
+    assert data.confirmed is True
+    assert data.block_height == 972263
+
+
+def test_btc_payout_match_requires_exact_address(opener: FakeOpener):
+    opener.json("GET", "mempool.space/api/tx", load_raw("btc_tx_refund.json"))
+    _, data = btc_rpc.fetch_tx(BTC_REFUND_TXID, client_for(opener))
+    assert btc_rpc.match_expected_payout(data, BTC_REFUND_PAYS).matched is True
+    # The deposit address is not paid by the refund transaction, so it must not match.
+    assert btc_rpc.match_expected_payout(data, BTC_DEPOSIT_ADDRESS).matched is False
+
+
+def test_btc_unconfirmed_payout_never_matches():
+    unconfirmed = btc_rpc.BtcTxData(
+        txid="x", found=True, confirmed=False,
+        outputs=[btc_rpc.BtcOutput(address=BTC_REFUND_PAYS, value=12884, script_type="v0_p2wpkh", index=0)],
+    )
+    match = btc_rpc.match_expected_payout(unconfirmed, BTC_REFUND_PAYS)
+    assert match.matched is False
+    assert "not yet confirmed" in match.reason
+
+
+def test_btc_missing_address_is_not_a_match():
+    data = btc_rpc.BtcTxData(txid="x", found=True, confirmed=True, outputs=[])
+    match = btc_rpc.match_expected_payout(data, None)
+    assert match.matched is False
+    assert "unknown" in match.reason
+
+
+def test_btc_not_found_is_not_failure(opener: FakeOpener):
+    opener.http_error("GET", "mempool.space/api/tx", 404)
+    report, data = btc_rpc.fetch_tx(BTC_REFUND_TXID, client_for(opener))
+    assert report.status is SourceStatus.NOT_FOUND
+    assert data is None
+    assert "not proof that no refund occurred" in report.message
+
+
+def test_btc_falls_back_to_second_host(opener: FakeOpener):
+    opener.network_error("GET", "mempool.space/api/tx")
+    opener.json("GET", "blockstream.info/api/tx", load_raw("btc_tx_refund.json"))
+    report, data = btc_rpc.fetch_tx(BTC_REFUND_TXID, client_for(opener))
+    assert report.status is SourceStatus.OK
+    assert data is not None
+    assert "blockstream.info" in (report.endpoint or "")
+
+
+def test_btc_both_hosts_down_is_unavailable(opener: FakeOpener):
+    opener.timeout("GET", "mempool.space/api/tx")
+    opener.timeout("GET", "blockstream.info/api/tx")
+    report, data = btc_rpc.fetch_tx(BTC_REFUND_TXID, client_for(opener))
+    assert report.status is SourceStatus.TIMEOUT
+    assert data is None
+
+
+def test_btc_mismatched_txid_is_rejected(opener: FakeOpener):
+    payload = load_raw("btc_tx_refund.json")
+    payload["txid"] = "0" * 64
+    opener.json("GET", "mempool.space/api/tx", payload)
+    # The adapter falls through to the fallback host; register the same bad shape
+    # there so both hosts are exhausted and the result is MALFORMED.
+    opener.json("GET", "blockstream.info/api/tx", payload)
+    report, data = btc_rpc.fetch_tx(BTC_REFUND_TXID, client_for(opener))
+    assert report.status is SourceStatus.MALFORMED
+    assert data is None
+
+
+def test_btc_address_history_lookup(opener: FakeOpener):
+    opener.json("GET", "mempool.space/api/address", [load_raw("btc_tx_refund.json")])
+    report, txs = btc_rpc.fetch_address_txs(BTC_REFUND_PAYS, client_for(opener))
+    assert report.status is SourceStatus.OK
+    assert len(txs) == 1
+    assert txs[0].txid == BTC_REFUND_TXID
+
+
+def test_btc_refund_evidence_requires_confirmed(opener: FakeOpener):
+    opener.json("GET", "mempool.space/api/tx", load_raw("btc_tx_refund.json"))
+    _, data = btc_rpc.fetch_tx(BTC_REFUND_TXID, client_for(opener))
+    match = btc_rpc.match_expected_payout(data, BTC_REFUND_PAYS)
+    item = btc_rpc.refund_payout_evidence(data, match, "11746")
+    assert item.verification is Verification.CONFIRMED
+    assert item.details["confirmed"] is True
+    # Amounts carry an explicit unit; the recipient's output is distinguished from
+    # the transaction's total output value and the network fee.
+    assert item.details["amount_unit"] == "satoshi"
+    assert item.details["recipient_output_sats"] == 12884
+    assert item.details["total_output_sats"] == 12884 + 37401503
+    assert item.details["total_output_sats"] != item.details["recipient_output_sats"]
+    # Identity was not validated here (no raw bytes fetched), so the level must be
+    # EXPLORER_REPORTED, never SCRIPT_VALIDATED, despite the script matching.
+    assert item.details["verification_level"] == "EXPLORER_REPORTED"
+
+
+def test_btc_raw_tx_retrieval_returns_hex(opener: FakeOpener):
+    opener.raw(
+        "GET", f"mempool.space/api/tx/{BTC_REFUND_TXID}/hex",
+        (RAW_DIR / "btc_tx_refund.hex").read_bytes(),
+    )
+    report, raw = btc_rpc.fetch_raw_tx(BTC_REFUND_TXID, client_for(opener))
+    assert report.status is SourceStatus.OK
+    assert raw is not None and raw.startswith("02000000")
+
+
+def test_btc_raw_tx_not_found_is_not_failure(opener: FakeOpener):
+    opener.http_error("GET", "mempool.space/api/tx", 404)
+    report, raw = btc_rpc.fetch_raw_tx(BTC_REFUND_TXID, client_for(opener))
+    assert report.status is SourceStatus.NOT_FOUND
+    assert raw is None
+
+
+def test_btc_outspend_reports_spending_transaction(opener: FakeOpener):
+    opener.json("GET", "mempool.space/api/tx", load_raw("btc_outspend_deposit_vout0.json"))
+    report, outspend = btc_rpc.fetch_outspend(BTC_REFUND_TXID, 0, client_for(opener))
+    assert report.status is SourceStatus.OK
+    assert outspend is not None
+    assert outspend.spent is True
+    assert outspend.txid == "3ae5a12f1eff2b7ea795a905931f1f18defc835ddae59faa5b5d2e4af393c0c1"
+
+
+def test_btc_outspend_unspent(opener: FakeOpener):
+    opener.json("GET", "mempool.space/api/tx", load_raw("btc_outspend_deposit_vout1.json"))
+    report, outspend = btc_rpc.fetch_outspend(BTC_REFUND_TXID, 1, client_for(opener))
+    assert report.status is SourceStatus.OK
+    assert outspend is not None and outspend.spent is False
+
+
+def test_btc_outspend_both_hosts_down_is_unavailable(opener: FakeOpener):
+    opener.timeout("GET", "mempool.space/api/tx")
+    opener.timeout("GET", "blockstream.info/api/tx")
+    report, outspend = btc_rpc.fetch_outspend(BTC_REFUND_TXID, 0, client_for(opener))
+    assert report.status is SourceStatus.TIMEOUT
+    assert outspend is None
+
+
+def test_btc_address_history_complete_when_counts_match(opener: FakeOpener):
+    opener.json("GET", f"mempool.space/api/address/{BTC_REFUND_PAYS}/txs", [load_raw("btc_tx_refund.json")])
+    opener.json(
+        "GET", f"mempool.space/api/address/{BTC_REFUND_PAYS}",
+        {"chain_stats": {"tx_count": 1}, "mempool_stats": {"tx_count": 0}},
+    )
+    report, history = btc_rpc.fetch_address_history(BTC_REFUND_PAYS, client_for(opener))
+    assert report.status is SourceStatus.OK
+    assert history.complete is True
+    assert history.reported_tx_count == 1
+    assert len(history.txs) == 1
+
+
+def test_btc_address_history_incomplete_when_counts_differ(opener: FakeOpener):
+    opener.json("GET", f"mempool.space/api/address/{BTC_REFUND_PAYS}/txs", [load_raw("btc_tx_refund.json")])
+    opener.json(
+        "GET", f"mempool.space/api/address/{BTC_REFUND_PAYS}",
+        {"chain_stats": {"tx_count": 500}, "mempool_stats": {"tx_count": 0}},
+    )
+    report, history = btc_rpc.fetch_address_history(BTC_REFUND_PAYS, client_for(opener))
+    assert report.status is SourceStatus.OK
+    assert history.complete is False
+    assert "incomplete" in history.reason
+
+
+def test_btc_address_history_unknown_count_is_incomplete(opener: FakeOpener):
+    # The stats call fails but the history page still answers: completeness cannot
+    # be established, so it must be reported as incomplete rather than complete.
+    opener.json("GET", f"mempool.space/api/address/{BTC_REFUND_PAYS}/txs", [load_raw("btc_tx_refund.json")])
+    opener.http_error("GET", f"mempool.space/api/address/{BTC_REFUND_PAYS}", 500)
+    report, history = btc_rpc.fetch_address_history(BTC_REFUND_PAYS, client_for(opener))
+    assert report.status is SourceStatus.OK
+    assert history.complete is False
+    assert history.reported_tx_count is None
+
+
+def test_btc_address_history_count_match_but_pagination_unfinished_is_incomplete(opener: FakeOpener):
+    # A full page (25 entries) with the count reached would previously be read as
+    # complete even though the page chain had not ended. The page budget stopping
+    # mid-chain must be reported as incomplete.
+    page = [load_raw("btc_tx_refund.json") for _ in range(25)]
+    for i, entry in enumerate(page):
+        entry["txid"] = f"{i:064x}"
+    opener.json("GET", f"mempool.space/api/address/{BTC_REFUND_PAYS}/txs", page)
+    opener.json(
+        "GET", f"mempool.space/api/address/{BTC_REFUND_PAYS}",
+        {"chain_stats": {"tx_count": 25}, "mempool_stats": {"tx_count": 0}},
+    )
+    report, history = btc_rpc.fetch_address_history(BTC_REFUND_PAYS, client_for(opener), max_pages=1)
+    assert report.status is SourceStatus.OK
+    assert history.complete is False
+    assert "pagination did not run to completion" in history.reason
+
+
+def test_btc_address_history_page_failure_midway_is_incomplete(opener: FakeOpener):
+    # First page is full (25 entries, forcing a second page), the second page fails.
+    page = [load_raw("btc_tx_refund.json") for _ in range(25)]
+    for i, entry in enumerate(page):
+        entry["txid"] = f"{i:064x}"
+    opener.json("GET", f"mempool.space/api/address/{BTC_REFUND_PAYS}/txs", page)
+    opener.http_error("GET", f"mempool.space/api/address/{BTC_REFUND_PAYS}/txs/chain/", 500)
+    opener.json(
+        "GET", f"mempool.space/api/address/{BTC_REFUND_PAYS}",
+        {"chain_stats": {"tx_count": 40}, "mempool_stats": {"tx_count": 0}},
+    )
+    report, history = btc_rpc.fetch_address_history(BTC_REFUND_PAYS, client_for(opener))
+    assert report.status is SourceStatus.OK
+    assert history.complete is False
+    assert "incomplete" in history.reason
+
+
+def test_btc_address_history_multi_page_natural_end_is_complete(opener: FakeOpener):
+    # Two pages: the first full (25), the second short (5). The chain ends naturally
+    # and the count is reached, so the history is complete.
+    page1 = [load_raw("btc_tx_refund.json") for _ in range(25)]
+    for i, entry in enumerate(page1):
+        entry["txid"] = f"{i:064x}"
+    page2 = [load_raw("btc_tx_refund.json") for _ in range(5)]
+    for i, entry in enumerate(page2):
+        entry["txid"] = f"{100 + i:064x}"
+    # The /txs/chain needle must be registered before the plain /txs needle, since
+    # route matching is substring-based and in order.
+    opener.json("GET", f"mempool.space/api/address/{BTC_REFUND_PAYS}/txs/chain/", page2)
+    opener.json("GET", f"mempool.space/api/address/{BTC_REFUND_PAYS}/txs", page1)
+    opener.json(
+        "GET", f"mempool.space/api/address/{BTC_REFUND_PAYS}",
+        {"chain_stats": {"tx_count": 30}, "mempool_stats": {"tx_count": 0}},
+    )
+    report, history = btc_rpc.fetch_address_history(BTC_REFUND_PAYS, client_for(opener))
+    assert report.status is SourceStatus.OK
+    assert history.complete is True
+    assert len(history.txs) == 30
+    assert history.pages_fetched == 2
+
+
+def test_btc_script_level_match_is_recorded(opener: FakeOpener):
+    opener.json("GET", "mempool.space/api/tx", load_raw("btc_tx_refund.json"))
+    _, data = btc_rpc.fetch_tx(BTC_REFUND_TXID, client_for(opener))
+    match = btc_rpc.match_expected_payout(data, BTC_REFUND_PAYS)
+    assert match.details["script_matched"] is True
+    assert match.details["recipient_script_verified"] is True
+
+
+def test_btc_to_candidate_projects_fields(opener: FakeOpener):
+    opener.json("GET", "mempool.space/api/tx", load_raw("btc_tx_refund.json"))
+    _, data = btc_rpc.fetch_tx(BTC_REFUND_TXID, client_for(opener))
+    candidate = btc_rpc.to_candidate(data, BTC_REFUND_PAYS, "history")
+    assert candidate.pays_recipient is True
+    assert candidate.recipient_script_matched is True
+    assert candidate.observed_sats == 12884
+    assert candidate.discovery == "history"
+
+
+def test_btc_refund_amount_denomination_edge_cases():
+    """Amount semantics: explicit satoshi units, no mixing with BTC, fee excluded.
+
+    The decisive refund evidence must state amounts in satoshis, keep the
+    recipient's output separate from the transaction's total output value, and
+    never fold the network fee into the refunded value.
+    """
+    # Real refund transaction: 12884 sats to the refund address, 37401503 sats to a
+    # change output, 362 sats fee.
+    data = btc_rpc.BtcTxData(
+        txid="f" * 64,
+        found=True,
+        confirmed=True,
+        fee=362,
+        outputs=[
+            btc_rpc.BtcOutput(address=BTC_REFUND_PAYS, value=12884, script_type="v0_p2wpkh", index=0),
+            btc_rpc.BtcOutput(address="bc1qother", value=37401503, script_type="v0_p2wpkh", index=1),
+        ],
+    )
+    match = btc_rpc.match_expected_payout(data, BTC_REFUND_PAYS)
+    item = btc_rpc.refund_payout_evidence(data, match, "11746")
+    details = item.details
+    assert details["amount_unit"] == "satoshi"
+    assert details["recipient_output_sats"] == 12884
+    assert details["total_output_sats"] == 12884 + 37401503
+    assert details["fee_sats"] == 362
+    # The fee is not counted as refunded value: the recipient output is the output
+    # value only, never the output plus the fee.
+    assert details["recipient_output_sats"] != details["recipient_output_sats"] + details["fee_sats"]
+    # A reported amount that differs is disclosed, never silently reconciled.
+    assert any("differ" in lim for lim in item.limitations)
+
+
+def test_btc_refund_evidence_without_reported_amount_has_no_denomination_guess():
+    """With no reported amount, no satoshi figure is invented for the expectation."""
+    data = btc_rpc.BtcTxData(
+        txid="f" * 64,
+        found=True,
+        confirmed=True,
+        outputs=[btc_rpc.BtcOutput(address=BTC_REFUND_PAYS, value=12884, script_type="v0_p2wpkh", index=0)],
+    )
+    match = btc_rpc.match_expected_payout(data, BTC_REFUND_PAYS)
+    item = btc_rpc.refund_payout_evidence(data, match, None)
+    assert item.details["expected_amount_sats"] is None
+    # The observed on-chain value is still reported, with its unit.
+    assert item.details["recipient_output_sats"] == 12884
+    assert item.details["amount_unit"] == "satoshi"
+
+
+def test_btc_refund_evidence_states_its_verification_method():
+    """The decisive refund evidence records how its level was reached."""
+    data = btc_rpc.BtcTxData(
+        txid="f" * 64,
+        found=True,
+        confirmed=True,
+        identity_validated=True,
+        outputs=[
+            btc_rpc.BtcOutput(
+                address=BTC_REFUND_PAYS, value=12884, script_type="v0_p2wpkh", index=0
+            )
+        ],
+    )
+    match = btc_rpc.match_expected_payout(data, BTC_REFUND_PAYS)
+    item = btc_rpc.refund_payout_evidence(data, match, None)
+    assert item.verification_method
+    assert "recomputed txid" in item.verification_method
+
+
+def test_btc_refund_evidence_without_identity_validation_says_so():
+    """Without local identity validation the method must not claim it."""
+    data = btc_rpc.BtcTxData(
+        txid="f" * 64,
+        found=True,
+        confirmed=True,
+        identity_validated=False,
+        outputs=[
+            btc_rpc.BtcOutput(
+                address=BTC_REFUND_PAYS, value=12884, script_type="v0_p2wpkh", index=0
+            )
+        ],
+    )
+    match = btc_rpc.match_expected_payout(data, BTC_REFUND_PAYS)
+    item = btc_rpc.refund_payout_evidence(data, match, None)
+    assert "explorer-reported" in (item.verification_method or "")
+
+
+def test_btc_refund_unconfirmed_transaction_is_not_confirmed_evidence():
+    """An unconfirmed payout yields a non-CONFIRMED classification, never a refund."""
+    data = btc_rpc.BtcTxData(
+        txid="f" * 64,
+        found=True,
+        confirmed=False,
+        outputs=[btc_rpc.BtcOutput(address=BTC_REFUND_PAYS, value=12884, script_type="v0_p2wpkh", index=0)],
+    )
+    match = btc_rpc.match_expected_payout(data, BTC_REFUND_PAYS)
+    assert match.matched is False
+    assert "not yet confirmed" in match.reason
+
+
+# --- NEAR RPC: intent withdrawal extraction ---------------------------------
+
+
+def test_near_rpc_extracts_intent_withdrawal_recipient(opener: FakeOpener):
+    opener.json("POST", "rpc.fastnear", load_raw("near_rpc_tx_btc_settlement.json"))
+    report, data = near_rpc.fetch_tx("83tjFcjTXfVxRVnBTeYyWmcww7CUWwEpcVmkGeHAjxL1", client_for(opener))
+    assert report.status is SourceStatus.OK
+    withdrawals = data.intent_withdrawals
+    assert withdrawals and withdrawals[0].recipient == "btc:bc1q77w5l5fhkrsq7m05eykug59ks7r8tf6ptmdrgw"
+    item = [i for i in report.evidence if i.event_type.value == "INTENT_WITHDRAWAL_OBSERVED"]
+    assert item and item[0].details["withdrawal_recipients"] == [
+        "btc:bc1q77w5l5fhkrsq7m05eykug59ks7r8tf6ptmdrgw"
+    ]
+
+
+def test_near_rpc_bridge_credit_from_btc_deposit(opener: FakeOpener):
+    opener.json("POST", "rpc.fastnear", load_raw("near_rpc_tx_btc_deposit.json"))
+    report, data = near_rpc.fetch_tx("5G5fbpGz6EJryTD245spudvhQqpx4FC3UcmYRBCjgL7T", client_for(opener))
+    assert report.status is SourceStatus.OK
+    assert data.btc_utxo_origin_hashes == [BTC_DEPOSIT_TXID]
+    credit = [i for i in report.evidence if i.event_type.value == "DEPOSIT_OBSERVED"]
+    assert credit and credit[0].details["bridged_from_origin_hashes"] == [BTC_DEPOSIT_TXID]
+    assert credit[0].details["memo_marker"] == "utxo_added"
 
 
 # --- Asset parsing ----------------------------------------------------------

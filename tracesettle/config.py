@@ -29,6 +29,25 @@ NEAR_RPC_URL = os.environ.get("TRACESETTLE_NEAR_RPC_URL", "https://free.rpc.fast
 EXPLORER_TX_BASE = "https://explorer.near-intents.org/transactions"
 
 # ---------------------------------------------------------------------------
+# Bitcoin data source (free, public, no key)
+# ---------------------------------------------------------------------------
+#
+# Bitcoin has no JSON-RPC ``eth_getTransactionReceipt`` equivalent. The de-facto
+# public read API is the Esplora REST API, served by mempool.space and
+# blockstream.info. Both were verified live for this project (mainnet) and need
+# no key. A fallback host is configured so a single provider outage does not make
+# refund verification impossible.
+BITCOIN_API_URLS = (
+    os.environ.get("TRACESETTLE_BTC_API_URL", "https://mempool.space/api"),
+    "https://blockstream.info/api",
+)
+
+#: The BTC connector contract that owns the bridge's manual refund flow.
+BTC_CONNECTOR_ACCOUNT = "btc-connector.bridge.near"
+#: The bridge relayer that signs bridge-side NEAR transactions.
+BRIDGE_RELAYER_ACCOUNT = "omni-relayer.bridge.near"
+
+# ---------------------------------------------------------------------------
 # HTTP behaviour
 # ---------------------------------------------------------------------------
 
@@ -127,6 +146,18 @@ NEAR_RPC = ChainRpc(
     explorer_tx_url="https://nearblocks.io/txns/",
 )
 
+#: Bitcoin is not an EVM chain and has no JSON-RPC receipt method, so it is kept
+#: out of ``EVM_RPC_MAP``. It is listed here only so explorer URLs and display
+#: names resolve for a ``btc`` asset id. Its data source is the Esplora REST API
+#: in ``BITCOIN_API_URLS``, used by the dedicated bitcoin adapter.
+BTC_CHAIN = ChainRpc(
+    chain="btc",
+    display_name="Bitcoin",
+    url=BITCOIN_API_URLS[0],
+    kind="bitcoin",
+    explorer_tx_url="https://mempool.space/tx/",
+)
+
 
 def rpc_for_chain(chain: str | None) -> ChainRpc | None:
     """Return the RPC config for a chain, or ``None`` when unsupported."""
@@ -134,6 +165,8 @@ def rpc_for_chain(chain: str | None) -> ChainRpc | None:
         return None
     if chain == "near":
         return NEAR_RPC
+    if chain == "btc":
+        return BTC_CHAIN
     return EVM_RPC_MAP.get(chain)
 
 

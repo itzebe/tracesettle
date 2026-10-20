@@ -8,9 +8,9 @@ adapter/engine/report code paths:
      stages and their decisive evidence, ending in SETTLED_VERIFIED.
   2. An intent-hash-only lookup, which cannot reach the whole path. It shows the
      tool refusing to overstate what it can establish.
-  3. A real, refunded Bitcoin->TRON swap. It shows the tool reporting a refund
-     that it cannot independently verify (the origin chain has no configured
-     RPC), keeping REPORTED, MISSING and UNAVAILABLE distinct.
+  3. A real, refunded Bitcoin->TRON swap. It shows the tool confirming the
+     Bitcoin refund from the on-chain payout when the sources are reachable, and
+     otherwise keeping REPORTED, MISSING and UNAVAILABLE distinct.
 
 The live cases use public endpoints when they are reachable. If the network is
 unavailable, the script says so plainly and does not fabricate a result. Nothing
@@ -37,8 +37,8 @@ VERIFIED_DEPOSIT_ADDRESS = "0xB741c00f6D63b6dEd0cCADA1a82bCBADc38A572B"
 #: statement, because no reverse lookup from intent hash to deposit address exists.
 INCOMPLETE_INTENT_HASH = "7ypUiXpjHmDoFFzo8nRWvY4BMfcKR5YkF5Cez28N94dG"
 #: A real refunded swap (BTC origin -> TRON destination) found on the public
-#: NEAR Intents explorer. Its origin chain has no configured RPC, so the refund
-#: can be reported but not independently verified.
+#: NEAR Intents explorer. The Bitcoin origin chain has a configured public source,
+#: so the refund can be confirmed from the on-chain payout when it is reachable.
 REFUNDED_DEPOSIT_ADDRESS = "bc1qjrkwt3v42j4am6csmkaelmpwd9shufl4laxkxm"
 
 RULE = "=" * 78
@@ -136,28 +136,37 @@ def main() -> int:
         "  invent the missing stages."
     )
 
-    # --- Case 3: a real refund that cannot be independently verified ---------
+    # --- Case 3: a real refunded Bitcoin swap --------------------------------
     print(f"\n{RULE}")
-    print("CASE 3 - a real refunded swap, reported but not independently verifiable")
+    print("CASE 3 - a real refunded Bitcoin swap")
     print(f"identifier: {REFUNDED_DEPOSIT_ADDRESS}\n")
     inv3 = investigate(REFUNDED_DEPOSIT_ADDRESS, client)
     result3 = build_result(inv3)
     _show(result3)
     print(f"\n  summary: {result3.summary}")
-    if result3.outcome.value == "REFUND_REPORTED_UNVERIFIED":
+    refund_state = result3.stage(Stage.REFUND).state
+    if refund_state is StageState.CONFIRMED:
         print(
-            "\n  A refund is reported by the upstream service, but the origin chain has no\n"
-            "  configured public RPC, so the refund transaction cannot be checked on-chain.\n"
-            "  The tool keeps the states apart: the deposit credit is REPORTED (not\n"
-            "  independently confirmed), the refund is UNAVAILABLE (a source problem, not\n"
-            "  a failed refund), and destination delivery is MISSING. It does not claim the\n"
-            "  refund was verified, and it does not claim the refund failed."
+            "\n  The refund is independently confirmed: a confirmed Bitcoin transaction pays\n"
+            "  the address recorded on-chain for this intent's withdrawal. 1Click exposes no\n"
+            "  refund transaction hash, so the payout was located from the refund address's own\n"
+            "  confirmed history. The amount reported by the service and the amount observed\n"
+            "  on-chain are both stated; any difference is disclosed, not reconciled."
+        )
+    elif result3.outcome.value == "REFUND_REPORTED_UNVERIFIED":
+        print(
+            "\n  A refund is reported by the upstream service, but it is not independently\n"
+            "  confirmed, so it stays a reported claim. The tool keeps the states apart: a\n"
+            "  reported refund is never shown as confirmed, and a source that could not be\n"
+            "  reached is shown as UNAVAILABLE, never as a failed refund. If several confirmed\n"
+            "  payouts pay the refund address and the provider named none of them, the payout\n"
+            "  cannot be tied to this intent and the refund stays unconfirmed too."
         )
     else:
         print(
-            f"\n  NOTE: this run returned {result3.outcome.value}, not the expected\n"
-            "  REFUND_REPORTED_UNVERIFIED. An upstream source may be unreachable or the\n"
-            "  record may have changed. The states above are what was actually observed."
+            f"\n  NOTE: this run returned {result3.outcome.value}. An upstream source may be\n"
+            "  unreachable or the record may have changed. The states above are what was\n"
+            "  actually observed."
         )
 
     print(f"\n{RULE}")

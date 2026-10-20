@@ -25,6 +25,7 @@ list asserted by the test-suite):
 from __future__ import annotations
 
 import enum
+from dataclasses import replace
 
 from .model import (
     STAGE_ORDER,
@@ -52,6 +53,14 @@ SAFETY_INVARIANTS: dict[str, str] = {
     ),
     "reported_refund_not_confirmed": (
         "A reported refund is not labelled independently confirmed without the refund transaction."
+    ),
+    "refund_confirmation_requires_onchain_evidence": (
+        "A refund stage is confirmed only by a REFUND_TX_CONFIRMED item carrying a transaction "
+        "hash; a reported refund alone never confirms it."
+    ),
+    "bitcoin_refund_requires_confirmed_payout": (
+        "A Bitcoin refund is confirmed only by a confirmed transaction paying the expected "
+        "address; an unconfirmed or non-paying transaction never confirms it."
     ),
     "reported_failure_is_not_loss": (
         "A reported intent failure is not treated as proof that funds were lost."
@@ -97,6 +106,20 @@ DECISIVE_EVENT_TYPES: dict[Stage, EventType] = {
     Stage.BRIDGE_DEPOSIT_CREDIT: EventType.DEPOSIT_OBSERVED,
     Stage.NEAR_SETTLEMENT: EventType.INTENT_EVENT_OBSERVED,
     Stage.DESTINATION_CHAIN_DELIVERY: EventType.DESTINATION_TRANSFER_OBSERVED,
+}
+
+#: Unavailability reasons that mean "a payout exists but could not be tied to this
+#: intent", as opposed to a source being down. These read as a correlation gap.
+_CORRELATION_GAP_REASONS = frozenset({"AMBIGUOUS_REFUND_PAYOUT", "NO_ONCHAIN_REFUND_RECIPIENT"})
+
+#: Sources whose health bears on each stage. Used only to annotate an assessment;
+#: it never changes the reconciled state.
+_STAGE_SOURCES: dict[Stage, tuple[str, ...]] = {
+    Stage.SOURCE_CHAIN_DEPOSIT: ("oneclick_status", "evm_rpc", "btc_rpc"),
+    Stage.BRIDGE_DEPOSIT_CREDIT: ("near_rpc", "oneclick_status"),
+    Stage.NEAR_SETTLEMENT: ("near_rpc", "solver_relay", "oneclick_status"),
+    Stage.DESTINATION_CHAIN_DELIVERY: ("oneclick_status", "evm_rpc"),
+    Stage.REFUND: ("oneclick_status", "evm_rpc", "btc_rpc"),
 }
 
 
@@ -169,10 +192,31 @@ def _assess_stage(
     expected_intent_hashes: set[str] | None = None,
     expected_origin_tx_hashes: set[str] | None = None,
 ) -> StageAssessment:
+    assessment = _assess_stage_inner(
+        stage, items, source_statuses, expected_intent_hashes, expected_origin_tx_hashes
+    )
+    relevant = _STAGE_SOURCES.get(stage, ())
+    stage_sources = {
+        name: source_statuses[name].value
+        for name in relevant
+        if name in source_statuses
+    }
+    if stage_sources == dict(assessment.source_statuses):
+        return assessment
+    return replace(assessment, source_statuses=stage_sources)
+
+
+def _assess_stage_inner(
+    stage: Stage,
+    items: list[EvidenceItem],
+    source_statuses: dict[str, SourceStatus],
+    expected_intent_hashes: set[str] | None = None,
+    expected_origin_tx_hashes: set[str] | None = None,
+) -> StageAssessment:
     stage_items = [e for e in items if e.stage is stage]
 
     if stage is Stage.REFUND:
-        return _assess_refund(stage_items)
+        return _assess_refund(stage_items, source_statuses)
 
     # Material contradiction at this stage?
     if _has_material_conflict(stage_items):
@@ -314,21 +358,96 @@ def _assess_stage(
     return _missing_or_unavailable(stage, source_statuses)
 
 
-def _assess_refund(items: list[EvidenceItem]) -> StageAssessment:
-    confirmed = [e for e in items if e.verification is Verification.CONFIRMED]
+def _assess_refund(
+    items: list[EvidenceItem], source_statuses: dict[str, SourceStatus]
+) -> StageAssessment:
+    # A refund is confirmed only by a REFUND_TX_CONFIRMED item that carries a
+    # transaction hash, is not simulated, and — for Bitcoin — is an actually
+    # confirmed payout. Nothing else may confirm this stage.
+    def is_confirming(e: EvidenceItem) -> bool:
+        if e.verification is not Verification.CONFIRMED:
+            return False
+        if e.event_type is not EventType.REFUND_TX_CONFIRMED:
+            return False
+        if e.provenance is Provenance.SIMULATED or not e.tx_hash:
+            return False
+        if e.chain == "btc" and e.details.get("confirmed") is not True:
+            return False
+        return True
+
+    confirmed = [e for e in items if is_confirming(e)]
+    contradictory = [e for e in items if e.verification is Verification.CONTRADICTORY]
+    if contradictory:
+        # A source's own report and the bytes it served disagree (e.g. raw bytes
+        # that do not hash to the requested txid). No confirmation can be drawn.
+        return StageAssessment(
+            stage=Stage.REFUND,
+            state=StageState.CONTRADICTORY,
+            summary=(
+                "Independent evidence about the refund conflicts: a source's report and the "
+                "transaction data it returned disagree, so no refund confirmation can be drawn."
+            ),
+            conflicting_evidence_ids=tuple(e.id for e in contradictory + confirmed),
+        )
     if confirmed:
         return StageAssessment(
             stage=Stage.REFUND,
             state=StageState.CONFIRMED,
-            summary="A refund transaction was independently confirmed on-chain.",
+            summary=(
+                "A refund transaction was independently confirmed on-chain: a confirmed "
+                "transaction pays the expected refund address."
+            ),
             supporting_evidence_ids=tuple(e.id for e in confirmed),
         )
     claimed = [e for e in items if e.event_type is EventType.REFUND_CLAIMED]
     unavailable = [e for e in items if e.verification is Verification.UNAVAILABLE]
+    incomplete = [e for e in items if e.verification is Verification.INCOMPLETE]
+    simulated = [e for e in items if e.provenance is Provenance.SIMULATED]
+    if simulated and not claimed:
+        return StageAssessment(
+            stage=Stage.REFUND,
+            state=StageState.SIMULATED,
+            summary=(
+                "This stage is supported only by simulated test evidence and must not be "
+                "presented as a live transaction."
+            ),
+            supporting_evidence_ids=tuple(e.id for e in simulated),
+        )
+    # A reported refund whose search could not be completed: the source answered,
+    # but the search was not exhaustive. This is *insufficient evidence*, distinct
+    # from a source being down, so the stage is UNKNOWN rather than UNAVAILABLE.
+    if incomplete:
+        reasons = sorted({str(e.details.get("reason") or e.source) for e in incomplete})
+        lead = (
+            "A refund is reported by an upstream service, but the search for its on-chain "
+            if claimed
+            else "The search for a refund payout was not completed, so it could not be assessed. "
+        )
+        return StageAssessment(
+            stage=Stage.REFUND,
+            state=StageState.UNKNOWN,
+            summary=(
+                f"{lead}payout could not be completed ({'; '.join(reasons)}), so the refund is "
+                "neither confirmed nor ruled out. This is insufficient evidence, not a failed "
+                "refund."
+            ),
+            supporting_evidence_ids=tuple(e.id for e in claimed + incomplete),
+        )
     # A reported refund whose verification source was unreachable is reported *and*
     # unverifiable. That must be visible, not silently reduced to a plain report.
     if claimed and unavailable:
         reasons = sorted({str(e.details.get("reason") or e.source) for e in unavailable})
+        if set(reasons) & _CORRELATION_GAP_REASONS:
+            return StageAssessment(
+                stage=Stage.REFUND,
+                state=StageState.UNAVAILABLE,
+                summary=(
+                    "A refund is reported by an upstream service, but it could not be tied to a "
+                    f"specific on-chain payout ({'; '.join(reasons)}), so the refund is not "
+                    "confirmed. This is a correlation gap, not proof the refund failed."
+                ),
+                supporting_evidence_ids=tuple(e.id for e in claimed + unavailable),
+            )
         return StageAssessment(
             stage=Stage.REFUND,
             state=StageState.UNAVAILABLE,
@@ -360,6 +479,20 @@ def _assess_refund(items: list[EvidenceItem]) -> StageAssessment:
             ),
             supporting_evidence_ids=tuple(e.id for e in unavailable),
         )
+    # No refund is claimed and no refund transaction was found. If the source that
+    # reports refunds was itself unavailable, we cannot even tell whether a refund
+    # was claimed, so the stage is unavailable rather than a missing non-event.
+    reporting_sources = ("oneclick_status",)
+    if any(source_statuses.get(s) in SOURCE_UNAVAILABLE_STATUSES for s in reporting_sources):
+        return StageAssessment(
+            stage=Stage.REFUND,
+            state=StageState.UNAVAILABLE,
+            summary=(
+                "No refund is reported and none was found, but the source that reports refunds "
+                "was unavailable, so it could not be checked. This is not evidence that no refund "
+                "occurred."
+            ),
+        )
     return StageAssessment(
         stage=Stage.REFUND,
         state=StageState.MISSING,
@@ -373,10 +506,11 @@ def _assess_refund(items: list[EvidenceItem]) -> StageAssessment:
 def _missing_or_unavailable(
     stage: Stage, source_statuses: dict[str, SourceStatus]
 ) -> StageAssessment:
+    relevant = _STAGE_SOURCES.get(stage, ())
     unavailable_sources = sorted(
         name
-        for name, status in source_statuses.items()
-        if status in SOURCE_UNAVAILABLE_STATUSES
+        for name in relevant
+        if source_statuses.get(name) in SOURCE_UNAVAILABLE_STATUSES
     )
     if unavailable_sources:
         return StageAssessment(
@@ -386,6 +520,17 @@ def _missing_or_unavailable(
                 "No evidence was obtained for this stage because a required source was "
                 f"unavailable ({', '.join(unavailable_sources)}). This is a source-availability "
                 "problem, not a transaction failure."
+            ),
+        )
+    # No relevant source was queried for this stage, or none produced evidence. Either
+    # way this is missing evidence, not a failure and not an unavailable source.
+    if not any(name in source_statuses for name in relevant):
+        return StageAssessment(
+            stage=stage,
+            state=StageState.MISSING,
+            summary=(
+                "No source that could assess this stage was queried, so there is no evidence "
+                "either way. Missing evidence is not proof that the stage failed or did not happen."
             ),
         )
     return StageAssessment(
@@ -640,6 +785,8 @@ def _derive_outcome(
         return OverallOutcome.CONTRADICTORY
 
     # Refund path.
+    if refund is StageState.CONTRADICTORY:
+        return OverallOutcome.CONTRADICTORY
     if refund is StageState.CONFIRMED:
         return OverallOutcome.REFUND_VERIFIED
     if refund is StageState.REPORTED:
@@ -647,6 +794,12 @@ def _derive_outcome(
     # A reported refund whose verification source was unreachable is still an
     # unverified refund claim; the stage state carries the availability gap.
     if refund is StageState.UNAVAILABLE and any(
+        e.event_type is EventType.REFUND_CLAIMED for e in items
+    ):
+        return OverallOutcome.REFUND_REPORTED_UNVERIFIED
+    # Likewise a reported refund whose on-chain search could not be completed: the
+    # claim stands, unverified, and the stage state carries the insufficiency.
+    if refund is StageState.UNKNOWN and any(
         e.event_type is EventType.REFUND_CLAIMED for e in items
     ):
         return OverallOutcome.REFUND_REPORTED_UNVERIFIED
@@ -727,6 +880,11 @@ def _unresolved_questions(
             "Can the reported refund be confirmed by locating the refund transaction on the "
             "origin chain? A reported refund is not proof the funds moved."
         )
+    elif refund_state is StageState.UNKNOWN:
+        questions.append(
+            "Can the refund payout search be completed, so the reported refund can be either "
+            "confirmed or ruled out?"
+        )
     for contradiction in contradictions:
         questions.append(f"Resolve contradiction: {contradiction.description}")
     return questions
@@ -802,6 +960,14 @@ _OUTCOME_TEXT: dict[OverallOutcome, str] = {
 # ---------------------------------------------------------------------------
 
 
+def _refund_supporting_ids(stages: tuple[StageAssessment, ...]) -> set[str]:
+    """Evidence ids that the engine used to confirm the REFUND stage, if any."""
+    for s in stages:
+        if s.stage is Stage.REFUND and s.state is StageState.CONFIRMED:
+            return set(s.supporting_evidence_ids)
+    return set()
+
+
 def _safety_report(
     items: list[EvidenceItem],
     stages: tuple[StageAssessment, ...],
@@ -812,7 +978,17 @@ def _safety_report(
     settle_state = _state(stages, Stage.NEAR_SETTLEMENT)
 
     refund_claims = [e for e in items if e.event_type is EventType.REFUND_CLAIMED]
-    confirmed_refund = [e for e in items if e.verification is Verification.CONFIRMED and e.stage is Stage.REFUND]
+    supporting_ids = _refund_supporting_ids(stages)
+    confirmed_refund = [
+        e
+        for e in items
+        if e.id in supporting_ids
+        and e.event_type is EventType.REFUND_TX_CONFIRMED
+        and e.verification is Verification.CONFIRMED
+        and e.provenance is not Provenance.SIMULATED
+        and bool(e.tx_hash)
+        and (e.chain != "btc" or e.details.get("confirmed") is True)
+    ]
 
     return {
         # A missing destination is never reported as a failure.
@@ -827,6 +1003,22 @@ def _safety_report(
         # A reported refund is never confirmed without a confirmed refund transaction.
         "reported_refund_not_confirmed": not (
             refund_state is StageState.CONFIRMED and not confirmed_refund
+        ),
+        # A refund stage is confirmed only by on-chain evidence carrying a tx hash.
+        "refund_confirmation_requires_onchain_evidence": not (
+            refund_state is StageState.CONFIRMED
+            and not all(e.tx_hash for e in items if e.id in _refund_supporting_ids(stages))
+        ),
+        # A Bitcoin refund is confirmed only by a confirmed payout.
+        "bitcoin_refund_requires_confirmed_payout": not (
+            refund_state is StageState.CONFIRMED
+            and any(
+                e.stage is Stage.REFUND
+                and e.chain == "btc"
+                and e.details.get("confirmed") is not True
+                for e in items
+                if e.id in _refund_supporting_ids(stages)
+            )
         ),
         # A reported failure is never equated with fund loss (we never emit a loss claim).
         "reported_failure_is_not_loss": True,

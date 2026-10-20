@@ -313,6 +313,7 @@ def _build_evidence(
             tx_hash=data.tx_hash,
             chain=data.chain,
             evidence_url=url,
+            verification_method="EVM RPC receipt inclusion",
             details={
                 "chain_id": data.chain_id,
                 "from": data.from_address,
@@ -338,6 +339,7 @@ def _build_evidence(
             chain=data.chain,
             reported_status="SUCCESS" if data.executed_successfully else "REVERTED",
             evidence_url=url,
+            verification_method="EVM RPC receipt status",
             details={"receipt_status": data.status, "execution_succeeded": data.executed_successfully},
             limitations=(
                 "A successful receipt proves chain-level execution only; it does not prove "
@@ -358,6 +360,11 @@ def _build_evidence(
                 tx_hash=data.tx_hash,
                 chain=data.chain,
                 evidence_url=url,
+                verification_method=(
+                    "EVM receipt log decode against expected transfer"
+                    if match.matched
+                    else "EVM receipt log decode: expected transfer not found"
+                ),
                 details={"match": match.matched, "reason": match.reason, "match_details": match.details},
                 limitations=(
                     ()

@@ -21,7 +21,11 @@ from .model import (
     Verification,
 )
 
-SUPPORTED_PATH = "NEAR Intents 1Click swap, ORIGIN_CHAIN deposit, EVM origin -> EVM destination"
+SUPPORTED_PATH = (
+    "NEAR Intents 1Click swap, ORIGIN_CHAIN deposit, "
+    "EVM origin (EVM destination) and Bitcoin origin (BTC refund verification; "
+    "confirmed only when the payout is unambiguous)"
+)
 
 
 @dataclass(frozen=True)
@@ -59,6 +63,9 @@ class Report:
                 s.stage.value
                 for s in self.result.stages
                 if s.state in {StageState.MISSING, StageState.UNAVAILABLE, StageState.UNKNOWN}
+            ],
+            "unknown_stages": [
+                s.stage.value for s in self.result.stages if s.state is StageState.UNKNOWN
             ],
             "contradictions": [c.to_dict() for c in self.result.contradictions],
             "outstanding_questions": list(self.result.unresolved_questions),
@@ -132,16 +139,27 @@ class Report:
 
         add("## Evidence")
         add("")
+        add(
+            "Class meanings: `CONFIRMED` = supported by the required authoritative "
+            "evidence; `REPORTED` = stated by an upstream service, not independently "
+            "checked; `MISSING` = expected evidence not obtained; `UNAVAILABLE` = the "
+            "required source could not be queried; `INCOMPLETE` = the source answered "
+            "but a required search could not be completed, so the evidence is "
+            "insufficient; `CONTRADICTORY` = independently obtained evidence conflicts; "
+            "`SIMULATED` = controlled test evidence, not a live finding."
+        )
+        add("")
         if self.evidence:
-            add("| ID | Stage | Event | Source | Class | Status | Hash | Timestamp | URL |")
-            add("| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+            add("| ID | Stage | Event | Source | Class | Method | Status | Hash | Timestamp | URL |")
+            add("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
             for e in self.evidence:
                 url = e.evidence_url or ""
                 if url:
                     url = f"[link]({url})"
                 add(
                     f"| `{e.id}` | {e.stage.value} | {e.event_type.value} | {e.source} | "
-                    f"{e.verification.value} | {e.reported_status or ''} | "
+                    f"{e.verification.value} | {e.verification_method or ''} | "
+                    f"{e.reported_status or ''} | "
                     f"`{e.tx_hash or ''}` | {e.timestamp or ''} | {url} |"
                 )
         else:
@@ -186,6 +204,9 @@ TOOL_LIMITATIONS: tuple[str, ...] = (
     "A missing record, a 404, or an empty explorer URL is not evidence that a transaction failed.",
     "A reported failure is not proof that funds were lost, and a reported refund of zero is not proof that no refund can occur.",
     "Amount and timestamp similarity are never used to correlate transactions.",
+    "A source's own report and the raw data it returns are checked against each other: raw transaction bytes that do not hash to the requested txid are recorded as contradictory evidence, never as a confirmation.",
+    "Verifying a transaction's identity against its raw bytes proves the bytes match the identifier; it does not prove block inclusion, that the transaction is a refund, or that it belongs to the investigated intent.",
+    "An incomplete search (a source answered but could not be searched exhaustively) is reported as insufficient evidence, not as proof that no payout exists.",
     "Simulated test evidence is always labelled and must not be read as a live finding.",
 )
 

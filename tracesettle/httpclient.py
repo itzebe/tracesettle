@@ -83,13 +83,24 @@ class HttpClient:
             url = f"{url}?{urllib.parse.urlencode(params)}"
         return self._request(url, method="GET", body=None)
 
+    def get_text(self, url: str) -> FetchResult:
+        """Fetch a plain-text body (e.g. a raw Bitcoin transaction in hex).
+
+        Esplora's ``/tx/{id}/hex`` returns the transaction as hex text, not JSON,
+        so it cannot go through the JSON path. The body is returned verbatim in
+        ``data`` after a whitespace strip; nothing is parsed or interpreted here.
+        """
+        return self._request(url, method="GET", body=None, expect_json=False)
+
     def post_json(self, url: str, payload: dict[str, Any]) -> FetchResult:
         body = json.dumps(payload).encode("utf-8")
         return self._request(url, method="POST", body=body)
 
     # -- internals ----------------------------------------------------------
 
-    def _request(self, url: str, method: str, body: bytes | None) -> FetchResult:
+    def _request(
+        self, url: str, method: str, body: bytes | None, expect_json: bool = True
+    ) -> FetchResult:
         headers = {
             "Accept": "application/json",
             "User-Agent": config.USER_AGENT,
@@ -99,7 +110,7 @@ class HttpClient:
 
         last: FetchResult | None = None
         for attempt in range(1, self.max_attempts + 1):
-            result = self._attempt(url, method, body, headers, attempt)
+            result = self._attempt(url, method, body, headers, attempt, expect_json)
             if result.status is SourceStatus.OK or result.status is SourceStatus.NOT_FOUND:
                 return result
             last = result
@@ -111,7 +122,13 @@ class HttpClient:
         )
 
     def _attempt(
-        self, url: str, method: str, body: bytes | None, headers: dict[str, str], attempt: int
+        self,
+        url: str,
+        method: str,
+        body: bytes | None,
+        headers: dict[str, str],
+        attempt: int,
+        expect_json: bool = True,
     ) -> FetchResult:
         request = urllib.request.Request(url, data=body, headers=headers, method=method)
         try:
@@ -151,6 +168,15 @@ class HttpClient:
                 status=SourceStatus.NETWORK_ERROR,
                 http_status=None,
                 message=f"transport error: {exc}",
+                endpoint=url,
+                attempts=attempt,
+            )
+
+        if not expect_json:
+            return FetchResult(
+                status=SourceStatus.OK,
+                http_status=code,
+                data=raw.decode("utf-8", "replace").strip(),
                 endpoint=url,
                 attempts=attempt,
             )

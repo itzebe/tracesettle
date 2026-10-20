@@ -6,6 +6,8 @@ real Phase 1 fixtures plus clearly-labelled synthetic fixtures.
 
 from __future__ import annotations
 
+import copy
+
 from tracesettle.identifiers import classify_identifier, validate_deposit_address
 from tracesettle.investigation import build_result, investigate
 from tracesettle.model import (
@@ -22,6 +24,7 @@ from tracesettle.report import build_report
 from conftest import (
     ev as make_ev,
     FakeOpener,
+    RAW_DIR,
     REAL_DEPOSIT_ADDRESS,
     REAL_INTENT_HASH,
     REAL_ORIGIN_TX,
@@ -281,7 +284,7 @@ def test_unsupported_destination_chain_is_unavailable(opener: FakeOpener):
     result = build_result(inv)
     assert result.stage(Stage.DESTINATION_CHAIN_DELIVERY).state is StageState.UNAVAILABLE
     assert result.outcome is not OverallOutcome.FAILED_VERIFIED
-    assert any("no configured public RPC" in n for n in inv.notes)
+    assert any("no configured EVM RPC" in n for n in inv.notes)
 
 
 # --- Scenario 11: malformed API response -----------------------------------
@@ -350,3 +353,422 @@ def test_origin_deposit_is_attributed_by_recipient_not_amount(opener: FakeOpener
     result = build_result(inv)
     assert result.stage(Stage.SOURCE_CHAIN_DEPOSIT).state is not StageState.CONFIRMED
     assert any("could not be attributed" in n for n in inv.notes)
+
+
+# --- BTC refund: verified, unverified, and correlation safety ---------------
+
+BTC_REFUND_DEPOSIT = "bc1qjrkwt3v42j4am6csmkaelmpwd9shufl4laxkxm"
+BTC_REFUND_PAYS = "bc1q77w5l5fhkrsq7m05eykug59ks7r8tf6ptmdrgw"
+
+
+def _wire_btc_address(opener: FakeOpener, address: str, txs: list, tx_count: int) -> None:
+    """Wire an Esplora address lookup: the stats call and the history page.
+
+    The ``/txs`` route is registered *before* the stats route because both URLs
+    contain ``/address/<addr>``; the more specific needle must match first.
+    """
+    opener.json("GET", f"mempool.space/api/address/{address}/txs", txs)
+    opener.json(
+        "GET", f"mempool.space/api/address/{address}",
+        {"chain_stats": {"tx_count": tx_count}, "mempool_stats": {"tx_count": 0}},
+    )
+
+
+def _wire_btc_refund(opener: FakeOpener) -> FakeOpener:
+    """Wire the real BTC refund case: 1Click report + real NEAR + real BTC txs."""
+    opener.json("GET", "/v0/status", load_synthetic("oneclick_status_btc_REFUNDED.json"))
+    # The two NEAR transactions are distinguished by their hashes in the request body.
+    opener.json(
+        "POST", "rpc.fastnear",
+        load_raw("near_rpc_tx_btc_deposit.json"),
+        body_contains="5G5fbpGz6EJryTD245spudvhQqpx4FC3UcmYRBCjgL7T",
+    )
+    opener.json(
+        "POST", "rpc.fastnear",
+        load_raw("near_rpc_tx_btc_settlement.json"),
+        body_contains="83tjFcjTXfVxRVnBTeYyWmcww7CUWwEpcVmkGeHAjxL1",
+    )
+    # Bitcoin lookups, keyed by txid in the URL (GET requests carry no body).
+    # The raw-bytes route is keyed on the /hex suffix so it cannot shadow the plain
+    # /tx route (route matching is substring-based).
+    opener.raw(
+        "GET",
+        "377b55cbc30363d991838b4803c8c83b231d0193e4b31f8e527728520469721f/hex",
+        _raw_hex_bytes("btc_tx_refund.hex"),
+    )
+    opener.json("GET", "mempool.space/api/tx/9a80de", load_raw("btc_tx_deposit.json"))
+    opener.json("GET", "mempool.space/api/tx/377b55", load_raw("btc_tx_refund.json"))
+    # 1Click does not expose the refund transaction hash, so the refund payout is
+    # discovered from the refund address's own confirmed history. The stats call
+    # reports a total count so completeness can be established.
+    _wire_btc_address(opener, BTC_REFUND_PAYS, [load_raw("btc_tx_refund.json")], tx_count=1)
+    # The solver relay is a secondary settlement source; leave it unavailable here.
+    opener.timeout("POST", "solver-relay")
+    return opener
+
+
+def _raw_hex_bytes(name: str) -> bytes:
+    return (RAW_DIR / name).read_bytes()
+
+
+def test_btc_refund_verified_end_to_end(opener: FakeOpener):
+    """A reported BTC refund is independently confirmed from the on-chain payout."""
+    _wire_btc_refund(opener)
+    inv = investigate(BTC_REFUND_DEPOSIT, client_for(opener))
+    result = build_result(inv)
+    assert result.stage(Stage.REFUND).state is StageState.CONFIRMED
+    assert result.outcome is OverallOutcome.REFUND_VERIFIED
+    assert result.safety["reported_refund_not_confirmed"] is True
+    assert result.safety["bitcoin_refund_requires_confirmed_payout"] is True
+    # The decisive evidence names the real refund transaction and is confirmed.
+    refund_items = [
+        e for e in inv.evidence if e.event_type.value == "REFUND_TX_CONFIRMED"
+    ]
+    assert refund_items and refund_items[0].details["confirmed"] is True
+
+
+def test_btc_refund_payout_to_wrong_address_is_not_confirmed(opener: FakeOpener):
+    """A confirmed BTC tx that pays a different address must not confirm the refund."""
+    opener.json("GET", "/v0/status", load_synthetic("oneclick_status_btc_REFUNDED.json"))
+    opener.json(
+        "POST", "rpc.fastnear", load_raw("near_rpc_tx_btc_deposit.json"),
+        body_contains="5G5fbpGz6EJryTD245spudvhQqpx4FC3UcmYRBCjgL7T",
+    )
+    opener.json(
+        "POST", "rpc.fastnear", load_raw("near_rpc_tx_btc_settlement.json"),
+        body_contains="83tjFcjTXfVxRVnBTeYyWmcww7CUWwEpcVmkGeHAjxL1",
+    )
+    opener.timeout("POST", "solver-relay")
+    # Re-point the payout to an address the refund address never pays. Both the
+    # address and its script must change: matching is script-level, so changing the
+    # address string alone would (correctly) still match the same script.
+    refund = load_raw("btc_tx_refund.json")
+    refund["vout"][0]["scriptpubkey_address"] = BTC_REFUND_DEPOSIT
+    refund["vout"][0]["scriptpubkey"] = "001490ece5c59554abddeb10ddbb9fec2e69617e27f5"
+    opener.json("GET", "mempool.space/api/tx/9a80de", load_raw("btc_tx_deposit.json"))
+    opener.json("GET", "mempool.space/api/tx/377b55", refund)
+    _wire_btc_address(opener, BTC_REFUND_PAYS, [refund], tx_count=1)
+    inv = investigate(BTC_REFUND_DEPOSIT, client_for(opener))
+    result = build_result(inv)
+    assert result.stage(Stage.REFUND).state is not StageState.CONFIRMED
+    assert result.outcome is not OverallOutcome.REFUND_VERIFIED
+    assert any("no confirmed Bitcoin transaction paying" in n for n in inv.notes)
+
+
+def test_btc_refund_unavailable_source_is_not_failure(opener: FakeOpener):
+    """When Bitcoin sources are down, the refund is UNAVAILABLE, never 'no refund'."""
+    opener.json("GET", "/v0/status", load_synthetic("oneclick_status_btc_REFUNDED.json"))
+    opener.json(
+        "POST", "rpc.fastnear", load_raw("near_rpc_tx_btc_deposit.json"),
+        body_contains="5G5fbpGz6EJryTD245spudvhQqpx4FC3UcmYRBCjgL7T",
+    )
+    opener.json(
+        "POST", "rpc.fastnear", load_raw("near_rpc_tx_btc_settlement.json"),
+        body_contains="83tjFcjTXfVxRVnBTeYyWmcww7CUWwEpcVmkGeHAjxL1",
+    )
+    opener.timeout("POST", "solver-relay")
+    # The origin-chain Bitcoin transactions cannot be retrieved from either host.
+    opener.timeout("GET", "mempool.space/api/tx")
+    opener.timeout("GET", "blockstream.info/api/tx")
+    opener.timeout("GET", "mempool.space/api/address")
+    opener.timeout("GET", "blockstream.info/api/address")
+    inv = investigate(BTC_REFUND_DEPOSIT, client_for(opener))
+    result = build_result(inv)
+    assert result.stage(Stage.REFUND).state is StageState.UNAVAILABLE
+    assert result.outcome is OverallOutcome.REFUND_REPORTED_UNVERIFIED
+    assert result.safety["reported_refund_not_confirmed"] is True
+
+
+def test_btc_refund_without_onchain_recipient_stays_reported(opener: FakeOpener):
+    """If the intent's on-chain withdrawal recipient is absent, no payout is correlated."""
+    opener.json("GET", "/v0/status", load_synthetic("oneclick_status_btc_REFUNDED.json"))
+    # NEAR returns a transaction with no withdrawal event.
+    settlement = load_raw("near_rpc_tx_btc_settlement.json")
+    for outcome in settlement["result"].get("receipts_outcome") or []:
+        logs = (outcome.get("outcome") or {}).get("logs")
+        if logs is not None:
+            outcome["outcome"]["logs"] = [l for l in logs if "ft_withdraw" not in l]
+    opener.json(
+        "POST", "rpc.fastnear", settlement,
+        body_contains="83tjFcjTXfVxRVnBTeYyWmcww7CUWwEpcVmkGeHAjxL1",
+    )
+    opener.json(
+        "POST", "rpc.fastnear", load_raw("near_rpc_tx_btc_deposit.json"),
+        body_contains="5G5fbpGz6EJryTD245spudvhQqpx4FC3UcmYRBCjgL7T",
+    )
+    opener.timeout("POST", "solver-relay")
+    opener.json("GET", "mempool.space/api/tx/9a80de", load_raw("btc_tx_deposit.json"))
+    inv = investigate(BTC_REFUND_DEPOSIT, client_for(opener))
+    result = build_result(inv)
+    assert result.stage(Stage.REFUND).state is not StageState.CONFIRMED
+    assert result.outcome is not OverallOutcome.REFUND_VERIFIED
+    assert any("correlation caveat" in n.lower() for n in inv.notes)
+
+
+def test_btc_refund_recipient_mismatch_is_not_correlated(opener: FakeOpener):
+    """If the quote's refund address disagrees with the on-chain recipient, no correlation."""
+    opener.json("GET", "/v0/status", load_synthetic("oneclick_status_btc_REFUNDED.json"))
+    settlement = load_raw("near_rpc_tx_btc_settlement.json")
+    # Rewrite the on-chain withdrawal recipient to a different address than the quote's.
+    for outcome in settlement["result"].get("receipts_outcome") or []:
+        for i, log in enumerate((outcome.get("outcome") or {}).get("logs") or []):
+            if "ft_withdraw" in log and BTC_REFUND_PAYS in log:
+                outcome["outcome"]["logs"][i] = log.replace(
+                    BTC_REFUND_PAYS, "bc1qotherunrelatedaddresszzzzzzzzzzzzzzzzzzz"
+                )
+    opener.json(
+        "POST", "rpc.fastnear", settlement,
+        body_contains="83tjFcjTXfVxRVnBTeYyWmcww7CUWwEpcVmkGeHAjxL1",
+    )
+    opener.json(
+        "POST", "rpc.fastnear", load_raw("near_rpc_tx_btc_deposit.json"),
+        body_contains="5G5fbpGz6EJryTD245spudvhQqpx4FC3UcmYRBCjgL7T",
+    )
+    opener.json("GET", "mempool.space/api/tx/9a80de", load_raw("btc_tx_deposit.json"))
+    opener.timeout("POST", "solver-relay")
+    inv = investigate(BTC_REFUND_DEPOSIT, client_for(opener))
+    result = build_result(inv)
+    assert result.stage(Stage.REFUND).state is not StageState.CONFIRMED
+    assert any("does not match the withdrawal recipient" in n for n in inv.notes)
+
+
+def test_btc_refund_investigation_is_deterministic(opener: FakeOpener):
+    """The same captured evidence must reconcile to the same result every time."""
+    _wire_btc_refund(opener)
+    first = build_result(investigate(BTC_REFUND_DEPOSIT, client_for(opener))).to_dict()
+
+    second_opener = FakeOpener()
+    _wire_btc_refund(second_opener)
+    second = build_result(
+        investigate(BTC_REFUND_DEPOSIT, client_for(second_opener))
+    ).to_dict()
+
+    assert first == second
+
+
+def test_btc_refund_with_multiple_payouts_is_not_confirmed(opener: FakeOpener):
+    """Several confirmed payouts to the refund address must not confirm the refund."""
+    opener.json("GET", "/v0/status", load_synthetic("oneclick_status_btc_REFUNDED.json"))
+    opener.json(
+        "POST", "rpc.fastnear", load_raw("near_rpc_tx_btc_deposit.json"),
+        body_contains="5G5fbpGz6EJryTD245spudvhQqpx4FC3UcmYRBCjgL7T",
+    )
+    opener.json(
+        "POST", "rpc.fastnear", load_raw("near_rpc_tx_btc_settlement.json"),
+        body_contains="83tjFcjTXfVxRVnBTeYyWmcww7CUWwEpcVmkGeHAjxL1",
+    )
+    opener.timeout("POST", "solver-relay")
+    opener.json("GET", "mempool.space/api/tx/9a80de", load_raw("btc_tx_deposit.json"))
+    refund = load_raw("btc_tx_refund.json")
+    # A second confirmed transaction paying the same refund address. Only the
+    # recipient address is a reliable anchor, so neither can be tied to this intent.
+    other = copy.deepcopy(refund)
+    other["txid"] = "f" * 64
+    _wire_btc_address(opener, BTC_REFUND_PAYS, [refund, other], tx_count=2)
+    inv = investigate(BTC_REFUND_DEPOSIT, client_for(opener))
+    result = build_result(inv)
+    assert result.stage(Stage.REFUND).state is not StageState.CONFIRMED
+    assert result.outcome is not OverallOutcome.REFUND_VERIFIED
+    assert any("None can be tied to this intent" in n for n in inv.notes)
+
+
+def test_btc_refund_real_address_history_is_ambiguous(opener: FakeOpener):
+    """The real refund address's history has several payouts; none may be confirmed.
+
+    Captured from mempool.space for the refund address of a real BTC->TRON swap.
+    Four confirmed transactions pay that address, and 1Click named none of them, so
+    the refund must stay unconfirmed rather than guess a payout.
+    """
+    opener.json("GET", "/v0/status", load_synthetic("oneclick_status_btc_REFUNDED.json"))
+    opener.json(
+        "POST", "rpc.fastnear", load_raw("near_rpc_tx_btc_deposit.json"),
+        body_contains="5G5fbpGz6EJryTD245spudvhQqpx4FC3UcmYRBCjgL7T",
+    )
+    opener.json(
+        "POST", "rpc.fastnear", load_raw("near_rpc_tx_btc_settlement.json"),
+        body_contains="83tjFcjTXfVxRVnBTeYyWmcww7CUWwEpcVmkGeHAjxL1",
+    )
+    opener.timeout("POST", "solver-relay")
+    opener.json("GET", "mempool.space/api/tx/9a80de", load_raw("btc_tx_deposit.json"))
+    _wire_btc_address(opener, BTC_REFUND_PAYS, load_raw("btc_address_history.json"), tx_count=7)
+    inv = investigate(BTC_REFUND_DEPOSIT, client_for(opener))
+    result = build_result(inv)
+    assert result.stage(Stage.REFUND).state is StageState.UNAVAILABLE
+    assert result.outcome is OverallOutcome.REFUND_REPORTED_UNVERIFIED
+    assert result.safety["reported_refund_not_confirmed"] is True
+    assert any("AMBIGUOUS_REFUND_PAYOUT" in str(e.details.get("reason")) for e in inv.evidence)
+
+
+# --- BTC refund: independent verification strengthening ---------------------
+
+
+def test_btc_refund_verified_reports_script_level_verification(opener: FakeOpener):
+    """A confirmed refund must record how strongly it was verified."""
+    _wire_btc_refund(opener)
+    inv = investigate(BTC_REFUND_DEPOSIT, client_for(opener))
+    result = build_result(inv)
+    assert result.stage(Stage.REFUND).state is StageState.CONFIRMED
+    item = next(e for e in inv.evidence if e.event_type.value == "REFUND_TX_CONFIRMED")
+    assert item.details["identity_locally_validated"] is True
+    assert item.details["recipient_script_verified"] is True
+    assert item.details["verification_level"] == "SCRIPT_VALIDATED"
+    assert item.details["correlation_method"] == "on-chain withdrawal recipient address"
+
+
+def test_btc_refund_txid_bytes_mismatch_is_contradictory(opener: FakeOpener):
+    """If raw bytes do not hash to the claimed txid, the refund is contradictory.
+
+    The engine must never confirm a payout whose returned bytes belong to a
+    different transaction.
+    """
+    op = FakeOpener()
+    _wire_btc_refund(op)
+    # Replace the refund raw bytes with the *deposit* transaction's bytes: they
+    # parse fine but hash to a different txid. The /hex route is inserted first so
+    # it is matched before the plain /tx route (substring matching, in order).
+    op._routes = [r for r in op._routes if "/hex" not in (r[1] or "")]
+    op.raw_first(
+        "GET",
+        "377b55cbc30363d991838b4803c8c83b231d0193e4b31f8e527728520469721f/hex",
+        (RAW_DIR / "btc_tx_deposit.hex").read_bytes(),
+    )
+    inv = investigate(BTC_REFUND_DEPOSIT, client_for(op))
+    result = build_result(inv)
+    assert result.stage(Stage.REFUND).state is StageState.CONTRADICTORY
+    assert result.outcome is OverallOutcome.CONTRADICTORY
+    assert any("TXID_BYTES_MISMATCH" in str(e.details.get("reason")) for e in inv.evidence)
+
+
+def test_btc_refund_incomplete_history_is_not_confirmed(opener: FakeOpener):
+    """A single matching payout on an incomplete history must not confirm the refund."""
+    opener.json("GET", "/v0/status", load_synthetic("oneclick_status_btc_REFUNDED.json"))
+    opener.json(
+        "POST", "rpc.fastnear", load_raw("near_rpc_tx_btc_deposit.json"),
+        body_contains="5G5fbpGz6EJryTD245spudvhQqpx4FC3UcmYRBCjgL7T",
+    )
+    opener.json(
+        "POST", "rpc.fastnear", load_raw("near_rpc_tx_btc_settlement.json"),
+        body_contains="83tjFcjTXfVxRVnBTeYyWmcww7CUWwEpcVmkGeHAjxL1",
+    )
+    opener.timeout("POST", "solver-relay")
+    opener.json("GET", "mempool.space/api/tx/9a80de", load_raw("btc_tx_deposit.json"))
+    # One payout is visible, but the address reports far more transactions than were
+    # returned, so uniqueness cannot be established.
+    _wire_btc_address(opener, BTC_REFUND_PAYS, [load_raw("btc_tx_refund.json")], tx_count=99)
+    inv = investigate(BTC_REFUND_DEPOSIT, client_for(opener))
+    result = build_result(inv)
+    # An incomplete search is *insufficient evidence*, not a source outage, so the
+    # stage is UNKNOWN rather than UNAVAILABLE — but it is still never confirmed.
+    assert result.stage(Stage.REFUND).state is StageState.UNKNOWN
+    assert result.outcome is OverallOutcome.REFUND_REPORTED_UNVERIFIED
+    incomplete = [e for e in inv.evidence if e.verification is Verification.INCOMPLETE]
+    assert incomplete, "an incomplete search must be recorded as INCOMPLETE evidence"
+    assert any("INCOMPLETE_ADDRESS_HISTORY" in str(e.details.get("reason")) for e in incomplete)
+
+
+def test_btc_refund_explicit_named_hash_is_confirmed(opener: FakeOpener):
+    """When the provider names the refund tx hash, it is confirmed via that anchor.
+
+    Tier A: an explicit identifier outranks the address-history fallback, so no
+    address lookup is required for correlation.
+    """
+    status = load_synthetic("oneclick_status_btc_REFUNDED.json")
+    # The provider names the refund transaction among the origin-chain hashes.
+    status["swapDetails"]["originChainTxHashes"] = [
+        {"hash": "9a80de61146553e809f2e57a7b789ae5e64de7aa67fa06009881eac638051226", "explorerUrl": ""},
+        {"hash": "377b55cbc30363d991838b4803c8c83b231d0193e4b31f8e527728520469721f", "explorerUrl": ""},
+    ]
+    opener.json("GET", "/v0/status", status)
+    opener.json(
+        "POST", "rpc.fastnear", load_raw("near_rpc_tx_btc_deposit.json"),
+        body_contains="5G5fbpGz6EJryTD245spudvhQqpx4FC3UcmYRBCjgL7T",
+    )
+    opener.json(
+        "POST", "rpc.fastnear", load_raw("near_rpc_tx_btc_settlement.json"),
+        body_contains="83tjFcjTXfVxRVnBTeYyWmcww7CUWwEpcVmkGeHAjxL1",
+    )
+    opener.timeout("POST", "solver-relay")
+    opener.json("GET", "mempool.space/api/tx/9a80de", load_raw("btc_tx_deposit.json"))
+    opener.json("GET", "mempool.space/api/tx/377b55", load_raw("btc_tx_refund.json"))
+    _wire_btc_address(opener, BTC_REFUND_PAYS, [load_raw("btc_tx_refund.json")], tx_count=1)
+    inv = investigate(BTC_REFUND_DEPOSIT, client_for(opener))
+    result = build_result(inv)
+    assert result.stage(Stage.REFUND).state is StageState.CONFIRMED
+    item = next(e for e in inv.evidence if e.event_type.value == "REFUND_TX_CONFIRMED")
+    assert item.details["discovery"] == "explicit"
+
+
+def test_btc_refund_missing_raw_bytes_is_a_limitation_not_a_contradiction(opener: FakeOpener):
+    """Raw bytes being unavailable must not turn a valid payout into a contradiction.
+
+    When the explorer's ``/hex`` endpoint fails but the transaction JSON is valid,
+    the identity simply cannot be locally validated. The refund may still be
+    confirmed from the explorer's report, with the weaker level recorded — the
+    missing bytes are a limitation, never a contradiction.
+    """
+    _wire_btc_refund(opener)
+    # Drop the raw-bytes route so the /hex fetch 404s for every host, while the
+    # plain /tx JSON still answers.
+    opener._routes = [r for r in opener._routes if "/hex" not in (r[1] or "")]
+    opener.http_error("GET", "/hex", 404)
+    inv = investigate(BTC_REFUND_DEPOSIT, client_for(opener))
+    result = build_result(inv)
+    assert result.stage(Stage.REFUND).state is StageState.CONFIRMED
+    assert result.outcome is OverallOutcome.REFUND_VERIFIED
+    item = next(e for e in inv.evidence if e.event_type.value == "REFUND_TX_CONFIRMED")
+    assert item.details["identity_locally_validated"] is False
+    # Script matched but identity not validated => level cannot exceed EXPLORER_REPORTED.
+    assert item.details["verification_level"] == "EXPLORER_REPORTED"
+    assert item.verification is Verification.CONFIRMED
+    assert not any(e.verification is Verification.CONTRADICTORY for e in inv.evidence)
+
+
+def test_btc_refund_report_states_verification_level_and_amount_unit(opener: FakeOpener):
+    """The structured and Markdown reports must carry the level and amount semantics."""
+    _wire_btc_refund(opener)
+    inv = investigate(BTC_REFUND_DEPOSIT, client_for(opener))
+    result = build_result(inv)
+    report = build_report(inv, result, "2026-10-20T00:00:00Z")
+    data = report.to_dict()
+    refund_items = [
+        e for e in data["evidence"] if e["event_type"] == "REFUND_TX_CONFIRMED"
+    ]
+    assert refund_items
+    details = refund_items[0]["details"]
+    assert details["verification_level"] == "SCRIPT_VALIDATED"
+    assert details["amount_unit"] == "satoshi"
+    assert details["recipient_output_sats"] == 12884
+    assert details["total_output_sats"] > details["recipient_output_sats"]
+    # The evidence item states *how* the level was reached, in the model field.
+    assert refund_items[0]["verification_method"]
+    # The Markdown report explains the evidence classes and the tool's limitations.
+    md = report.to_markdown()
+    assert "Class meanings" in md
+    assert "does not prove block inclusion" in md
+    # The Markdown evidence table carries the method column.
+    assert "| Method |" in md
+    # Structured and Markdown agree on the outcome.
+    assert data["outcome"] in md
+
+
+def test_btc_refund_unknown_state_appears_in_report(opener: FakeOpener):
+    """An incomplete-search (UNKNOWN) refund stage must be visible in the report."""
+    opener.json("GET", "/v0/status", load_synthetic("oneclick_status_btc_REFUNDED.json"))
+    opener.json(
+        "POST", "rpc.fastnear", load_raw("near_rpc_tx_btc_deposit.json"),
+        body_contains="5G5fbpGz6EJryTD245spudvhQqpx4FC3UcmYRBCjgL7T",
+    )
+    opener.json(
+        "POST", "rpc.fastnear", load_raw("near_rpc_tx_btc_settlement.json"),
+        body_contains="83tjFcjTXfVxRVnBTeYyWmcww7CUWwEpcVmkGeHAjxL1",
+    )
+    opener.timeout("POST", "solver-relay")
+    opener.json("GET", "mempool.space/api/tx/9a80de", load_raw("btc_tx_deposit.json"))
+    _wire_btc_address(opener, BTC_REFUND_PAYS, [load_raw("btc_tx_refund.json")], tx_count=99)
+    inv = investigate(BTC_REFUND_DEPOSIT, client_for(opener))
+    result = build_result(inv)
+    report = build_report(inv, result, "2026-10-20T00:00:00Z")
+    data = report.to_dict()
+    assert "REFUND" in data["unknown_stages"]
+    assert data["outcome"] == "REFUND_REPORTED_UNVERIFIED"
+    assert "insufficient evidence" in report.to_markdown()

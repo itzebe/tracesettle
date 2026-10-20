@@ -66,22 +66,30 @@ class FakeResponse:
 
 
 class FakeOpener:
-    """Maps (method, url-substring) to canned responses or raised errors.
+    """Maps (method, url-substring[, body-substring]) to canned responses or raised errors.
 
     Routes are matched in registration order. A route registered with
     ``once=True`` is consumed after its first match, which lets tests express
-    "fail once, then succeed" retry sequences.
+    "fail once, then succeed" retry sequences. An optional ``body_contains``
+    lets a single endpoint (e.g. a JSON-RPC URL) answer differently per request
+    payload, which is how the two NEAR transaction lookups are separated.
     """
 
     def __init__(self) -> None:
-        self._routes: list[tuple[str, str, Callable[[], Any], bool]] = []
+        self._routes: list[tuple[str, str, str | None, Callable[[], Any], bool]] = []
         self.calls: list[str] = []
 
     def json(
-        self, method: str, url_contains: str, payload: Any, status: int = 200, once: bool = False
+        self,
+        method: str,
+        url_contains: str,
+        payload: Any,
+        status: int = 200,
+        once: bool = False,
+        body_contains: str | None = None,
     ) -> "FakeOpener":
         body = json.dumps(payload).encode("utf-8")
-        return self.raw(method, url_contains, body, status, once=once)
+        return self.raw(method, url_contains, body, status, once=once, body_contains=body_contains)
 
     def raw(
         self,
@@ -90,46 +98,78 @@ class FakeOpener:
         body: bytes,
         status: int = 200,
         once: bool = False,
+        body_contains: str | None = None,
     ) -> "FakeOpener":
-        self._routes.append((method.upper(), url_contains, lambda: FakeResponse(body, status), once))
+        self._routes.append(
+            (method.upper(), url_contains, body_contains, lambda: FakeResponse(body, status), once)
+        )
         return self
 
     def http_error(
-        self, method: str, url_contains: str, code: int, body: bytes = b"", once: bool = False
+        self,
+        method: str,
+        url_contains: str,
+        code: int,
+        body: bytes = b"",
+        once: bool = False,
+        body_contains: str | None = None,
     ) -> "FakeOpener":
         def raise_it() -> Any:
             raise urllib.error.HTTPError(
                 url_contains, code, f"HTTP {code}", {}, io.BytesIO(body)
             )
 
-        self._routes.append((method.upper(), url_contains, raise_it, once))
+        self._routes.append((method.upper(), url_contains, body_contains, raise_it, once))
+        return self
+
+    def raw_first(self, method: str, url_contains: str, body: bytes) -> "FakeOpener":
+        """Register a raw route at the front, so it wins over later substring matches.
+
+        Used when one URL is a prefix of another (e.g. ``/tx/<id>`` and
+        ``/tx/<id>/hex``): the longer, more specific route must be tested first.
+        """
+        self._routes.insert(
+            0, (method.upper(), url_contains, None, lambda: FakeResponse(body), False)
+        )
         return self
 
     def network_error(
-        self, method: str, url_contains: str, reason: str = "connection reset", once: bool = False
+        self,
+        method: str,
+        url_contains: str,
+        reason: str = "connection reset",
+        once: bool = False,
+        body_contains: str | None = None,
     ) -> "FakeOpener":
         def raise_it() -> Any:
             raise urllib.error.URLError(reason)
 
-        self._routes.append((method.upper(), url_contains, raise_it, once))
+        self._routes.append((method.upper(), url_contains, body_contains, raise_it, once))
         return self
 
-    def timeout(self, method: str, url_contains: str, once: bool = False) -> "FakeOpener":
+    def timeout(
+        self, method: str, url_contains: str, once: bool = False, body_contains: str | None = None
+    ) -> "FakeOpener":
         def raise_it() -> Any:
             raise TimeoutError("timed out")
 
-        self._routes.append((method.upper(), url_contains, raise_it, once))
+        self._routes.append((method.upper(), url_contains, body_contains, raise_it, once))
         return self
 
     def __call__(self, request: Any, timeout: float | None = None) -> FakeResponse:
         url = request.full_url if hasattr(request, "full_url") else str(request)
         method = getattr(request, "method", "GET") or "GET"
+        raw_body = getattr(request, "data", None)
+        body_text = raw_body.decode("utf-8", "replace") if isinstance(raw_body, bytes) else ""
         self.calls.append(f"{method} {url}")
-        for index, (route_method, needle, responder, once) in enumerate(self._routes):
-            if route_method == method.upper() and needle in url:
-                if once:
-                    self._routes.pop(index)
-                return responder()
+        for index, (route_method, needle, body_needle, responder, once) in enumerate(self._routes):
+            if route_method != method.upper() or needle not in url:
+                continue
+            if body_needle is not None and body_needle not in body_text:
+                continue
+            if once:
+                self._routes.pop(index)
+            return responder()
         raise AssertionError(f"no fake route for {method} {url}")
 
 

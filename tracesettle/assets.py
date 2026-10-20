@@ -38,6 +38,17 @@ def parse_asset_id(asset_id: str | None) -> AssetInfo | None:
         return None
     raw = asset_id.strip()
 
+    # 1Click's own asset-id form, e.g. "1cs_v1:btc:native:coin". The chain is the
+    # segment after the "1cs_v1:" marker. This is a documented id shape, not an
+    # inference from amounts.
+    if raw.startswith("1cs_v1:"):
+        rest = raw[len("1cs_v1:") :]
+        parts = rest.split(":")
+        chain = parts[0] or None
+        return AssetInfo(
+            asset_id=raw, standard="1cs_v1", chain=chain, contract=None, is_omft=False
+        )
+
     # Non-nep141 forms, e.g. "btc:mainnet:native".
     if ":" in raw and not raw.startswith("nep141:"):
         parts = raw.split(":")

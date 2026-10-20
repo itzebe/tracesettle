@@ -336,6 +336,13 @@ bridge, no trading bot, no token, no AI chatbot, no automated recovery, no fabri
    signature as evidence, mark its verification method `UNVERIFIED`, and do not claim authenticity.
 7. **Rate limits** (1200/60 s unauth; 1/5 s partner). Mitigation: request timeouts, bounded retries with
    backoff, and a small response cache.
+8. **Bitcoin refund correlation is not always possible from free data (found in Phase 4).** 1Click exposes
+   no refund transaction hash for a Bitcoin origin. The only free way to find the payout is the refund
+   address's own history, but a real refund address had **four** confirmed payouts to it
+   (`evidence/raw/btc_address_history.json`). With no explicit identifier tying one to the intent, the
+   refund stays `UNAVAILABLE` (`AMBIGUOUS_REFUND_PAYOUT`) rather than being guessed. A refund is confirmed
+   only when exactly one payout matches, or when the provider names the transaction. The Explorer API's
+   `bearerAuth` (partner-gated) is the only known source that could disambiguate, and it is out of scope.
 
 ---
 

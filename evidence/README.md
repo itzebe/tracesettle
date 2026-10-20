@@ -22,6 +22,11 @@ claim in [`../PHASE1_FEASIBILITY.md`](../PHASE1_FEASIBILITY.md) can be re-checke
 | `evm_receipt_destination.json` | `POST https://ethereum-rpc.publicnode.com` `eth_getTransactionReceipt` | Destination-chain delivery tx confirmed: `status: 0x1`, `to` = USDC contract. |
 | `oneclick_openapi.yaml` | `https://1click.chaindefuser.com/docs/v0/openapi.yaml` | Full 1Click API spec: paths, auth schemes, `GetExecutionStatusResponse` / `SwapDetails` schemas, status enum. |
 | `exp_openapi.yaml` | `https://explorer.near-intents.org/api/v0/openapi.yaml` | Explorer API spec — both paths require `bearerAuth` (partner-gated, out of scope). |
+| `btc_tx_deposit.json` | `GET https://mempool.space/api/tx/9a80de61…051226` | Bitcoin origin deposit tx for a real BTC→TRON swap: confirmed at height 972255, one output pays the bridge deposit address. |
+| `btc_tx_refund.json` | `GET https://mempool.space/api/tx/377b55cb…469721f` | A confirmed Bitcoin tx paying the refund address of that swap (height 972263). Used to show *a* payout exists; it is not tied to the intent. |
+| `btc_address_history.json` | `GET https://mempool.space/api/address/bc1q77w5l5fhkrsq7m05eykug59ks7r8tf6ptmdrgw/txs` | The refund address's full history: **four** confirmed transactions pay it. This is the evidence that the refund payout is *ambiguous* and cannot be confirmed. |
+| `near_rpc_tx_btc_deposit.json` | `POST https://free.rpc.fastnear.com` `tx` for `5G5fbpGz…jgL7T` | NEAR bridge deposit credit for the BTC origin; receipt logs carry the `BRIDGED_FROM`/`utxo_added` memo naming the Bitcoin origin txid. |
+| `near_rpc_tx_btc_settlement.json` | `POST https://free.rpc.fastnear.com` `tx` for `83tjFcjT…jxL1` | NEAR settlement for the same swap; `ft_withdraw` log records the withdrawal recipient `btc:bc1q77w5l5…mdrgw`. |
 
 ## Reproduction commands
 
@@ -48,6 +53,12 @@ curl -s -o /dev/null -w '%{http_code}\n' -H "X-API-Key: totally-invalid-key-123"
 
 # 6) Rate-limit headers (unauthenticated budget)
 curl -s -D - -o /dev/null "https://1click.chaindefuser.com/v0/status?depositAddress=0xB741c00f6D63b6dEd0cCADA1a82bCBADc38A572B" | grep -i ratelimit
+
+# 7) Bitcoin origin deposit tx (free Esplora API, no key)
+curl -s "https://mempool.space/api/tx/9a80de61146553e809f2e57a7b789ae5e64de7aa67fa06009881eac638051226"
+
+# 8) The refund address's full history — shows four confirmed payouts
+curl -s "https://mempool.space/api/address/bc1q77w5l5fhkrsq7m05eykug59ks7r8tf6ptmdrgw/txs"
 ```
 
 ## Prior art

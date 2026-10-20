@@ -33,8 +33,13 @@ For each transaction stage it records evidence, then classifies it:
 | `REPORTED` | A service says so, but it was not independently checked. |
 | `MISSING` | Not found. Explicitly **not** proof the stage failed. |
 | `UNAVAILABLE` | The source needed to check could not be reached. |
+| `INCOMPLETE` | The source answered, but a required search could not be completed. Insufficient evidence, not proof of absence. |
 | `CONTRADICTORY` | Two pieces of evidence materially disagree. |
 | `SIMULATED` | Clearly-labelled test evidence, never a live finding. |
+
+Each evidence item also carries a `verification_method` field stating how its
+classification was reached (for example a locally recomputed transaction id, a
+script-level recipient match, or a plain upstream report).
 
 Stages: `SOURCE_CHAIN_DEPOSIT`, `BRIDGE_DEPOSIT_CREDIT`, `NEAR_SETTLEMENT`,
 `DESTINATION_CHAIN_DELIVERY`, and `REFUND`.
@@ -44,12 +49,14 @@ signal:
 
 - source deposit: the origin-chain transaction executed;
 - bridge deposit credit: an on-chain bridge transfer to `intents.near` carries a
-  `BRIDGED_FROM` memo naming **this** deposit's origin transaction hash;
+  `BRIDGED_FROM` memo naming **this** deposit's origin transaction hash (for a
+  Bitcoin origin, a bridge `utxo_added` event names the origin Bitcoin txid);
 - settlement: the investigated intent hash appears in on-chain intent-execution
   event logs (a NEAR transaction merely being included or final is not enough);
 - destination delivery: the expected asset transfer to the expected recipient
   appears in the destination receipt logs;
-- refund: a matching on-chain transfer to the refund address exists.
+- refund: a **confirmed** on-chain transaction pays the address recorded on-chain
+  for this intent's withdrawal. A reported refund alone never confirms it.
 
 Correlation uses explicit identifiers only (intent hash, deposit address,
 recipient address, transaction hash). Amount and timestamp similarity are never
@@ -77,10 +84,10 @@ a bare interpreter.
 **1. Run the tests.**
 
 ```sh
-python -m pytest tests/ --collect-only -q   # 136 tests collected
-python -m pytest tests/ -q                  # 136 passed
+python -m pytest tests/ --collect-only -q   # 224 tests collected
+python -m pytest tests/ -q                  # 224 passed
 ```
-→ `136 passed`.
+→ `224 passed`.
 
 **2. Investigate a real, known-good swap from the command line.**
 
@@ -107,17 +114,22 @@ python3 -m tracesettle investigate 7ypUiXpjHmDoFFzo8nRWvY4BMfcKR5YkF5Cez28N94dG 
 → outcome `SETTLED_REPORTED_ONLY`: the intent hash path can read a service
 statement but cannot reach the whole path, and the report says so.
 
-**5. See a real refund that is reported but cannot be independently verified.**
+**5. See why a real reported Bitcoin refund is not confirmed.**
 
 ```sh
 python3 -m tracesettle investigate bc1qjrkwt3v42j4am6csmkaelmpwd9shufl4laxkxm
 ```
-→ outcome `REFUND_REPORTED_UNVERIFIED`. The upstream service reports a refund
-(the swap's origin chain is Bitcoin, for which no public RPC is configured), so
-the report keeps three states distinct: the deposit credit is `REPORTED`, the
-refund is `UNAVAILABLE` (a missing source, not a failed refund), and destination
-delivery is `MISSING`. It does not claim the refund was verified, and it does not
-claim the refund failed.
+→ outcome `REFUND_REPORTED_UNVERIFIED` when the Bitcoin sources are reachable. 1Click
+reports a refund for this BTC→TRON swap but exposes no refund transaction hash, so
+the tool reads the intent's on-chain withdrawal recipient and looks for a
+**confirmed** Bitcoin transaction paying that address (first from the provider's
+transaction list, then from the address's own confirmed history). That address has
+several confirmed payouts and the provider named none of them, so no payout can be
+tied to this intent by an explicit identifier. The refund therefore stays a reported
+claim, and the stage reads `UNAVAILABLE` with reason `AMBIGUOUS_REFUND_PAYOUT`.
+Confirming one of the payouts would be a guess, so the tool does not. When a Bitcoin
+source is unreachable the refund likewise stays `UNAVAILABLE` (a source problem, not
+a failed refund).
 
 **6. Run the web interface.**
 
@@ -134,7 +146,9 @@ Copy or download the report as JSON or Markdown.
 python3 demo/demonstrate.py
 ```
 → prints the verified swap, the intent-hash-only lookup, and the real refunded
-swap side by side, with the decisive evidence for each confirmed stage. It uses
+swap side by side, with the decisive evidence for each confirmed stage. The third
+case is reported-only: its refund address has several confirmed payouts and the
+provider named none of them, so the refund stays unconfirmed. It uses
 live public endpoints; if one is unreachable it says so and does not fabricate a
 result.
 
@@ -154,11 +168,18 @@ Other limits, stated in every report:
 - A reported failure is not proof funds were lost.
 - A reported refund of zero is not proof no refund can occur.
 - Simulated test evidence is always labelled.
-- **No refund has yet been independently verified.** A real refunded swap is
-  included in the demo (`bc1qjrkwt3v42j4am6csmkaelmpwd9shufl4laxkxm`), but its
-  origin chain is Bitcoin, which has no configured RPC, so the refund stays
-  `UNAVAILABLE` rather than `CONFIRMED`. Synthetic fixtures cover the
-  `CONFIRMED`-refund classification path.
+- **Bitcoin refunds are only confirmed when the payout is unambiguous.** For a real
+  refunded BTC→TRON swap (`bc1qjrkwt3v42j4am6csmkaelmpwd9shufl4laxkxm`), 1Click
+  reports a refund but exposes no refund transaction hash. Its withdrawal recipient
+  has several confirmed payouts, so the payout cannot be tied to this intent by an
+  explicit identifier: the refund stays a reported claim and the stage reads
+  `UNAVAILABLE` (`AMBIGUOUS_REFUND_PAYOUT`). A refund is confirmed only when exactly
+  one confirmed payout matches, or when the provider itself names the transaction.
+  The tool never picks a payout by amount or timestamp, and a reported refund alone
+  never confirms the stage.
+- The reported refund amount and the observed on-chain payout may differ. Both
+  figures are stated and the difference is disclosed, not reconciled; a lower
+  payout is expected because network and bridge fees are deducted.
 - The bridge credit is confirmed from an on-chain `BRIDGED_FROM` memo that names
   the origin transaction hash. That memo is emitted by the bridge service, so it is
   strong identifier-based, on-chain corroboration — **not** cryptographic proof of
@@ -178,13 +199,14 @@ investigation.py ── orchestrates adapters, correlates via explicit ids
    ├── adapters/oneclick.py      1Click status      (reported)
    ├── adapters/solver_relay.py  intent status      (reported)
    ├── adapters/near_rpc.py      NEAR tx + logs     (authoritative)
-   └── adapters/evm_rpc.py       EVM receipts       (authoritative)
+   ├── adapters/evm_rpc.py       EVM receipts       (authoritative)
+   └── adapters/btc_rpc.py       Bitcoin tx + addr  (authoritative)
    │
    ▼
 model.py ── normalized EvidenceItem stream
    │
    ▼
-reconcile.py ── deterministic engine, 9 safety invariants
+reconcile.py ── deterministic engine, 11 safety invariants
    │
    ▼
 report.py ── JSON + Markdown investigation report
@@ -205,13 +227,13 @@ No LLM decides whether a transaction is confirmed.
 | `tracesettle/assets.py` | `nep141:` asset id parsing to chain/contract. |
 | `tracesettle/config.py` | Public chain RPC map and explorer URL builders. |
 | `tracesettle/httpclient.py` | Timeouts, bounded retries, error classification. |
-| `tracesettle/adapters/` | One adapter per data source. |
+| `tracesettle/adapters/` | One adapter per data source (1Click, solver relay, NEAR, EVM, Bitcoin). |
 | `tracesettle/reconcile.py` | Deterministic reconciliation engine. |
 | `tracesettle/investigation.py` | Orchestrator. |
 | `tracesettle/report.py` | Report generation. |
 | `tracesettle/ui.py` | Standard-library web interface. |
 | `tracesettle/__main__.py` | CLI. |
-| `tests/` | 136 tests. `evidence/raw/` fixtures are real captures. |
+| `tests/` | 224 tests. `evidence/raw/` fixtures are real captures; `tests/fixtures/synthetic/` are clearly labelled synthetic. |
 | `PHASE1_FEASIBILITY.md` | Phase 1 feasibility and API verification. |
 | `docs/official/` | NEAR documentation captured during Phase 1. |
 | `requirements-dev.txt` | Development-only tool pins (`pytest`, `pyflakes`). Not needed at runtime. |
@@ -239,7 +261,7 @@ tool. Supported interpreter: CPython 3.11+; verified on 3.13.15.
 ## Tests
 
 ```sh
-python3 -m pytest tests/ -q          # all 136
+python3 -m pytest tests/ -q          # all 224
 python3 -m pytest tests/test_safety_invariants.py -q
 python3 -m pytest tests/test_ui.py -q
 ```
@@ -248,9 +270,19 @@ Test coverage includes successful settlement, a failed intent with a verified
 refund, a failed intent without a verified refund, a confirmed source with
 incomplete downstream evidence, conflicting or unavailable status information,
 invalid identifiers, malformed responses, API timeouts, missing fields, and
-unreliable correlation. `tests/test_safety_invariants.py` fails the build if the
-engine ever claims a refund or a destination delivery without the required
-evidence.
+unreliable correlation. It also covers the Bitcoin refund path: an ambiguous
+refund address history that must stay unconfirmed, a single verified on-chain
+refund, a confirmed payout to the wrong address, an unreachable Bitcoin source,
+a source returning raw bytes that do not match the claimed txid (contradictory),
+raw bytes that are merely unavailable (a limitation, not a contradiction), an
+address history that cannot be shown to be complete (insufficient evidence,
+reported as unknown rather than unavailable), an address history whose page
+budget stops mid-chain, a multi-page history that ends naturally, amount
+denomination and fee handling, and a missing on-chain withdrawal recipient.
+`tests/test_safety_invariants.py` fails the build if the engine ever claims a
+refund or a destination delivery without the required evidence, and adds
+state-transition invariants (reported never becomes confirmed, unavailable never
+becomes confirmed, incomplete never becomes confirmed, contradictions surface).
 
 Tests exercise the real adapter and engine code. Only the network transport is
 substituted, and real Phase 1 captures are loaded from `evidence/raw/` rather

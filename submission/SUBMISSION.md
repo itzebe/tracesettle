@@ -57,7 +57,7 @@ Response handling:
 
 | Status | Meaning | Action |
 | --- | --- | --- |
-| 201 | Saved | Done. Tell the human. |
+| 222 | Saved | Done. Tell the human. |
 | 400 | Field failed validation | Fix the listed fields, resend with the same requestId. |
 | 403 | Not open, or cross-site | Tell the human. Do not retry. |
 | 409 | Name or email already used | Ask the human. Do not rename to work around it. |

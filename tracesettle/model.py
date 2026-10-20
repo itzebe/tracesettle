@@ -50,6 +50,7 @@ class EventType(str, enum.Enum):
     NEAR_TX_FINAL = "NEAR_TX_FINAL"
     NEAR_TX_EXECUTION = "NEAR_TX_EXECUTION"
     INTENT_EVENT_OBSERVED = "INTENT_EVENT_OBSERVED"
+    INTENT_WITHDRAWAL_OBSERVED = "INTENT_WITHDRAWAL_OBSERVED"
     DESTINATION_TX_INCLUDED = "DESTINATION_TX_INCLUDED"
     DESTINATION_TX_EXECUTED = "DESTINATION_TX_EXECUTED"
     DESTINATION_TRANSFER_OBSERVED = "DESTINATION_TRANSFER_OBSERVED"
@@ -69,6 +70,10 @@ class Verification(str, enum.Enum):
     MISSING = "MISSING"
     #: The required source could not be queried or does not support the operation.
     UNAVAILABLE = "UNAVAILABLE"
+    #: The source was reachable, but a required search could not be completed, so
+    #: the evidence is insufficient. Distinct from UNAVAILABLE (a source problem):
+    #: here the source answered and simply could not be searched exhaustively.
+    INCOMPLETE = "INCOMPLETE"
     #: Independently obtained evidence conflicts in a material way.
     CONTRADICTORY = "CONTRADICTORY"
     #: Evidence belongs to a controlled test case, not a real transaction.
@@ -170,6 +175,10 @@ class EvidenceItem:
     reported_status: str | None = None
     timestamp: str | None = None
     evidence_url: str | None = None
+    #: How the verification class was reached (e.g. a locally recomputed txid, a
+    #: script-level match, an upstream report). ``None`` when the source states the
+    #: fact without a distinct method.
+    verification_method: str | None = None
     details: dict[str, Any] = field(default_factory=dict)
     limitations: tuple[str, ...] = ()
 
@@ -187,6 +196,7 @@ class EvidenceItem:
             "reported_status": self.reported_status,
             "timestamp": self.timestamp,
             "evidence_url": self.evidence_url,
+            "verification_method": self.verification_method,
             "details": self.details,
             "limitations": list(self.limitations),
         }
@@ -223,6 +233,9 @@ class StageAssessment:
     summary: str
     supporting_evidence_ids: tuple[str, ...] = ()
     conflicting_evidence_ids: tuple[str, ...] = ()
+    #: Health of the sources relevant to this stage. Lets a consumer tell
+    #: "no source was queried" apart from "the source was queried and failed".
+    source_statuses: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -231,6 +244,7 @@ class StageAssessment:
             "summary": self.summary,
             "supporting_evidence_ids": list(self.supporting_evidence_ids),
             "conflicting_evidence_ids": list(self.conflicting_evidence_ids),
+            "source_statuses": dict(self.source_statuses),
         }
 
 

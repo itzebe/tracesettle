@@ -54,6 +54,22 @@ INTENTS_CONTRACT = "intents.near"
 
 
 @dataclass
+class IntentWithdrawal:
+    """A DIP-4 ``ft_withdraw`` destination for one intent.
+
+    When an intent executes, ``intents.near`` emits an ``ft_withdraw`` event whose
+    ``msg`` names the recipient on the destination (or refund) chain, e.g.
+    ``{"recipient":"btc:bc1q…"}``. That recipient is an explicit identifier
+    linking the intent hash to the chain transaction that pays it.
+    """
+
+    intent_hash: str
+    recipient: str | None = None
+    token: str | None = None
+    amount: str | None = None
+
+
+@dataclass
 class NearTxData:
     tx_hash: str
     sender_account_id: str | None = None
@@ -67,6 +83,10 @@ class NearTxData:
     found_intent_hashes: list[str] = field(default_factory=list)
     #: Origin-chain transaction hashes found in bridge ``BRIDGED_FROM`` memos.
     bridged_from_origin_hashes: list[str] = field(default_factory=list)
+    #: Bitcoin origin txids found in bridge ``utxo_added`` events (``<txid>@<vout>``).
+    btc_utxo_origin_hashes: list[str] = field(default_factory=list)
+    #: Intent withdrawal destinations (intent hash -> on-chain recipient).
+    intent_withdrawals: list[IntentWithdrawal] = field(default_factory=list)
     error_message: str | None = None
 
 
@@ -122,6 +142,81 @@ def _intent_hashes_in_logs(logs: list[str]) -> list[str]:
             value = entry.get("intent_hash")
             if isinstance(value, str) and value and value not in found:
                 found.append(value)
+    return found
+
+
+def _intent_withdrawals(logs: list[str]) -> list[IntentWithdrawal]:
+    """Collect DIP-4 ``ft_withdraw`` destinations, keyed by intent hash.
+
+    The ``msg`` field is a JSON string naming the withdrawal recipient, e.g.
+    ``{"recipient":"btc:bc1q…","fee":"0"}``. That recipient is the explicit
+    identifier connecting an intent to the chain transaction that pays it.
+    """
+    found: list[IntentWithdrawal] = []
+    marker = "EVENT_JSON:"
+    for log in logs:
+        if marker not in log or "ft_withdraw" not in log:
+            continue
+        try:
+            parsed = json.loads(log.split(marker, 1)[1])
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(parsed, dict):
+            continue
+        for entry in parsed.get("data") or []:
+            if not isinstance(entry, dict):
+                continue
+            intent_hash = entry.get("intent_hash")
+            if not isinstance(intent_hash, str) or not intent_hash:
+                continue
+            recipient = None
+            msg = entry.get("msg")
+            if isinstance(msg, str) and msg:
+                try:
+                    decoded = json.loads(msg)
+                except (ValueError, TypeError):
+                    decoded = None
+                if isinstance(decoded, dict) and isinstance(decoded.get("recipient"), str):
+                    recipient = decoded["recipient"]
+            found.append(
+                IntentWithdrawal(
+                    intent_hash=intent_hash,
+                    recipient=recipient,
+                    token=entry.get("token") if isinstance(entry.get("token"), str) else None,
+                    amount=entry.get("amount") if isinstance(entry.get("amount"), str) else None,
+                )
+            )
+    return found
+
+
+def _btc_utxo_origin_hashes(logs: list[str]) -> list[str]:
+    """Collect Bitcoin origin txids from bridge ``utxo_added`` events.
+
+    When the BTC connector credits a Bitcoin deposit, it emits a ``bridge``
+    ``utxo_added`` event whose ``utxo_storage_keys`` are ``"<btc_txid>@<vout>"``.
+    The txid is the origin-chain transaction, named explicitly — the Bitcoin
+    equivalent of the EVM ``BRIDGED_FROM`` memo.
+    """
+    found: list[str] = []
+    marker = "EVENT_JSON:"
+    for log in logs:
+        if marker not in log or "utxo_added" not in log:
+            continue
+        try:
+            parsed = json.loads(log.split(marker, 1)[1])
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(parsed, dict):
+            continue
+        for entry in parsed.get("data") or []:
+            if not isinstance(entry, dict):
+                continue
+            for key in entry.get("utxo_storage_keys") or []:
+                if not isinstance(key, str) or "@" not in key:
+                    continue
+                txid = key.split("@", 1)[0]
+                if txid and txid not in found:
+                    found.append(txid)
     return found
 
 
@@ -235,6 +330,8 @@ def fetch_tx(tx_hash: str, client: HttpClient) -> tuple[SourceReport, NearTxData
             logs=logs,
             found_intent_hashes=_intent_hashes_in_logs(logs),
             bridged_from_origin_hashes=_bridged_from_origin_hashes(logs),
+            btc_utxo_origin_hashes=_btc_utxo_origin_hashes(logs),
+            intent_withdrawals=_intent_withdrawals(logs),
         )
         return (
             SourceReport(
@@ -283,6 +380,7 @@ def _build_evidence(data: NearTxData, endpoint: str) -> list[EvidenceItem]:
             tx_hash=data.tx_hash,
             chain="near",
             evidence_url=url,
+            verification_method="NEAR RPC transaction inclusion",
             details={
                 "sender_account_id": data.sender_account_id,
                 "signer_id": data.signer_id,
@@ -309,6 +407,7 @@ def _build_evidence(data: NearTxData, endpoint: str) -> list[EvidenceItem]:
                 chain="near",
                 reported_status=data.final_execution_status,
                 evidence_url=url,
+                verification_method="NEAR RPC final execution status",
                 details={"final_execution_status": data.final_execution_status},
                 limitations=("Finality does not, by itself, prove the intent settled.",),
             )
@@ -326,6 +425,7 @@ def _build_evidence(data: NearTxData, endpoint: str) -> list[EvidenceItem]:
             chain="near",
             reported_status="FAILED" if data.execution_failed else "SUCCESS",
             evidence_url=url,
+            verification_method="NEAR RPC execution outcome",
             details={"execution_failed": data.execution_failed},
             limitations=(
                 "On-chain execution success is not, by itself, semantic proof that this "
@@ -346,6 +446,7 @@ def _build_evidence(data: NearTxData, endpoint: str) -> list[EvidenceItem]:
                 tx_hash=data.tx_hash,
                 chain="near",
                 evidence_url=url,
+                verification_method="NEAR RPC DIP-4 EVENT_JSON log parse",
                 details={
                     "contract": INTENTS_CONTRACT,
                     "intent_hashes": data.found_intent_hashes,
@@ -358,7 +459,46 @@ def _build_evidence(data: NearTxData, endpoint: str) -> list[EvidenceItem]:
             )
         )
 
-    if data.bridged_from_origin_hashes:
+    if data.intent_withdrawals:
+        items.append(
+            EvidenceItem(
+                id=f"ev-near-withdrawal-{data.tx_hash}",
+                stage=Stage.NEAR_SETTLEMENT,
+                event_type=EventType.INTENT_WITHDRAWAL_OBSERVED,
+                source=SOURCE,
+                verification=Verification.CONFIRMED,
+                provenance=Provenance.REAL,
+                tx_hash=data.tx_hash,
+                chain="near",
+                evidence_url=url,
+                verification_method="NEAR RPC DIP-4 intent-withdrawal event parse",
+                details={
+                    "contract": INTENTS_CONTRACT,
+                    "standard": "dip4",
+                    "withdrawals": [
+                        {
+                            "intent_hash": w.intent_hash,
+                            "recipient": w.recipient,
+                            "token": w.token,
+                            "amount": w.amount,
+                        }
+                        for w in data.intent_withdrawals
+                    ],
+                    "withdrawal_recipients": [
+                        w.recipient for w in data.intent_withdrawals if w.recipient
+                    ],
+                },
+                limitations=(
+                    "Records the on-chain withdrawal destination named for the intent. It links "
+                    "the intent to a recipient address; it does not prove the destination-chain "
+                    "transaction was broadcast or confirmed.",
+                ),
+            )
+        )
+
+    origin_hashes = data.bridged_from_origin_hashes or data.btc_utxo_origin_hashes
+    if origin_hashes:
+        is_btc = not data.bridged_from_origin_hashes and bool(data.btc_utxo_origin_hashes)
         items.append(
             EvidenceItem(
                 id=f"ev-near-bridge-credit-{data.tx_hash}",
@@ -370,16 +510,29 @@ def _build_evidence(data: NearTxData, endpoint: str) -> list[EvidenceItem]:
                 tx_hash=data.tx_hash,
                 chain="near",
                 evidence_url=url,
+                verification_method=(
+                    "NEAR RPC bridge utxo_added event parse"
+                    if is_btc
+                    else "NEAR RPC BRIDGED_FROM memo parse"
+                ),
                 details={
-                    "bridge_contract": "omft.near",
+                    "bridge_contract": "btc-connector.bridge.near" if is_btc else "omft.near",
                     "credited_to": "intents.near",
-                    "bridged_from_origin_hashes": data.bridged_from_origin_hashes,
-                    "memo_marker": "BRIDGED_FROM",
+                    "bridged_from_origin_hashes": origin_hashes,
+                    "memo_marker": "utxo_added" if is_btc else "BRIDGED_FROM",
                 },
                 limitations=(
-                    "Confirms an on-chain bridge credit carrying a BRIDGED_FROM memo. The memo "
-                    "links the origin transaction hash explicitly; it is corroborating evidence, "
-                    "not proof of the wider settlement claim.",
+                    (
+                        "Confirms an on-chain bridge credit carrying a utxo_added event whose "
+                        "utxo_storage_key names the origin Bitcoin transaction. It is corroborating "
+                        "evidence, not proof of the wider settlement claim."
+                    )
+                    if is_btc
+                    else (
+                        "Confirms an on-chain bridge credit carrying a BRIDGED_FROM memo. The memo "
+                        "links the origin transaction hash explicitly; it is corroborating evidence, "
+                        "not proof of the wider settlement claim."
+                    )
                 ),
             )
         )

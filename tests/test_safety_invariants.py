@@ -26,6 +26,8 @@ def test_all_documented_invariants_are_present():
         "no_missing_destination_is_failure",
         "zero_refund_is_not_proof_of_no_refund",
         "reported_refund_not_confirmed",
+        "refund_confirmation_requires_onchain_evidence",
+        "bitcoin_refund_requires_confirmed_payout",
         "reported_failure_is_not_loss",
         "source_success_is_not_settlement",
         "unavailable_rpc_is_not_failure",
@@ -619,6 +621,36 @@ _CLAIM_GATE_CASES = {
             provenance=Provenance.SIMULATED,
         )
     ],
+    "contradictory_refund": [
+        ev(
+            "ev-refund-contradiction",
+            Stage.REFUND,
+            EventType.REFUND_TX_CONFIRMED,
+            Verification.CONTRADICTORY,
+            tx_hash="377b55cbc30363d991838b4803c8c83b231d0193e4b31f8e527728520469721f",
+            chain="btc",
+            details={"reason": "TXID_BYTES_MISMATCH"},
+        )
+    ],
+    "contradictory_refund_alongside_confirmed_payout": [
+        ev(
+            "ev-refund-contradiction",
+            Stage.REFUND,
+            EventType.REFUND_TX_CONFIRMED,
+            Verification.CONTRADICTORY,
+            tx_hash="377b55cbc30363d991838b4803c8c83b231d0193e4b31f8e527728520469721f",
+            chain="btc",
+            details={"reason": "TXID_BYTES_MISMATCH"},
+        ),
+        ev(
+            "ev-refund-ok",
+            Stage.REFUND,
+            EventType.REFUND_TX_CONFIRMED,
+            Verification.CONFIRMED,
+            tx_hash="9a80de61146553e809f2e57a7b789ae5e64de7aa67fa06009881eac638051226",
+            chain="btc",
+        ),
+    ],
 }
 
 
@@ -646,3 +678,134 @@ def test_gate_also_holds_when_all_sources_are_down():
         result = reconcile(evidence, statuses)
         assert result.outcome is not OverallOutcome.REFUND_VERIFIED, name
         assert result.outcome is not OverallOutcome.SETTLED_VERIFIED, name
+
+
+# --- State-transition invariants (Phase 3 audit) ----------------------------
+#
+# These fail if the engine permits an invalid transition: a state that must never
+# be produced from the given evidence.
+
+
+def test_reported_never_becomes_confirmed_from_a_favourable_status_alone():
+    """A favourable upstream status must never, by itself, confirm any stage."""
+    evidence = [
+        ev(
+            "ev-claim",
+            Stage.NEAR_SETTLEMENT,
+            EventType.SETTLEMENT_CLAIMED,
+            Verification.REPORTED,
+            reported_status="SUCCESS",
+        ),
+        ev(
+            "ev-claim2",
+            Stage.SOURCE_CHAIN_DEPOSIT,
+            EventType.UPSTREAM_STATUS,
+            Verification.REPORTED,
+            reported_status="SUCCESS",
+        ),
+    ]
+    result = reconcile(evidence, {"oneclick_status": SourceStatus.OK})
+    assert result.stage(Stage.NEAR_SETTLEMENT).state is not StageState.CONFIRMED
+    assert result.stage(Stage.SOURCE_CHAIN_DEPOSIT).state is not StageState.CONFIRMED
+    assert result.outcome is not OverallOutcome.SETTLED_VERIFIED
+
+
+def test_unavailable_never_becomes_confirmed_without_new_evidence():
+    """An unavailable source alone can never confirm a stage."""
+    result = reconcile(
+        [
+            ev(
+                "ev-refund-unavailable",
+                Stage.REFUND,
+                EventType.REFUND_TX_CONFIRMED,
+                Verification.UNAVAILABLE,
+                source="btc_rpc",
+                chain="btc",
+            )
+        ],
+        {"oneclick_status": SourceStatus.TIMEOUT, "btc_rpc": SourceStatus.TIMEOUT},
+    )
+    assert result.stage(Stage.REFUND).state is not StageState.CONFIRMED
+    assert result.outcome is not OverallOutcome.REFUND_VERIFIED
+
+
+def test_incomplete_search_never_becomes_a_unique_candidate_confirmation():
+    """INCOMPLETE evidence must never be read as a confirmed refund."""
+    result = reconcile(
+        [
+            ev(
+                "ev-refund-incomplete",
+                Stage.REFUND,
+                EventType.REFUND_TX_CONFIRMED,
+                Verification.INCOMPLETE,
+                source="btc_rpc",
+                chain="btc",
+                details={"reason": "INCOMPLETE_ADDRESS_HISTORY"},
+            )
+        ],
+        {"oneclick_status": SourceStatus.OK, "btc_rpc": SourceStatus.OK},
+    )
+    assert result.stage(Stage.REFUND).state is not StageState.CONFIRMED
+    assert result.outcome is not OverallOutcome.REFUND_VERIFIED
+
+
+def test_contradictory_evidence_is_not_silently_downgraded_to_a_note():
+    """A contradiction must surface as a contradiction, not a passing note."""
+    result = reconcile(
+        [
+            ev(
+                "ev-refund-contradiction",
+                Stage.REFUND,
+                EventType.REFUND_TX_CONFIRMED,
+                Verification.CONTRADICTORY,
+                source="btc_rpc",
+                chain="btc",
+                tx_hash="b" * 64,
+                details={"reason": "TXID_BYTES_MISMATCH"},
+            )
+        ],
+        {"oneclick_status": SourceStatus.OK, "btc_rpc": SourceStatus.OK},
+    )
+    assert result.stage(Stage.REFUND).state is StageState.CONTRADICTORY
+    assert result.outcome is OverallOutcome.CONTRADICTORY
+    assert result.contradictions, "the contradiction must be reported, not hidden"
+
+
+def test_verified_transaction_is_not_a_verified_refund_without_correlation():
+    """A confirmed transaction that is not tied to the refund must not confirm REFUND.
+
+    Only a REFUND_TX_CONFIRMED item with a tx hash confirms REFUND. A confirmed
+    source-chain transaction is not refund evidence.
+    """
+    result = reconcile(
+        [
+            ev(
+                "ev-source-exec",
+                Stage.SOURCE_CHAIN_DEPOSIT,
+                EventType.SOURCE_TX_EXECUTED,
+                Verification.CONFIRMED,
+                tx_hash="0xorigin",
+                chain="eth",
+            )
+        ],
+        {"oneclick_status": SourceStatus.OK, "evm_rpc": SourceStatus.OK},
+    )
+    assert result.stage(Stage.REFUND).state is not StageState.CONFIRMED
+    assert result.outcome is not OverallOutcome.REFUND_VERIFIED
+
+
+def test_missing_refund_hash_is_never_fabricated():
+    """A reported refund with no tx hash must not produce a tx hash anywhere."""
+    claim = ev(
+        "ev-refund-claim",
+        Stage.REFUND,
+        EventType.REFUND_CLAIMED,
+        Verification.REPORTED,
+        reported_status="REFUNDED",
+        details={"refunded_amount": "11746"},
+    )
+    assert claim.tx_hash is None
+    result = reconcile([claim], {"oneclick_status": SourceStatus.OK})
+    assert result.stage(Stage.REFUND).state is StageState.REPORTED
+    assert result.outcome is OverallOutcome.REFUND_REPORTED_UNVERIFIED
+    assert result.last_confirmed_stage is None
