@@ -57,14 +57,30 @@ used to link stages.
 
 ## Try it: do X → see Y
 
-No API keys, no paid services, no database. Python 3.11+ standard library only.
+No API keys, no paid services, no database. Python 3.11+ standard library only —
+TRACESETTLE has **zero runtime dependencies**. The development tools are separate
+and pinned in `requirements-dev.txt`.
+
+**0. Set up a clean environment (development tools only).**
+
+```sh
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements-dev.txt
+```
+
+`requirements-dev.txt` pins `pytest` and `pyflakes` (and pytest's transitive
+dependencies). You only need it to run the checks below; the tool itself runs on
+a bare interpreter.
 
 **1. Run the tests.**
 
 ```sh
-python3 -m pytest tests/ -q
+python -m pytest tests/ --collect-only -q   # 136 tests collected
+python -m pytest tests/ -q                  # 136 passed
 ```
-→ `135 passed`.
+→ `136 passed`.
 
 **2. Investigate a real, known-good swap from the command line.**
 
@@ -116,6 +132,13 @@ Other limits, stated in every report:
 - A reported failure is not proof funds were lost.
 - A reported refund of zero is not proof no refund can occur.
 - Simulated test evidence is always labelled.
+- **No real refunded transaction has yet been independently verified.** Refund
+  handling is exercised only against clearly-labelled synthetic fixtures, because
+  no completed-refund sample was captured during feasibility work.
+- The bridge credit is confirmed from an on-chain `BRIDGED_FROM` memo that names
+  the origin transaction hash. That memo is emitted by the bridge service, so it is
+  strong identifier-based, on-chain corroboration — **not** cryptographic proof of
+  the whole settlement. The report states this in the evidence item's limitations.
 
 ## Architecture
 
@@ -164,9 +187,17 @@ No LLM decides whether a transaction is confirmed.
 | `tracesettle/report.py` | Report generation. |
 | `tracesettle/ui.py` | Standard-library web interface. |
 | `tracesettle/__main__.py` | CLI. |
-| `tests/` | 135 tests. `evidence/raw/` fixtures are real captures. |
+| `tests/` | 136 tests. `evidence/raw/` fixtures are real captures. |
 | `PHASE1_FEASIBILITY.md` | Phase 1 feasibility and API verification. |
 | `docs/official/` | NEAR documentation captured during Phase 1. |
+| `requirements-dev.txt` | Development-only tool pins (`pytest`, `pyflakes`). Not needed at runtime. |
+
+## Runtime dependencies
+
+**None.** TRACESETTLE imports only the Python standard library at runtime
+(`json`, `urllib`, `http.server`, `hashlib`, and similar). `requirements-dev.txt`
+exists solely for the test and lint tooling and must not be installed to run the
+tool. Supported interpreter: CPython 3.11+; verified on 3.13.15.
 
 ## Security and reliability
 
@@ -184,7 +215,7 @@ No LLM decides whether a transaction is confirmed.
 ## Tests
 
 ```sh
-python3 -m pytest tests/ -q          # all 135
+python3 -m pytest tests/ -q          # all 136
 python3 -m pytest tests/test_safety_invariants.py -q
 python3 -m pytest tests/test_ui.py -q
 ```

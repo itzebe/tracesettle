@@ -69,9 +69,13 @@ when evidence is insufficient.
 
 ## Phase 2 additions (TRACESETTLE MVP)
 
-- **Runtime:** Python 3.13 standard library only at runtime. `pytest` and `pyflakes`
-  are dev-only. Do not add runtime dependencies (free infra, no DB).
-- **Tests:** `python3 -m pytest tests/ -q` (135 tests). `tests/conftest.py` provides
+- **Runtime:** Python 3.11+ standard library only at runtime (verified on 3.13.15).
+  `pytest` and `pyflakes` are dev-only, pinned in `requirements-dev.txt`. Do not add
+  runtime dependencies (free infra, no DB).
+- **Dev setup:** `python3 -m venv .venv && . .venv/bin/activate &&
+  python -m pip install -r requirements-dev.txt`. Verified working in a clean venv
+  with no globally installed pytest/pyflakes.
+- **Tests:** `python3 -m pytest tests/ -q` (136 tests). `tests/conftest.py` provides
   `FakeOpener`, which substitutes only `urllib`'s opener; adapters, engine, report,
   and UI are the real code paths. Real captures are loaded from `evidence/raw/`;
   synthetic fixtures live in `tests/fixtures/synthetic/` and carry a `_provenance`
@@ -118,11 +122,11 @@ when evidence is insufficient.
   unreachable resolves the REFUND stage to `UNAVAILABLE` (outcome
   `REFUND_REPORTED_UNVERIFIED`), so the gap is visible rather than looking like a
   plain unverified report.
-- **Tests:** `python3 -m pytest tests/ -q` (135 tests).
+- **Tests:** `python3 -m pytest tests/ -q` (136 tests).
 
 ## Independent verification (pre-submission)
 
-- **Verified (2026-10-20):** full suite `135 passed`; `pyflakes` clean over
+- **Verified (2026-10-20):** full suite `136 passed`; `pyflakes` clean over
   `tracesettle/ tests/ demo/`; `compileall` OK; no non-stdlib runtime imports.
 - **Live reproduction confirmed** through the HTTP interface: deposit address
   `0xb741c00f6d63b6ded0ccada1a82bcbadc38a572b` -> `SETTLED_VERIFIED`, all four stages
@@ -139,4 +143,22 @@ when evidence is insufficient.
 - **Read-only re-confirmed:** the only non-GET upstream calls are JSON-RPC reads
   (`eth_getTransactionReceipt`, NEAR `tx`, solver `get_status`). No signing,
   custody, transaction submission, or recovery code exists.
+
+## Final reproducibility pass (pre-submission)
+
+- **Dev manifest added:** `requirements-dev.txt` pins `pytest==9.1.1`,
+  `pyflakes==4.0.3`, and pytest's transitive deps (`iniconfig`, `packaging`,
+  `pluggy`, `Pygments`). Runtime stays zero-dependency.
+- **Clean-environment proof:** installed into a fresh `python3 -m venv .venv` that
+  had no pytest/pyflakes (`ModuleNotFoundError` before install). All checks then
+  ran from that venv: 136 collected, 136 passed, pyflakes clean, compileall OK, no
+  external runtime imports, 15 modules imported.
+- **Live reproduction re-confirmed (this run):** via `POST /api/investigate` ->
+  `SETTLED_VERIFIED`, 17 evidence items, 9/9 safety invariants PASS.
+- **New regression test:** `test_bridge_credit_origin_hash_match_is_case_insensitive`
+  guards the hex case-insensitivity requirement. Mutation-checked: it fails if
+  `.lower()` normalization is removed from `_names_expected_origin_tx`.
+- **Docs corrected:** `reconcile.py` module docstring now lists all 9 invariants;
+  README carries the current count (136), a runtime-dependencies section, and the
+  "no real refunded transaction independently verified yet" limitation.
 

@@ -123,9 +123,11 @@ def main() -> int:
     _show(result2)
     print(f"\n  summary: {result2.summary}")
     print(
-        "\n  The tool reports settlement as REPORTED, never CONFIRMED, because the\n"
-        "  intent-hash path has no reverse lookup to the origin or destination legs.\n"
-        "  It states the limitation instead of inventing the missing stages."
+        "\n  The intent-hash path has no reverse lookup to the origin or destination\n"
+        "  legs, so it can never confirm more than the settlement stage. When the\n"
+        "  solver relay answers it reports that statement as REPORTED; when the relay\n"
+        "  is unreachable it reports the stages as UNAVAILABLE. In neither case does it\n"
+        "  invent the missing stages."
     )
 
     print(f"\n{RULE}")

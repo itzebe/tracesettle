@@ -521,6 +521,25 @@ def test_bridge_credit_without_expectation_is_backwards_compatible():
     assert result.stage(Stage.BRIDGE_DEPOSIT_CREDIT).state is StageState.CONFIRMED
 
 
+def test_bridge_credit_origin_hash_match_is_case_insensitive():
+    """Hex origin hashes differ in case across sources; matching must ignore it.
+
+    The investigated hash and the memo's ``BRIDGED_FROM`` hash come from different
+    producers, so one may be checksummed and the other lowercase. A match must not
+    depend on case, and the ``0X`` prefix form must be handled too.
+    """
+    canonical = "0xfca11aa01bce5fc20a6cbeb4ca30e8af994cda47de9bd5fa53a9ca4295ba01d2"
+    for observed in (canonical.upper(), "0X" + canonical[2:].upper()):
+        result = reconcile(
+            [_bridge_credit("ev-bridge-case", [observed])],
+            {"near_rpc": SourceStatus.OK},
+            expected_origin_tx_hashes=[canonical],
+        )
+        assert result.stage(Stage.BRIDGE_DEPOSIT_CREDIT).state is StageState.CONFIRMED, (
+            f"case-differing origin hash {observed!r} failed to match the investigated hash"
+        )
+
+
 # THE GATE: the engine must never claim a refund or a destination delivery
 # without the required evidence, across a broad matrix of partial evidence.
 

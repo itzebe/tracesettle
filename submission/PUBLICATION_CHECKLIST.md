@@ -23,7 +23,9 @@ DO NOT AUTOMATE.
 - [ ] Push `master` with the audit history intact (human action — this workspace
       has **no git remote**, so nothing has been pushed).
 - [ ] Confirm the README renders and the "do X → see Y" steps work from a clean
-      clone with only the Python standard library.
+      clone. The tool runs on the standard library alone; running the tests needs
+      the pinned dev tools: `python3 -m venv .venv`, activate, then
+      `python -m pip install -r requirements-dev.txt`.
 - [ ] Confirm `tests/fixtures/synthetic/README.md` and `evidence/README.md`
       clearly label synthetic vs. real captures.
 - [ ] Confirm no secrets, keys, `.env` files, or personal data are committed.
@@ -57,7 +59,8 @@ DO NOT AUTOMATE.
 
 - [x] No signing, custody, transaction submission, or recovery capability.
 - [x] No private keys or seed phrases requested or stored.
-- [x] No paid APIs or paid infrastructure; standard library only at runtime.
+- [x] No paid APIs or paid infrastructure; standard library only at runtime
+      (development tool pins are in `requirements-dev.txt`, runtime is zero-dep).
 - [x] No fabricated balances, transaction hashes, timestamps, or live-status badges.
 - [x] Synthetic fixtures are labelled and never presented as live evidence.
 - [x] Read-only guarantee stated in the README and in every generated report.

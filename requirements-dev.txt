@@ -1,0 +1,32 @@
+# TRACESETTLE development dependencies.
+#
+# RUNTIME DEPENDENCIES: none. TRACESETTLE is standard-library only at runtime
+# (see README "Runtime dependencies"). This file pins the tools needed to run
+# the documented checks: the test suite (pytest) and static analysis (pyflakes).
+#
+# These are DEVELOPMENT-ONLY. Do not install them to run the tool.
+#
+# Supported interpreter: CPython 3.11+ (verified on 3.13.15; see README).
+#
+# Install into an isolated environment:
+#   python3 -m venv .venv
+#   . .venv/bin/activate
+#   python -m pip install --upgrade pip
+#   python -m pip install -r requirements-dev.txt
+#
+# Then run the checks from the repository root:
+#   python -m pytest tests/ --collect-only -q
+#   python -m pytest tests/ -q
+#   python -m pyflakes tracesettle/ tests/ demo/
+#   python -m compileall -q tracesettle/ tests/ demo/
+
+# Direct tools.
+pytest==9.1.1
+pyflakes==4.0.3
+
+# Transitive dependencies of pytest, pinned for a reproducible environment.
+# pyflakes has no dependencies.
+iniconfig==2.3.1
+packaging==26.3
+pluggy==1.7.0
+Pygments==2.21.0

@@ -44,3 +44,9 @@ Notes for the human:
 - Do not claim cryptographic proof. The bridge credit is strong, identifier-based,
   on-chain corroboration; the memo is the bridge's own statement of which origin
   transaction it credited.
+- Do not claim a live refund was verified. No real refunded transaction has been
+  independently verified yet; refund handling is covered by labelled synthetic
+  tests only. The demo does not show a refund.
+- The demo's verified case is a real swap, but it depends on public endpoints being
+  reachable at recording time. If a source is down the tool says so rather than
+  showing a cached result, so record the demo while the endpoints respond.
