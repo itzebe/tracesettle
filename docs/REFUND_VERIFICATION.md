@@ -324,4 +324,50 @@ now carries that for every decisive item — a locally recomputed transaction id
 script-level recipient match, an RPC inclusion check, a DIP-4 event-log parse, or a
 plain upstream report — and the report and interface render it alongside the class.
 
+## Addendum (2026-10-19): the provider began naming the refund transaction
+
+The sections above are the record of what was true when the reference case was
+first analysed: 1Click's `/v0/status` exposed **no** refund transaction hash, and
+the status endpoint was returning HTTP 521. Both of those changed while the
+submission was being prepared, and the tool handled the change without a code
+change, which is the point of the design.
+
+Observed on 2026-10-19:
+
+* `/v0/status` answered HTTP 200 again.
+* `swapDetails.originChainTxHashes` for the reference swap now lists **two**
+  transactions: the refund transaction
+  `377b55cbc30363d991838b4803c8c83b231d0193e4b31f8e527728520469721f` and the
+  deposit transaction
+  `9a80de61146553e809f2e57a7b789ae5e64de7aa67fa06009881eac638051226`.
+
+`originChainTxHashes` is documented only as "hashes and explorer URLs for all
+transactions on the origin chain" (`evidence/raw/oneclick_openapi.yaml`). It is not
+a dedicated refund field, so the tool does not assume an entry is a refund: it
+classifies each origin-chain transaction by its on-chain recipient — a
+transaction paying the quote's `refundTo` address is a refund candidate, one
+paying the deposit address is the deposit. That is what happens here: the named
+transaction pays the refund address, so it is treated as a refund candidate and
+then independently validated (raw bytes fetched, txid recomputed, recipient script
+matched). The result is `REFUND_VERIFIED` with the refund `CONFIRMED` at
+`SCRIPT_VALIDATED`, discovered via the explicit provider-named hash
+(`discovery: "explicit"`), and the evidence item records that method.
+
+Two consequences worth stating plainly:
+
+1. **The change did not require a code change.** A provider-supplied hash is a
+   *discovery* anchor only; it flows through the same identity and script checks as
+   any other candidate. The tool's honesty does not depend on the provider's field
+   set staying the same.
+2. **The solver relay still reports `SETTLED` for this intent** while 1Click
+   reports `REFUNDED`. Both are `REPORTED` statements, and the engine records them
+   as such; it does not silently pick one. The independently confirmed facts are
+   the on-chain ones: the deposit, the bridge credit, the NEAR settlement, and the
+   refund payout. The conflicting service statements remain visible in the
+   evidence stream.
+
+The earlier conclusion — "this refund cannot be confirmed from free data" — was
+correct for the data available at the time. It is superseded by the provider
+exposing the transaction, not by any change in the tool's logic.
+
 

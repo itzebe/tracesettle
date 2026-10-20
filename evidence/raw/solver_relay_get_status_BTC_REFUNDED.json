@@ -1,0 +1,11 @@
+{
+  "result": {
+    "intent_hash": "69o3QALyLCrYnE7suvystyBemwnB3khdsCuRKYnPRgrn",
+    "status": "SETTLED",
+    "data": {
+      "hash": "83tjFcjTXfVxRVnBTeYyWmcww7CUWwEpcVmkGeHAjxL1"
+    }
+  },
+  "id": 1,
+  "jsonrpc": "2.0"
+}

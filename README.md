@@ -84,10 +84,10 @@ a bare interpreter.
 **1. Run the tests.**
 
 ```sh
-python -m pytest tests/ --collect-only -q   # 224 tests collected
-python -m pytest tests/ -q                  # 224 passed
+python -m pytest tests/ --collect-only -q   # 233 tests collected
+python -m pytest tests/ -q                  # 233 passed
 ```
-→ `224 passed`.
+→ `233 passed`.
 
 **2. Investigate a real, known-good swap from the command line.**
 
@@ -114,22 +114,33 @@ python3 -m tracesettle investigate 7ypUiXpjHmDoFFzo8nRWvY4BMfcKR5YkF5Cez28N94dG 
 → outcome `SETTLED_REPORTED_ONLY`: the intent hash path can read a service
 statement but cannot reach the whole path, and the report says so.
 
-**5. See why a real reported Bitcoin refund is not confirmed.**
+**5. See how a real reported Bitcoin refund is handled.**
 
 ```sh
 python3 -m tracesettle investigate bc1qjrkwt3v42j4am6csmkaelmpwd9shufl4laxkxm
 ```
-→ outcome `REFUND_REPORTED_UNVERIFIED` when the Bitcoin sources are reachable. 1Click
-reports a refund for this BTC→TRON swap but exposes no refund transaction hash, so
-the tool reads the intent's on-chain withdrawal recipient and looks for a
-**confirmed** Bitcoin transaction paying that address (first from the provider's
-transaction list, then from the address's own confirmed history). That address has
-several confirmed payouts and the provider named none of them, so no payout can be
-tied to this intent by an explicit identifier. The refund therefore stays a reported
-claim, and the stage reads `UNAVAILABLE` with reason `AMBIGUOUS_REFUND_PAYOUT`.
-Confirming one of the payouts would be a guess, so the tool does not. When a Bitcoin
-source is unreachable the refund likewise stays `UNAVAILABLE` (a source problem, not
-a failed refund).
+→ the tool reads the intent's on-chain withdrawal recipient and looks for a
+**confirmed** Bitcoin transaction paying that address, using the provider's
+transaction list first and the address's own confirmed history as a fallback. A
+payout is confirmed only when it is tied to the intent by an explicit identifier
+and the tool validates it itself (raw bytes fetched, txid recomputed, recipient
+script matched). Whether that is possible depends on what the provider exposes,
+which changes over time:
+
+- When the provider names the refund transaction (as its record did on
+  2026-10-19), the tool validates it and the refund reads `CONFIRMED`; the outcome
+  is `REFUND_VERIFIED` and the evidence records `discovery: "explicit"`.
+- When the provider names no transaction and the address has several confirmed
+  payouts, no payout can be tied to the intent by an explicit identifier: the
+  refund stays a reported claim and the stage reads `UNAVAILABLE` with reason
+  `AMBIGUOUS_REFUND_PAYOUT`. Confirming one of the payouts would be a guess, so the
+  tool does not.
+
+Either way the tool never picks a payout by amount or timestamp, and a reported
+refund alone never confirms the stage. When a Bitcoin source is unreachable the
+refund likewise stays `UNAVAILABLE` (a source problem, not a failed refund). The
+demo states the outcome it actually observed in that run rather than a fixed
+verdict.
 
 **6. Run the web interface.**
 
@@ -145,12 +156,24 @@ Copy or download the report as JSON or Markdown.
 ```sh
 python3 demo/demonstrate.py
 ```
-→ prints the verified swap, the intent-hash-only lookup, and the real refunded
+→ prints the verified swap, the intent-hash-only lookup, and a real refunded
 swap side by side, with the decisive evidence for each confirmed stage. The third
-case is reported-only: its refund address has several confirmed payouts and the
-provider named none of them, so the refund stays unconfirmed. It uses
-live public endpoints; if one is unreachable it says so and does not fabricate a
-result.
+case shows how a refund is handled: the tool reports the level the evidence
+actually supports and never upgrades a reported refund to a confirmed one without
+a transaction it validated itself. It uses live public endpoints; if one is
+unreachable it says so and does not fabricate a result. The upstream record can
+change between runs, so the third case states what it observed in that run rather
+than a fixed verdict.
+
+**7b. If a public endpoint is down, replay the captured evidence.**
+
+```sh
+python3 demo/demonstrate.py --offline
+```
+→ runs the same analysis over the **real captures** in `evidence/raw/`, with no
+network access. It substitutes only the network transport, so the adapter,
+engine, and report code is the real code. The run is labelled `OFFLINE REPLAY`
+and states the capture date; it does not show that an endpoint is answering now.
 
 ## Supported input and honest limits
 
@@ -169,14 +192,14 @@ Other limits, stated in every report:
 - A reported refund of zero is not proof no refund can occur.
 - Simulated test evidence is always labelled.
 - **Bitcoin refunds are only confirmed when the payout is unambiguous.** For a real
-  refunded BTC→TRON swap (`bc1qjrkwt3v42j4am6csmkaelmpwd9shufl4laxkxm`), 1Click
-  reports a refund but exposes no refund transaction hash. Its withdrawal recipient
-  has several confirmed payouts, so the payout cannot be tied to this intent by an
-  explicit identifier: the refund stays a reported claim and the stage reads
-  `UNAVAILABLE` (`AMBIGUOUS_REFUND_PAYOUT`). A refund is confirmed only when exactly
-  one confirmed payout matches, or when the provider itself names the transaction.
-  The tool never picks a payout by amount or timestamp, and a reported refund alone
-  never confirms the stage.
+  refunded BTC→TRON swap (`bc1qjrkwt3v42j4am6csmkaelmpwd9shufl4laxkxm`), the tool
+  confirms the refund only when exactly one confirmed payout matches the on-chain
+  withdrawal recipient, or when the provider itself names the transaction and it
+  validates. When the provider names no transaction and the recipient has several
+  confirmed payouts, the payout cannot be tied to this intent by an explicit
+  identifier: the refund stays a reported claim and the stage reads `UNAVAILABLE`
+  (`AMBIGUOUS_REFUND_PAYOUT`). The tool never picks a payout by amount or timestamp,
+  and a reported refund alone never confirms the stage.
 - The reported refund amount and the observed on-chain payout may differ. Both
   figures are stated and the difference is disclosed, not reconciled; a lower
   payout is expected because network and bridge fees are deducted.
@@ -233,8 +256,11 @@ No LLM decides whether a transaction is confirmed.
 | `tracesettle/report.py` | Report generation. |
 | `tracesettle/ui.py` | Standard-library web interface. |
 | `tracesettle/__main__.py` | CLI. |
-| `tests/` | 224 tests. `evidence/raw/` fixtures are real captures; `tests/fixtures/synthetic/` are clearly labelled synthetic. |
+| `demo/demonstrate.py` | Read-only walkthrough (live, or `--offline` replay of captures). |
+| `demo/replay_opener.py` | Offline transport that replays `evidence/raw/` through the real code. |
+| `tests/` | 233 tests. `evidence/raw/` fixtures are real captures; `tests/fixtures/synthetic/` are clearly labelled synthetic. |
 | `PHASE1_FEASIBILITY.md` | Phase 1 feasibility and API verification. |
+| `submission/` | Hackathon artifacts: API payload shape, technical summary, demo post draft, publication checklist. |
 | `docs/official/` | NEAR documentation captured during Phase 1. |
 | `requirements-dev.txt` | Development-only tool pins (`pytest`, `pyflakes`). Not needed at runtime. |
 
@@ -261,7 +287,7 @@ tool. Supported interpreter: CPython 3.11+; verified on 3.13.15.
 ## Tests
 
 ```sh
-python3 -m pytest tests/ -q          # all 224
+python3 -m pytest tests/ -q          # all 233
 python3 -m pytest tests/test_safety_invariants.py -q
 python3 -m pytest tests/test_ui.py -q
 ```

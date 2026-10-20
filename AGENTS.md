@@ -53,8 +53,8 @@ All verified live; see `PHASE1_FEASIBILITY.md` and `evidence/README.md` for raw 
 
 ## Evidence classification vocabulary
 
-`CONFIRMED` (authoritative on-chain source) · `REPORTED` (upstream service, not independently checked) ·
-`MISSING` · `CONTRADICTORY` · `UNAVAILABLE` · `SIMULATED`. Reconciliation returns an explicit **unknown**
+`CONFIRMED` (authoritative on-chain source) Â· `REPORTED` (upstream service, not independently checked) Â·
+`MISSING` Â· `CONTRADICTORY` Â· `UNAVAILABLE` Â· `SIMULATED`. Reconciliation returns an explicit **unknown**
 when evidence is insufficient.
 
 ## Docs conventions
@@ -75,7 +75,7 @@ when evidence is insufficient.
 - **Dev setup:** `python3 -m venv .venv && . .venv/bin/activate &&
   python -m pip install -r requirements-dev.txt`. Verified working in a clean venv
   with no globally installed pytest/pyflakes.
-- **Tests:** `python3 -m pytest tests/ -q` (224 tests). `tests/conftest.py` provides
+- **Tests:** `python3 -m pytest tests/ -q` (233 tests). `tests/conftest.py` provides
   `FakeOpener`, which substitutes only `urllib`'s opener; adapters, engine, report,
   and UI are the real code paths. Real captures are loaded from `evidence/raw/`;
   synthetic fixtures live in `tests/fixtures/synthetic/` and carry a `_provenance`
@@ -139,7 +139,7 @@ when evidence is insufficient.
   plain unverified report. A refund whose on-chain search could not be *completed*
   resolves to `UNKNOWN` (insufficient evidence) instead, and is still never
   confirmed.
-- **Tests:** `python3 -m pytest tests/ -q` (224 tests).
+- **Tests:** `python3 -m pytest tests/ -q` (233 tests).
 
 ## Independent verification (pre-submission)
 
@@ -185,10 +185,14 @@ when evidence is insufficient.
   public NEAR Intents explorer's embedded recent-transactions feed (a traceable
   source), then re-checked against 1Click status and NEAR RPC directly:
   - `bc1qjrkwt3v42j4am6csmkaelmpwd9shufl4laxkxm` — a real **refunded** BTC→TRON
-    swap. Outcome `REFUND_REPORTED_UNVERIFIED`; refund is `UNAVAILABLE`
-    (`UNSUPPORTED_CHAIN`, Bitcoin has no configured RPC), deposit credit
+    swap. At the time this was first checked the refund resolved to `UNAVAILABLE`
+    (the reported refund could not be tied to a transaction), deposit credit
     `REPORTED`, destination `MISSING`, NEAR settlement `CONFIRMED`. This is now
-    demo Case 3 and a README reproduction step.
+    demo Case 3 and a README reproduction step. **Correction (2026-10-19):** the
+    Bitcoin origin *does* have a configured public source (`adapters/btc_rpc.py`,
+    mempool.space with a blockstream.info fallback); the earlier `UNSUPPORTED_CHAIN`
+    label was wrong. With the provider now naming the refund transaction the case
+    resolves to `REFUND_VERIFIED`. See the refund section above.
   - `494d57e5e385f36b1b4953a863f4c53785e000b9e72b61ac7fe4be47bdbed7ea` — an
     ETH→Base swap whose destination RPC returns HTTP 403, producing
     `DELIVERY_UNVERIFIED` with `UNAVAILABLE` stages. Not added to the demo
@@ -243,6 +247,20 @@ when evidence is insufficient.
   tool never picks one by amount or timestamp. Captured history:
   `evidence/raw/btc_address_history.json`; test:
   `test_btc_refund_real_address_history_is_ambiguous`.
+- **UPDATE (2026-10-19): the provider now names the refund transaction.** On
+  2026-10-19 the 1Click record for this swap listed **both** the refund tx
+  (`377b55cb…721f`) and the deposit tx (`9a80de61…1226`) in
+  `originChainTxHashes`, so the explicit-identifier path fires: the refund is
+  validated (raw bytes fetched, txid recomputed, recipient script matched) and the
+  outcome becomes `REFUND_VERIFIED` with the refund `CONFIRMED`
+  (`discovery: "explicit"`). The ambiguity rule above is unchanged and still holds
+  when the provider names nothing. The solver relay reports `SETTLED` for the same
+  intent; both statements are kept as `REPORTED`. Fresh captures:
+  `evidence/raw/oneclick_status_btc_REFUNDED.json`,
+  `solver_relay_get_status_BTC_REFUNDED.json`,
+  `btc_address_stats_refund.json`; offline replay `demo/replay_opener.py:refunded_swap_opener`.
+  See `docs/REFUND_VERIFICATION.md` addendum. Lesson: verdicts must follow the live
+  evidence, so demo prose is derived from the observed result, never hardcoded.
 - **Amount differences are disclosed, not reconciled.** Reported 11746 sats vs
   observed 12884 sats are both printed; the tool does not claim the difference is an
   error (fees may be deducted).
@@ -297,7 +315,7 @@ silently weaken.
   (raw-hex retrieval, outspend, address-history completeness) and investigation
   tests (script-level verification, contradiction, incomplete history, explicit
   hash).
-- **Docs:** `docs/REFUND_VERIFICATION.md` §6 now documents the tier table and the
+- **Docs:** `docs/REFUND_VERIFICATION.md` Â§6 now documents the tier table and the
   rules the engine enforces.
 
 
@@ -326,3 +344,44 @@ silently weaken.
   note on `verification_method`; `docs/REFUND_VERIFICATION.md` section 0 records the
   field alongside the tier/level distinction; the `reconcile.py` docstring now
   lists all 11 invariants (was 9).
+
+## Live re-verification and claims audit (2026-10-19)
+
+Re-checked every external claim against live sources and audited the docs for
+stale or overstated statements. The 1Click status endpoint (HTTP 521 earlier)
+answered 200 again, and the demo was re-run against real endpoints.
+
+- **The provider now names the refund transaction.** For the reference BTC→TRON
+  swap, `swapDetails.originChainTxHashes` now lists both the refund tx
+  (`377b55cb...721f`) and the deposit tx (`9a80de61...1226`). The tool's
+  explicit-identifier path therefore fires and the refund resolves to
+  `REFUND_VERIFIED` (refund `CONFIRMED`, `discovery: "explicit"`). **No code change
+  was needed** — a provider hash is a discovery anchor that still passes the same
+  raw-bytes txid recomputation and script match as any candidate.
+- **A genuine two-source conflict is now visible.** The solver relay reports
+  `SETTLED` for the same intent that 1Click reports `REFUNDED`. Both are preserved
+  as `REPORTED` evidence; the engine does not silently pick one. The independently
+  confirmed facts are the four on-chain stages.
+- **Stale prose fixed (claims audit).** README steps 5/7 and the limits list, the
+  demo's Case 3 explanation, `TECHNICAL_SUMMARY.md`, `AGENTS.md`, and
+  `PHASE1_FEASIBILITY.md` all described the refund as permanently unconfirmable.
+  Each now states the conditional rule (confirmed when the provider names it or
+  exactly one payout matches; `UNAVAILABLE`/`AMBIGUOUS_REFUND_PAYOUT` otherwise).
+  `docs/REFUND_VERIFICATION.md` keeps its historical record and gains a dated
+  addendum, rather than rewriting what was true at the time.
+- **Demo explanation is now data-driven.** `demo/demonstrate.py:_explain_refund`
+  reads `discovery` back from the confirmed evidence instead of hardcoding how the
+  payout was found, so the prose cannot go stale when upstream changes.
+- **Offline replay extended to Case 3.** `demo/replay_opener.py:refunded_swap_opener`
+  replays the captured 1Click status, solver relay, NEAR RPC, Bitcoin tx/hex, and
+  address-history responses; `--offline` now runs all three cases with no network.
+- **New captures.** `evidence/raw/oneclick_status_btc_REFUNDED.json`,
+  `solver_relay_get_status_BTC_REFUNDED.json`, `btc_address_stats_refund.json`,
+  documented in `evidence/README.md`.
+- **Tests.** 224 → 233. New: `test_offline_refund_replay_confirms_from_a_validated_transaction`,
+  `test_offline_refund_replay_preserves_the_conflicting_service_statements`, and
+  the updated offline-demo assertion. Full suite `233 passed`; `pyflakes` clean;
+  `compileall` OK; offline demo byte-identical across runs.
+- **Lesson recorded.** Verdicts must follow the live evidence. Demo/report prose
+  that asserts a fixed upstream behavior will go stale; derive it from the
+  observed result instead.

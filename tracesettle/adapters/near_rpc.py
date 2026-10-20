@@ -526,13 +526,11 @@ def _build_evidence(data: NearTxData, endpoint: str) -> list[EvidenceItem]:
                         "Confirms an on-chain bridge credit carrying a utxo_added event whose "
                         "utxo_storage_key names the origin Bitcoin transaction. It is corroborating "
                         "evidence, not proof of the wider settlement claim."
-                    )
-                    if is_btc
-                    else (
-                        "Confirms an on-chain bridge credit carrying a BRIDGED_FROM memo. The memo "
+                        if is_btc
+                        else "Confirms an on-chain bridge credit carrying a BRIDGED_FROM memo. The memo "
                         "links the origin transaction hash explicitly; it is corroborating evidence, "
                         "not proof of the wider settlement claim."
-                    )
+                    ),
                 ),
             )
         )

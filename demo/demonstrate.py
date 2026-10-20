@@ -17,15 +17,23 @@ unavailable, the script says so plainly and does not fabricate a result. Nothing
 here signs, submits, or moves funds, and no key is requested.
 
 Usage:
-    python3 demo/demonstrate.py
+    python3 demo/demonstrate.py            # query live public endpoints
+    python3 demo/demonstrate.py --offline  # replay captured fixtures (no network)
+
+The ``--offline`` mode substitutes only the network transport, replaying the real
+Phase 1 captures from ``evidence/raw/`` through the same adapter and engine code.
+It is labelled as a replay and never presented as a live query; a replay cannot
+show that an endpoint is answering right now.
 """
 
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from tracesettle.httpclient import HttpClient  # noqa: E402
 from tracesettle.investigation import build_result, investigate  # noqa: E402
@@ -87,17 +95,102 @@ def _decisive_evidence(inv, stage: Stage) -> None:
             return
 
 
-def main() -> int:
-    client = HttpClient()
+def _explain_refund(result3, inv3) -> None:
+    """Explain the refund outcome from the evidence actually observed.
+
+    The explanation must not assert how the payout was found: whether the
+    provider named the refund transaction or the tool had to locate it from the
+    refund address's history is read back from the confirmed evidence item. A
+    hardcoded claim here would go stale the moment the upstream record changes.
+    """
+    refund_state = result3.stage(Stage.REFUND).state
+    confirmed = [
+        e
+        for e in inv3.evidence
+        if e.stage is Stage.REFUND
+        and e.verification.value == "CONFIRMED"
+        and e.tx_hash
+    ]
+    if refund_state is StageState.CONFIRMED and confirmed:
+        discovery = confirmed[0].details.get("discovery")
+        if discovery == "explicit":
+            found = "the provider named the refund transaction, and the tool validated it"
+        else:
+            found = (
+                "the provider named no refund transaction, so the payout was located from\n"
+                "  the refund address's own confirmed history"
+            )
+        print(
+            f"\n  The refund is independently confirmed: a confirmed Bitcoin transaction pays\n"
+            f"  the address recorded on-chain for this intent's withdrawal. Here, {found}.\n"
+            "  The amount reported by the service and the amount observed on-chain are both\n"
+            "  stated; any difference is disclosed, not reconciled."
+        )
+    elif result3.outcome.value == "REFUND_REPORTED_UNVERIFIED":
+        print(
+            "\n  A refund is reported by the upstream service, but it is not independently\n"
+            "  confirmed, so it stays a reported claim. The tool keeps the states apart: a\n"
+            "  reported refund is never shown as confirmed, and a source that could not be\n"
+            "  reached is shown as UNAVAILABLE, never as a failed refund. If several confirmed\n"
+            "  payouts pay the refund address and the provider named none of them, the payout\n"
+            "  cannot be tied to this intent and the refund stays unconfirmed too."
+        )
+    else:
+        print(
+            f"\n  NOTE: this run returned {result3.outcome.value}. An upstream source may be\n"
+            "  unreachable or the record may have changed. The states above are what was\n"
+            "  actually observed."
+        )
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="TRACESETTLE read-only demonstration.")
+    parser.add_argument(
+        "--offline",
+        action="store_true",
+        help="replay the real Phase 1 captures from evidence/raw/ instead of "
+        "querying the live network (labelled as a replay)",
+    )
+    args = parser.parse_args(argv)
+
+    if args.offline:
+        from replay_opener import (
+            CAPTURE_DATE,
+            intent_hash_opener,
+            refunded_swap_opener,
+            verified_settlement_opener,
+        )
+
+        def make_client(fixture):
+            return HttpClient(
+                opener=fixture,
+                max_attempts=1,
+                timeout=1.0,
+                backoff_base=0.0,
+                sleeper=lambda _: None,
+            )
+
+        client1 = make_client(verified_settlement_opener())
+        client2 = make_client(intent_hash_opener())
+        client3 = make_client(refunded_swap_opener())
+    else:
+        client = HttpClient()
+        client1 = client2 = client3 = client
 
     print(RULE)
     print("TRACESETTLE demonstration - read-only settlement investigation")
+    if args.offline:
+        print(f"MODE: OFFLINE REPLAY of captured fixtures (fetched {CAPTURE_DATE} UTC).")
+        print("      This is not a live query. It shows the tool's analysis of real")
+        print("      captured responses; it does not show an endpoint answering now.")
+    else:
+        print("MODE: LIVE - querying public endpoints now.")
     print(RULE)
 
     # --- Case 1: independently verified settlement --------------------------
     print("\nCASE 1 - a real swap, investigated by deposit address")
     print(f"identifier: {VERIFIED_DEPOSIT_ADDRESS}\n")
-    inv = investigate(VERIFIED_DEPOSIT_ADDRESS, client)
+    inv = investigate(VERIFIED_DEPOSIT_ADDRESS, client1)
     result = build_result(inv)
     _show(result)
 
@@ -124,7 +217,7 @@ def main() -> int:
     print(f"\n{RULE}")
     print("CASE 2 - an intent hash on its own cannot reach the whole path")
     print(f"identifier: {INCOMPLETE_INTENT_HASH}\n")
-    inv2 = investigate(INCOMPLETE_INTENT_HASH, client)
+    inv2 = investigate(INCOMPLETE_INTENT_HASH, client2)
     result2 = build_result(inv2)
     _show(result2)
     print(f"\n  summary: {result2.summary}")
@@ -140,34 +233,11 @@ def main() -> int:
     print(f"\n{RULE}")
     print("CASE 3 - a real refunded Bitcoin swap")
     print(f"identifier: {REFUNDED_DEPOSIT_ADDRESS}\n")
-    inv3 = investigate(REFUNDED_DEPOSIT_ADDRESS, client)
+    inv3 = investigate(REFUNDED_DEPOSIT_ADDRESS, client3)
     result3 = build_result(inv3)
     _show(result3)
     print(f"\n  summary: {result3.summary}")
-    refund_state = result3.stage(Stage.REFUND).state
-    if refund_state is StageState.CONFIRMED:
-        print(
-            "\n  The refund is independently confirmed: a confirmed Bitcoin transaction pays\n"
-            "  the address recorded on-chain for this intent's withdrawal. 1Click exposes no\n"
-            "  refund transaction hash, so the payout was located from the refund address's own\n"
-            "  confirmed history. The amount reported by the service and the amount observed\n"
-            "  on-chain are both stated; any difference is disclosed, not reconciled."
-        )
-    elif result3.outcome.value == "REFUND_REPORTED_UNVERIFIED":
-        print(
-            "\n  A refund is reported by the upstream service, but it is not independently\n"
-            "  confirmed, so it stays a reported claim. The tool keeps the states apart: a\n"
-            "  reported refund is never shown as confirmed, and a source that could not be\n"
-            "  reached is shown as UNAVAILABLE, never as a failed refund. If several confirmed\n"
-            "  payouts pay the refund address and the provider named none of them, the payout\n"
-            "  cannot be tied to this intent and the refund stays unconfirmed too."
-        )
-    else:
-        print(
-            f"\n  NOTE: this run returned {result3.outcome.value}. An upstream source may be\n"
-            "  unreachable or the record may have changed. The states above are what was\n"
-            "  actually observed."
-        )
+    _explain_refund(result3, inv3)
 
     print(f"\n{RULE}")
     print("No case signs, submits, or moves funds. No key was requested.")

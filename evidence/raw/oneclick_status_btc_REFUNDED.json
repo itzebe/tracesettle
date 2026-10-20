@@ -1,0 +1,92 @@
+{
+  "status": "REFUNDED",
+  "updatedAt": "2026-10-20T07:38:57.000Z",
+  "correlationId": "4ad494de-28f7-45df-9766-e41190f1aed7",
+  "swapDetails": {
+    "depositedAmount": "13646",
+    "depositedAmountUsd": "11.201864940000",
+    "depositedAmountFormatted": "0.00013646",
+    "intentHashes": [
+      "69o3QALyLCrYnE7suvystyBemwnB3khdsCuRKYnPRgrn"
+    ],
+    "nearTxHashes": [
+      "5G5fbpGz6EJryTD245spudvhQqpx4FC3UcmYRBCjgL7T",
+      "83tjFcjTXfVxRVnBTeYyWmcww7CUWwEpcVmkGeHAjxL1"
+    ],
+    "amountIn": null,
+    "amountInFormatted": null,
+    "amountInUsd": null,
+    "amountOut": null,
+    "amountOutFormatted": null,
+    "amountOutUsd": null,
+    "slippage": null,
+    "refundedAmount": "11746",
+    "refundedAmountFormatted": "0.00011746",
+    "refundedAmountUsd": "9.642173940000",
+    "refundReason": "FEE_ESTIMATION_FAILED",
+    "refundFee": "1900",
+    "withdrawFee": "905140",
+    "originChainTxHashes": [
+      {
+        "hash": "377b55cbc30363d991838b4803c8c83b231d0193e4b31f8e527728520469721f",
+        "explorerUrl": ""
+      },
+      {
+        "hash": "9a80de61146553e809f2e57a7b789ae5e64de7aa67fa06009881eac638051226",
+        "explorerUrl": ""
+      }
+    ],
+    "destinationChainTxHashes": []
+  },
+  "quoteResponse": {
+    "timestamp": "2026-10-20T03:59:25.429Z",
+    "signature": "ed25519:t4uo1rWerav5n7B6bNk71UdrWTsCG8egr7X43EHnpbU5aUQGSfXJBAufT9owgJeKJYva2bTYR5izBrTvkeQf21d",
+    "quoteRequest": {
+      "dry": false,
+      "swapType": "EXACT_INPUT",
+      "depositMode": "SIMPLE",
+      "slippageTolerance": 200,
+      "originAsset": "1cs_v1:btc:native:coin",
+      "depositType": "ORIGIN_CHAIN",
+      "destinationAsset": "nep141:tron-d28a265909efecdcee7c5028585214ea0b96f015.omft.near",
+      "amount": "13646",
+      "refundTo": "bc1q77w5l5fhkrsq7m05eykug59ks7r8tf6ptmdrgw",
+      "refundType": "ORIGIN_CHAIN",
+      "recipient": "TMHgHktNNXsq9keB6YptHXG2XB8ko1gPYK",
+      "recipientType": "DESTINATION_CHAIN",
+      "deadline": "2026-10-20T04:59:25.415Z",
+      "appFees": [
+        {
+          "limitOrderId": null,
+          "recipient": "rangoni.near",
+          "fee": 2
+        },
+        {
+          "limitOrderId": null,
+          "recipient": "5880ad2b362620fadf759cbceb1cd5737ce8c6ed7fb8e9942881e6731f9247dd",
+          "fee": 20
+        }
+      ],
+      "virtualChainRecipient": null,
+      "virtualChainRefundRecipient": null,
+      "referral": "rango",
+      "confidentiality": "public"
+    },
+    "quote": {
+      "amountIn": "13646",
+      "amountInFormatted": "0.00013646",
+      "amountInUsd": "11.191903360000",
+      "minAmountIn": "13646",
+      "amountOut": "10270761",
+      "amountOutFormatted": "10.270761",
+      "amountOutUsd": "10.262862784791",
+      "minAmountOut": "10065345",
+      "timeWhenInactive": "2026-10-23T04:59:25.415Z",
+      "depositAddress": "bc1qjrkwt3v42j4am6csmkaelmpwd9shufl4laxkxm",
+      "deadline": "2026-10-23T04:59:25.415Z",
+      "timeEstimate": 860,
+      "refundFee": "1900",
+      "withdrawFee": "905140"
+    }
+  }
+}

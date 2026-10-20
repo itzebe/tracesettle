@@ -11,7 +11,14 @@ import pytest
 from tracesettle import config
 from tracesettle.adapters import btc_rpc, evm_rpc, near_rpc, oneclick, solver_relay
 from tracesettle.assets import parse_asset_id
-from tracesettle.model import SourceStatus, Verification
+from tracesettle.model import (
+    EventType,
+    EvidenceItem,
+    Provenance,
+    SourceStatus,
+    Stage,
+    Verification,
+)
 
 from conftest import (
     FakeOpener,
@@ -222,6 +229,27 @@ def test_near_rpc_bridge_leg_yields_confirmed_deposit_credit(opener: FakeOpener)
     assert credit[0].stage.value == "BRIDGE_DEPOSIT_CREDIT"
     assert credit[0].verification is Verification.CONFIRMED
     assert REAL_ORIGIN_TX in credit[0].details["bridged_from_origin_hashes"]
+    # The limitation must be a tuple of whole strings. A bare string here would be
+    # serialized character by character, so the guard checks both the type and the
+    # rendered shape.
+    assert isinstance(credit[0].limitations, tuple)
+    assert all(isinstance(s, str) and len(s) > 20 for s in credit[0].limitations)
+    assert all(len(s) > 20 for s in credit[0].to_dict()["limitations"])
+
+
+def test_evidence_item_coerces_bare_string_limitations():
+    """A bare-string limitation is normalized, never split into characters."""
+    item = EvidenceItem(
+        id="ev-x",
+        stage=Stage.NEAR_SETTLEMENT,
+        event_type=EventType.INTENT_EVENT_OBSERVED,
+        source="test",
+        verification=Verification.CONFIRMED,
+        provenance=Provenance.REAL,
+        limitations="one whole limitation",
+    )
+    assert item.limitations == ("one whole limitation",)
+    assert item.to_dict()["limitations"] == ["one whole limitation"]
 
 
 def test_near_rpc_settlement_leg_yields_no_bridge_credit(opener: FakeOpener):

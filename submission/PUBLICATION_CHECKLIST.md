@@ -4,6 +4,15 @@ Status: **not published, not pushed, not deployed, not posted.** This file is a
 plan for the human to execute. Every step that leaves this machine is marked
 DO NOT AUTOMATE.
 
+## Submission artifacts in this directory
+
+| File | Role |
+| --- | --- |
+| `submission/SUBMISSION.md` | The exact API payload shape, field rules, and response handling. |
+| `submission/TECHNICAL_SUMMARY.md` | Problem, approach, differentiators, and a claim-to-evidence table. |
+| `submission/DEMO_POST.md` | Draft text for the human to publish on X. |
+| `submission/PUBLICATION_CHECKLIST.md` | This file: the ordered plan and the hard rules. |
+
 ## Hard rules from HACKATHON.md
 
 - The repository must be **public** by 2026-11-14T23:59:00Z. Judges cannot open a
@@ -42,7 +51,10 @@ DO NOT AUTOMATE.
 
 - [ ] Records a short demo: run `python3 demo/demonstrate.py` or the web UI on the
       real deposit address, showing `SETTLED_VERIFIED` with four `CONFIRMED`
-      stages and the incomplete case.
+      stages and the incomplete case. If a public endpoint is down at recording
+      time, `python3 demo/demonstrate.py --offline` replays the real captures from
+      `evidence/raw/`; the run is labelled `OFFLINE REPLAY` and must be presented
+      as a replay, not as a live query.
 - [ ] Post states the project was built at NEAR HACKATHON and attaches the demo
       media.
 - [ ] Draft text is in `submission/DEMO_POST.md` (below).

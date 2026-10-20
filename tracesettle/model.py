@@ -182,6 +182,13 @@ class EvidenceItem:
     details: dict[str, Any] = field(default_factory=dict)
     limitations: tuple[str, ...] = ()
 
+    def __post_init__(self) -> None:
+        # ``limitations`` must be a tuple of strings. A bare string passed by
+        # mistake would otherwise iterate character by character in ``to_dict``
+        # and every renderer, turning one limitation into a list of letters.
+        if isinstance(self.limitations, str):
+            object.__setattr__(self, "limitations", (self.limitations,))
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,

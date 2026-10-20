@@ -343,6 +343,9 @@ bridge, no trading bot, no token, no AI chatbot, no automated recovery, no fabri
    refund stays `UNAVAILABLE` (`AMBIGUOUS_REFUND_PAYOUT`) rather than being guessed. A refund is confirmed
    only when exactly one payout matches, or when the provider names the transaction. The Explorer API's
    `bearerAuth` (partner-gated) is the only known source that could disambiguate, and it is out of scope.
+   *(Update 2026-10-19: the provider later began naming the refund transaction in `originChainTxHashes`,
+   so the explicit-identifier path now confirms this refund. The limitation above still holds whenever the
+   provider names nothing. See the addendum in `docs/REFUND_VERIFICATION.md`.)*
 
 ---
 
