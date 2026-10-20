@@ -13,13 +13,15 @@ list asserted by the test-suite):
 1. A missing destination transaction is never classified as a failed transfer.
 2. ``refundedAmount: "0"`` is never taken as proof that no refund occurred/can occur.
 3. A reported refund is not independently confirmed without the refund transaction.
-4. A reported intent failure is not proof that funds were lost.
-5. A successful source transaction is not proof the overall swap settled.
-6. An unavailable RPC never causes a stage to be labelled failed.
-7. Amount/timestamp similarity is never used as a correlation basis.
-8. A hash commitment is not represented as proof the committed event is true.
-9. Simulated evidence is never treated as confirmation, even when it carries a
-   ``CONFIRMED`` verification label.
+4. Refund confirmation requires on-chain evidence, never a provider claim alone.
+5. A Bitcoin refund requires a confirmed on-chain payout.
+6. A reported intent failure is not proof that funds were lost.
+7. A successful source transaction is not proof the overall swap settled.
+8. An unavailable RPC never causes a stage to be labelled failed.
+9. Amount/timestamp similarity is never used as a correlation basis.
+10. A hash commitment is not represented as proof the committed event is true.
+11. Simulated evidence is never treated as confirmation, even when it carries a
+    ``CONFIRMED`` verification label.
 """
 
 from __future__ import annotations

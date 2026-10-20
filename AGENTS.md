@@ -147,7 +147,7 @@ when evidence is insufficient.
   `tracesettle/ tests/ demo/`; `compileall` OK; no non-stdlib runtime imports.
 - **Live reproduction confirmed** through the HTTP interface: deposit address
   `0xb741c00f6d63b6ded0ccada1a82bcbadc38a572b` -> `SETTLED_VERIFIED`, all four stages
-  `CONFIRMED`, REFUND `MISSING`, 17 evidence items, 9 safety invariants all PASS.
+  `CONFIRMED`, REFUND `MISSING`, 17 evidence items, 11 safety invariants all PASS.
   Note 1Click nests the hash arrays under `swapDetails` in `/v0/status`.
 - **Defect found and fixed in this pass:** `_assess_stage` treated any
   `Verification.CONFIRMED` item as confirming its stage, even when its provenance was
@@ -171,11 +171,11 @@ when evidence is insufficient.
   ran from that venv: 224 collected, 224 passed, pyflakes clean, compileall OK, no
   external runtime imports, 15 modules imported.
 - **Live reproduction re-confirmed (this run):** via `POST /api/investigate` ->
-  `SETTLED_VERIFIED`, 17 evidence items, 9/9 safety invariants PASS.
+  `SETTLED_VERIFIED`, 17 evidence items, 11/11 safety invariants PASS.
 - **New regression test:** `test_bridge_credit_origin_hash_match_is_case_insensitive`
   guards the hex case-insensitivity requirement. Mutation-checked: it fails if
   `.lower()` normalization is removed from `_names_expected_origin_tx`.
-- **Docs corrected:** `reconcile.py` module docstring now lists all 9 invariants;
+- **Docs corrected:** `reconcile.py` module docstring now lists all 11 invariants;
   README carries the current count (224), a runtime-dependencies section, and the
   "no real refunded transaction independently verified yet" limitation.
 
@@ -301,3 +301,28 @@ silently weaken.
   rules the engine enforces.
 
 
+
+## Phase 3 closeout — evidence model completeness (2026-10-20)
+
+- **What changed.** `EvidenceItem` gained a first-class `verification_method`
+  field (after `evidence_url`, serialized in `to_dict()`). It states *how* a
+  classification was reached, so the class and its basis travel together instead
+  of the method being left implicit in adapter prose. Populated in every adapter
+  (`btc_rpc`, `near_rpc`, `evm_rpc`, `oneclick`, `solver_relay`), the EVM refund
+  confirmation path in `investigation.py`, and the `UNAVAILABLE` / `INCOMPLETE` /
+  `CONTRADICTORY` marker helpers.
+- **Rendered.** The Markdown evidence table (`report.py`) and the web UI
+  (`ui.py`) both gained a `Method` column. A reader can now see, per row, that a
+  Bitcoin payout was reached by "locally recomputed txid over raw bytes;
+  script-level recipient match" rather than by trusting an explorer.
+- **Honesty guard.** `refund_payout_evidence` states "explorer-reported" when
+  `identity_validated` is false, so the method string never claims a check that
+  did not run.
+- **Tests.** 222 -> 224. New: `test_btc_refund_evidence_states_its_verification_method`
+  and `test_btc_refund_evidence_without_identity_validation_says_so`; the refund
+  report test now also asserts the field is populated and the `| Method |` column
+  is present. Full suite `224 passed`; `pyflakes` clean; `compileall` OK.
+- **Docs.** README classification table gained the missing `INCOMPLETE` row and a
+  note on `verification_method`; `docs/REFUND_VERIFICATION.md` section 0 records the
+  field alongside the tier/level distinction; the `reconcile.py` docstring now
+  lists all 11 invariants (was 9).
