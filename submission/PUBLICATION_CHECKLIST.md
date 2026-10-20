@@ -57,7 +57,7 @@ DO NOT AUTOMATE.
       as a replay, not as a live query.
 - [ ] Post states the project was built at NEAR HACKATHON and attaches the demo
       media.
-- [ ] Draft text is in `submission/DEMO_POST.md` (below).
+- [ ] Draft text is in `submission/DEMO_POST.md`; publish it from there.
 
 ## 4. Submission payload
 

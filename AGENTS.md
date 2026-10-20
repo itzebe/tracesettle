@@ -149,6 +149,9 @@ when evidence is insufficient.
   `0xb741c00f6d63b6ded0ccada1a82bcbadc38a572b` -> `SETTLED_VERIFIED`, all four stages
   `CONFIRMED`, REFUND `MISSING`, 17 evidence items, 11 safety invariants all PASS.
   Note 1Click nests the hash arrays under `swapDetails` in `/v0/status`.
+  *(Evidence-item counts are live-dependent and drift as sources add or drop
+  records; the stage states and the invariant results are the stable assertions.
+  A later live run of the same case returned 18 items with the same verdict.)*
 - **Defect found and fixed in this pass:** `_assess_stage` treated any
   `Verification.CONFIRMED` item as confirming its stage, even when its provenance was
   `Provenance.SIMULATED`. A fully simulated evidence set could therefore produce
@@ -178,6 +181,8 @@ when evidence is insufficient.
 - **Docs corrected:** `reconcile.py` module docstring now lists all 11 invariants;
   README carries the current count (224), a runtime-dependencies section, and the
   "no real refunded transaction independently verified yet" limitation.
+  *(Historical: that limitation was later removed once the reference BTC refund
+  was independently verified on 2026-10-19; see the last section.)*
 
 ## Judge-ready demonstration pass
 
@@ -211,6 +216,13 @@ when evidence is insufficient.
   run does not reproduce the expected outcome.
 
 ## Bitcoin refund verification (2026-10-20)
+
+> **Partly superseded (2026-10-19 live re-check, see the last section).** This
+> section records the state when the capability was built: 1Click exposed no
+> refund tx hash, so the payout was discovered from the refund address's own
+> history. The provider later began naming the refund transaction for the
+> reference swap, so the explicit-identifier tier now fires for that case. The
+> address-history tier and every rule below remain in force.
 
 - **New capability:** a reported BTC refund is now independently confirmed from the
   on-chain payout, not just reported. `bc1qjrkwt3v42j4am6csmkaelmpwd9shufl4laxkxm`

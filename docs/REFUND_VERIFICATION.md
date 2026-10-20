@@ -166,11 +166,21 @@ itself, proof it belongs to the investigated intent.
 
 ## 5. What is NOT independently verifiable here (the exact remaining dependency)
 
-The refund for **this specific intent** cannot be confirmed from free data,
-because no free source ties a specific payout to the intent:
+> **Superseded in part (see the addendum at the end of this document).** This
+> section records the state when the reference case was first analysed, and is
+> retained as the historical finding. On 2026-10-19 the provider began naming the
+> refund transaction for the reference swap, so *that* case now confirms. The
+> dependency described here still governs every case where the provider names
+> nothing.
 
-* The provider exposes **no refund transaction hash** (only `originChainTxHashes`,
-  `nearTxHashes`, `destinationChainTxHashes`).
+The refund for **this specific intent** could not be confirmed from free data at
+the time of this analysis, because no free source tied a specific payout to the
+intent:
+
+* The provider exposed **no refund transaction hash** (only `originChainTxHashes`,
+  `nearTxHashes`, `destinationChainTxHashes`). *The status schema still has no
+  dedicated refund field; on 2026-10-19 the reference swap's
+  `originChainTxHashes` began including the refund transaction.*
 * The refund recipient `bc1q77w5l5…mdrgw` is the **user's own wallet**: the
   deposit transaction *spends* it, and it received **four** confirmed payouts
   (heights 917708, 921634, 971735, 972263) over roughly six months. Address
@@ -184,10 +194,12 @@ because no free source ties a specific payout to the intent:
 * The only documented source that could disambiguate — the Intents Explorer API,
   which can search by transaction hash — requires a partner JWT.
 
-**Exact remaining dependency:** an authoritative, free (or explicitly provisioned)
-source that maps this intent to its refund transaction hash — either the provider
-exposing a refund tx hash, the bridge/connector exposing pending-refund records,
-or partner access to the Intents Explorer API.
+**Exact remaining dependency (as of this analysis):** an authoritative, free (or
+explicitly provisioned) source that maps this intent to its refund transaction
+hash — either the provider exposing a refund tx hash, the bridge/connector
+exposing pending-refund records, or partner access to the Intents Explorer API.
+*The first of these materialised on 2026-10-19 for the reference swap; the others
+remain unavailable and are documented as out of scope.*
 
 ## 6. Consequence for reconciliation (implemented)
 
@@ -223,10 +235,12 @@ on the confirmed transaction (`verification_level_for`), never from the discover
 tier, so a Tier A candidate whose raw bytes could not be fetched is reported at
 `EXPLORER_REPORTED`, not `SCRIPT_VALIDATED`.
 
-For this specific intent the result stays **unverified**: the refund address is
-the user's own wallet with four confirmed payouts, the provider names no refund
-hash, and no free source maps the intent to a specific payout. That is a
-correlation gap, not a failed refund, and the tool says so.
+For this specific intent the result at the time of this analysis stayed
+**unverified**: the refund address is the user's own wallet with four confirmed
+payouts, the provider named no refund hash, and no free source mapped the intent
+to a specific payout. That is a correlation gap, not a failed refund, and the tool
+says so. *(See the addendum: on 2026-10-19 the provider began naming the refund
+transaction, so Tier A now fires for this case and the refund confirms.)*
 
 ## 7. Phase 2 closeout
 
@@ -267,9 +281,10 @@ record behind the tier table in §3 and the levels in §0.
 * **User interface** — `ui.py`, a stdlib `http.server`, runs the workflow
   (identifier → investigate → chronological evidence → stage states → source
   records → export) with no external assets.
-* **Automated tests** — 222 tests (`python3 -m pytest tests/ -q`), including the
+* **Automated tests** — 233 tests (`python3 -m pytest tests/ -q`), including the
   required scenarios and the safety invariants that fail the build on an
-  unsupported claim.
+  unsupported claim. (This figure was 222 when Phase 2 closed; see the addendum
+  at the end of this document.)
 
 ### 7.3 Features that needed no paid API or paid infrastructure
 
@@ -284,12 +299,20 @@ rather than assumed.
 
 1. No free source maps a specific Bitcoin payout to an intent; correlation is
    identifier-based and stays unverified when no identifier ties the two together.
-2. 1Click exposes no refund transaction hash.
+2. 1Click's status schema has **no dedicated refund-transaction field**.
+   `originChainTxHashes` is documented only as "all transactions on the origin
+   chain", so it cannot be assumed to contain a refund. *(When Phase 2 closed, the
+   endpoint named no refund hash at all. On 2026-10-19 it named one for the
+   reference swap, so that case now confirms — but the tool still classifies each
+   origin transaction by its on-chain recipient rather than trusting the field
+   position, and the schema-level gap remains. See the addendum below.)*
 3. Two Esplora hosts are not independent corroboration of chain state.
 4. Address-history completeness is bounded by the page budget and rests on the
    host's own `tx_count`.
 5. The 1Click status endpoint was repeatedly unavailable (HTTP 521) during this
-   work; the tool degrades to `UNAVAILABLE` and never invents stages.
+   work; the tool degrades to `UNAVAILABLE` and never invents stages. *(It was
+   answering HTTP 200 again on 2026-10-19; the degradation path is retained and
+   tested regardless.)*
 
 These are represented as `MISSING` / `UNAVAILABLE` / `INCOMPLETE` / `CONTRADICTORY`
 evidence and surfaced in the report, never hidden.

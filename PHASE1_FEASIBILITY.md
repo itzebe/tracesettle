@@ -30,7 +30,7 @@ Every claim is tagged with the evidence that supports it. Evidence artefacts are
 
 The hackathon ships an agent-facing instruction file. It is served live at
 `https://nearhackathon.com/HACKATHON.md` and is also linked from the site root (`href="/HACKATHON.md"`).
-It was fetched and stored verbatim at [`evidence/raw/HACKATHON.md`](evidence/raw/HACKATHON.md).
+It was fetched and stored verbatim at [`docs/official/HACKATHON.md`](docs/official/HACKATHON.md).
 
 Key facts (quoted from the file):
 
@@ -327,9 +327,11 @@ bridge, no trading bot, no token, no AI chatbot, no automated recovery, no fabri
    the boundary explicitly in the UI.
 3. **Destination receipts require a per-chain public RPC.** Mitigation: a small RPC map; unknown chains →
    `UNAVAILABLE` (never `FAILED`).
-4. **No `REFUNDED` sample was captured**, so refund-field behaviour is only documented + partially observed.
+4. **No `REFUNDED` sample was captured at Phase 1 time**, so refund-field behaviour was only documented + partially observed.
    Mitigation: implement refund handling from the schema, and make the "refund without evidence" test the
-   gate that keeps the engine honest.
+   gate that keeps the engine honest. *(Update 2026-10-19: a live `REFUNDED` response was captured
+   (`evidence/raw/oneclick_status_btc_REFUNDED.json`); the documented field behaviour was confirmed, and the
+   refund-handling gate remains.)*
 5. **`explorerUrl` may be empty** even for confirmed legs. Mitigation: build evidence URLs from a known
    template when the API omits them, and label them as constructed.
 6. **`quoteResponse.signature` verification is `UNVERIFIED`** (no public key located). Mitigation: record the
