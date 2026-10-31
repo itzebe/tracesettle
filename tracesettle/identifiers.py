@@ -183,10 +183,17 @@ def validate_deposit_address(raw: str) -> tuple[bool, str | None]:
     """Validate a deposit address.
 
     Returns ``(ok, reason)``. A deposit address is an EVM address, a NEAR
-    account id, a TRON mainnet address, a Bitcoin address, or a Solana public
-    key. EVM and NEAR were verified in Phase 1; the others are recognised by
-    their exact encoding (Base58Check version byte, bech32 checksum, or a 32-byte
-    base58 payload) rather than by length or a leading character alone.
+    account id, a TRON mainnet address, or a Bitcoin address. EVM and NEAR were
+    verified in Phase 1; the others are recognised by their exact encoding
+    (Base58Check version byte, bech32 checksum) rather than by length or a
+    leading character alone.
+
+    A Solana public key is deliberately *not* accepted here. A Solana key is a
+    32-byte base58 value, which is exactly the encoding a NEAR transaction hash
+    and an intent hash use, so it is indistinguishable from those by the string
+    alone and must never be routed automatically. Such a value is rejected with
+    a reason that names all three possibilities; :func:`is_solana_address`
+    recognises the encoding for callers that already know the chain.
     """
     value = normalize(raw)
     if not value:
@@ -204,13 +211,17 @@ def validate_deposit_address(raw: str) -> tuple[bool, str | None]:
     if is_btc_address(value):
         return True, None
     # A base58 43-44 char value is ambiguous (NEAR tx hash, intent hash, or a
-    # Solana key) and is never forced into the deposit-address path. Checked
-    # before the NEAR account rules, which would otherwise claim these strings.
+    # Solana public key) and is never forced into the deposit-address path.
+    # Checked before the NEAR account rules, which would otherwise claim these
+    # strings. This is also why no Solana branch follows: every real Solana key
+    # is 43-44 characters and is captured here.
     if is_near_tx_hash(value) or is_intent_hash(value):
-        return False, "this looks like a base58 hash (NEAR tx or intent), not a deposit address"
+        return (
+            False,
+            "this looks like a base58 hash or Solana public key (43-44 characters), "
+            "not a deposit address",
+        )
     if is_near_implicit_account(value) or is_near_named_account(value):
-        return True, None
-    if is_solana_address(value):
         return True, None
     if value.startswith("T"):
         return False, "this looks like a malformed TRON address (checksum or length is wrong)"

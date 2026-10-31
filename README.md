@@ -189,18 +189,20 @@ and states the capture date; it does not show that an endpoint is answering now.
 
 | Identifier | What it can do |
 | --- | --- |
-| 1Click deposit address (EVM, NEAR, TRON, Bitcoin, Solana) | Full path: source, settlement, destination, refund. |
+| 1Click deposit address (EVM, NEAR, TRON, Bitcoin) | Full path: source, settlement, destination, refund. |
 | Intent hash | Settlement status only (solver relay). No reverse lookup exists. |
 | Origin-chain transaction hash | Not supported. The 1Click status endpoint is keyed on the deposit address; there is no documented reverse lookup. |
 
 Deposit addresses are recognised by their exact encoding, not by length or a
 leading character: EVM `0x`+40 hex, NEAR account ids, TRON mainnet Base58Check
-(version byte `0x41`), Bitcoin legacy Base58Check (P2PKH/P2SH) and segwit
-(bech32/bech32m), and Solana 32-byte base58 keys. A base58 string that decodes to
-exactly 32 bytes is *ambiguous*: it is the same encoding a NEAR transaction hash,
-an intent hash, and a Solana public key use, so it is never silently classified as
-a deposit address. Such an input is reported as `UNKNOWN` with a note explaining
-the boundary, and is offered the intent-hash path.
+(version byte `0x41`), and Bitcoin legacy Base58Check (P2PKH/P2SH) plus segwit
+(bech32/bech32m). A Solana public key is a 32-byte base58 value, which is the
+same encoding a NEAR transaction hash and an intent hash use; every 32-byte
+base58 value is 43-44 characters, so the three are indistinguishable from the
+string alone. Such a value is therefore never routed as a deposit address: it is
+reported as `UNKNOWN` with a note naming all three possibilities, and is offered
+the intent-hash path. `is_solana_address` recognises the encoding for a caller
+that already knows the chain, but no automatic routing is performed.
 
 Other limits, stated in every report:
 

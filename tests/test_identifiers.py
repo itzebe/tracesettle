@@ -104,6 +104,25 @@ def test_solana_encoding_is_recognised_but_not_auto_classified() -> None:
     assert classify_identifier(SOLANA) is IdentifierType.UNKNOWN
 
 
+def test_real_solana_key_is_not_accepted_as_a_deposit_address() -> None:
+    # Regression: every real Solana key is a 43-44 character base58 value, so the
+    # ambiguous-hash check captures it. validate_deposit_address must reject it
+    # (never auto-route an ambiguous value) and must say why, naming the
+    # possibilities rather than silently claiming it is a plain hash.
+    ok, reason = validate_deposit_address(SOLANA)
+    assert not ok
+    assert reason is not None and "Solana" in reason and "base58" in reason
+
+
+def test_ambiguous_hash_reason_names_solana_and_hash() -> None:
+    # The same value is what a NEAR tx hash / intent hash looks like; the message
+    # must not present it as unambiguously a hash.
+    for value in (SOLANA, AMBIGUOUS_43, AMBIGUOUS_44):
+        ok, reason = validate_deposit_address(value)
+        assert not ok
+        assert reason is not None and "Solana" in reason
+
+
 # --- Malformed addresses are rejected ---------------------------------------
 
 

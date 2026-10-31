@@ -464,7 +464,8 @@ Two launch-critical defects found in review, both fixed with regression tests.
   - Bitcoin legacy — Base58Check P2PKH (`0x00`) / P2SH (`0x05`).
   - Bitcoin segwit — bech32 v0 / bech32m v1 (delegated to
     `btc_verify.address_to_scriptpubkey`).
-  - Solana — a base58 string decoding to exactly 32 bytes (`is_solana_address`).
+  - Solana — a base58 string decoding to exactly 32 bytes (`is_solana_address`);
+    recognised by encoding but *not* routed as a deposit address (see below).
   Base58Check decoding moved to the new shared `tracesettle/base58.py`
   (`b58decode`, `b58check_decode`); `btc_verify._b58decode`/`_b58check` now
   delegate to it, so classification and script decoding cannot disagree.
@@ -475,8 +476,10 @@ Two launch-critical defects found in review, both fixed with regression tests.
   therefore returns `UNKNOWN` for the whole 43-44 char window rather than guess;
   the investigation adds a note naming all three possibilities and offers the
   intent-hash path. `is_solana_address` exposes the encoding check for callers
-  that already know the chain. This is the "preserve the assumption, attach a
-  note, never silently reinterpret" rule.
+  that already know the chain. `validate_deposit_address` rejects such a value
+  (it has no Solana branch: the ambiguous-hash check captures every real Solana
+  key first) with a reason that names both the hash and the Solana key. This is
+  the "preserve the assumption, attach a note, never silently reinterpret" rule.
 - **Ordering bug caught and fixed while testing.** A 43-char run of `1`s is valid
   base58 and matched the permissive NEAR named-account rule before the ambiguous
   window check, which would have regressed existing intent-hash handling. The
@@ -490,6 +493,15 @@ Two launch-critical defects found in review, both fixed with regression tests.
   real HTTP request already used `params={...}` (urlencoded) and is unchanged; the
   string form is now safe too. Tests cover `&`, `=`, `?`, spaces, `/`, `#`, `+`,
   Unicode, an emoji, and a single-parameter round-trip, plus a live-request check.
-- **Tests:** 306 → **353 passed**. New `tests/test_identifiers.py` (28) and 15
+- **Tests:** 306 → **355 passed**. New `tests/test_identifiers.py` (30) and 15
   new URL-encoding tests in `tests/test_adapters.py`. pyflakes clean; compileall
   OK; offline demo byte-identical to baseline `383e586`.
+- **Overload test is deterministic now.** `_reject_overloaded` refuses in the
+  accept loop; when it closes before a client finishes uploading its body the
+  client sees a connection reset rather than an HTTP status. The test previously
+  recorded only HTTP statuses, so that reset made it flaky (~1/40). It now
+  records a connection-level refusal as a distinct, expected outcome and still
+  requires every request to reach a definite outcome (no hangs), every HTTP
+  response to be `200`/`503`, at least one `200` (so the pass is not vacuous),
+  and recovery afterwards. Verified 30/30; the refusal path is genuinely
+  exercised (4 refusals observed over 720 requests).
