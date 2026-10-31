@@ -5,6 +5,7 @@ Responsibilities:
   * bounded retries with backoff, only for retryable outcomes
   * classification of every failure into a :class:`SourceStatus`
   * never logging or storing credentials
+  * optional TTL caching of read-only GET responses, and a per-host rate limit
 
 The client never raises for expected network conditions; it returns a
 :class:`FetchResult` so adapters can map the outcome to evidence.
@@ -12,6 +13,7 @@ The client never raises for expected network conditions; it returns a
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 import urllib.error
@@ -21,6 +23,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import config
+from .cache import TtlCache
 from .model import SourceStatus
 
 
@@ -43,6 +46,15 @@ _RETRYABLE = frozenset(
     {SourceStatus.RATE_LIMITED, SourceStatus.SERVER_ERROR, SourceStatus.TIMEOUT, SourceStatus.NETWORK_ERROR}
 )
 
+#: Read-only GET endpoints whose responses are cacheable for a short TTL.
+#: Keyed on the URL path prefix; nothing that varies per investigation beyond the
+#: URL itself is cached, and only successful responses are ever stored.
+_CACHEABLE_GET_PREFIXES = (
+    "/v0/status",           # 1Click status, keyed on the deposit address
+    "/tx/",                 # Esplora transaction
+    "/address/",            # Esplora address stats/history
+)
+
 
 def _classify_http(code: int) -> SourceStatus:
     if code == 401 or code == 403:
@@ -59,7 +71,14 @@ def _classify_http(code: int) -> SourceStatus:
 
 
 class HttpClient:
-    """Minimal JSON-over-HTTP client with bounded retries."""
+    """Minimal JSON-over-HTTP client with bounded retries.
+
+    ``cache`` is an optional :class:`~tracesettle.cache.TtlCache`; when supplied,
+    read-only GET responses on cacheable paths are stored and reused for the TTL.
+    ``host_limiter`` is an optional :class:`~tracesettle.ratelimit.TokenBucketLimiter`
+    that throttles calls per upstream host. Both are shared across requests by the
+    server so the limits apply process-wide.
+    """
 
     def __init__(
         self,
@@ -68,6 +87,8 @@ class HttpClient:
         backoff_base: float | None = None,
         opener: Any | None = None,
         sleeper: Any | None = None,
+        cache: TtlCache | None = None,
+        host_limiter: Any | None = None,
     ) -> None:
         self.timeout = config.REQUEST_TIMEOUT_SECONDS if timeout is None else timeout
         self.max_attempts = config.MAX_ATTEMPTS if max_attempts is None else max_attempts
@@ -75,6 +96,8 @@ class HttpClient:
         # ``opener`` is injectable so tests can supply canned responses.
         self._opener = opener if opener is not None else urllib.request.urlopen
         self._sleep = sleeper if sleeper is not None else time.sleep
+        self._cache = cache
+        self._host_limiter = host_limiter
 
     # -- public API ---------------------------------------------------------
 
@@ -101,12 +124,50 @@ class HttpClient:
     def _request(
         self, url: str, method: str, body: bytes | None, expect_json: bool = True
     ) -> FetchResult:
+        # A cacheable GET is served from cache when possible, and a miss is
+        # coalesced so concurrent identical requests trigger one network call.
+        cache_key = self._cache_key(url, method, body, expect_json)
+        if cache_key is not None:
+            return self._cache.get_or_load(  # type: ignore[union-attr]
+                cache_key,
+                lambda: self._request_uncached(url, method, body, expect_json),
+                cache_if=lambda result: result.status is SourceStatus.OK,
+            )
+        return self._request_uncached(url, method, body, expect_json)
+
+    def _cache_key(
+        self, url: str, method: str, body: bytes | None, expect_json: bool
+    ) -> str | None:
+        """A stable cache key for a read-only GET, or ``None`` when not cacheable."""
+        if self._cache is None or method != "GET":
+            return None
+        path = urllib.parse.urlsplit(url).path
+        if not any(path.startswith(prefix) for prefix in _CACHEABLE_GET_PREFIXES):
+            return None
+        digest = hashlib.sha256(url.encode("utf-8")).hexdigest()
+        return f"GET:{'json' if expect_json else 'text'}:{digest}"
+
+    def _request_uncached(
+        self, url: str, method: str, body: bytes | None, expect_json: bool = True
+    ) -> FetchResult:
         headers = {
             "Accept": "application/json",
             "User-Agent": config.USER_AGENT,
         }
         if body is not None:
             headers["Content-Type"] = "application/json"
+
+        # A per-host budget stops one caller from exhausting a free public
+        # endpoint's shared rate limit for everyone.
+        host = urllib.parse.urlsplit(url).hostname
+        if host and self._host_limiter is not None and not self._host_limiter.allow(host):
+            return FetchResult(
+                status=SourceStatus.RATE_LIMITED,
+                http_status=None,
+                message="local host rate limit reached",
+                endpoint=url,
+                attempts=0,
+            )
 
         last: FetchResult | None = None
         for attempt in range(1, self.max_attempts + 1):
