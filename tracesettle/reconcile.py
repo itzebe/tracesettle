@@ -684,16 +684,31 @@ def _detect_contradictions(items: list[EvidenceItem]) -> list[Contradiction]:
         if e.event_type is EventType.DESTINATION_TRANSFER_OBSERVED
         and e.verification is Verification.CONFIRMED
     ]
-    reported_refund = [e for e in items if e.event_type is EventType.REFUND_CLAIMED]
-    if delivery_confirmed and reported_refund:
+    # A refund assertion alongside independently confirmed delivery. Funds cannot
+    # both have reached the destination recipient and been returned to the sender.
+    # This holds whether the refund is merely reported or itself independently
+    # confirmed: an independently confirmed refund makes the conflict *stronger*, so
+    # it must never suppress the contradiction and let the report read as a clean
+    # refund. Markers that assert no refund (UNAVAILABLE/INCOMPLETE) are excluded.
+    refund_assertions = [
+        e
+        for e in items
+        if e.event_type is EventType.REFUND_CLAIMED
+        or (
+            e.event_type is EventType.REFUND_TX_CONFIRMED
+            and e.verification is Verification.CONFIRMED
+        )
+    ]
+    if delivery_confirmed and refund_assertions:
         out.append(
             Contradiction(
                 description=(
-                    "A refund is reported while a destination transfer is independently confirmed. "
-                    "The claims conflict (a partial refund alongside delivery is possible, but the "
-                    "discrepancy must be checked)."
+                    "A refund is asserted while a destination transfer is independently "
+                    "confirmed. Funds cannot both have been delivered to the destination "
+                    "recipient and returned to the sender; the discrepancy must be resolved "
+                    "before either claim is trusted."
                 ),
-                evidence_ids=tuple(sorted(e.id for e in delivery_confirmed + reported_refund)),
+                evidence_ids=tuple(sorted(e.id for e in delivery_confirmed + refund_assertions)),
             )
         )
 

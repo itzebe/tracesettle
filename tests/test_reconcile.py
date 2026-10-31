@@ -1006,3 +1006,112 @@ def test_failure_without_confirmed_settlement_or_delivery_is_not_masked():
     )
     assert result.outcome is OverallOutcome.FAILED_VERIFIED
     _assert_no_invariant_violated(result)
+
+
+# --- Delivery vs. refund contradictions --------------------------------------
+#
+# Funds cannot both have reached the destination recipient and been returned to
+# the sender. A confirmed delivery alongside any refund assertion is a material
+# contradiction, and an independently confirmed refund makes the conflict
+# stronger, never something to suppress.
+
+
+def _confirmed_delivery(evidence_id: str = "ev-dest-transfer"):
+    return ev(
+        evidence_id,
+        Stage.DESTINATION_CHAIN_DELIVERY,
+        EventType.DESTINATION_TRANSFER_OBSERVED,
+        Verification.CONFIRMED,
+        reported_status="SUCCESS",
+        tx_hash="0xdest",
+        chain="eth",
+    )
+
+
+def _reported_refund(evidence_id: str = "ev-oneclick-refund"):
+    return ev(
+        evidence_id,
+        Stage.REFUND,
+        EventType.REFUND_CLAIMED,
+        Verification.REPORTED,
+        source="oneclick_status",
+        reported_status="REFUNDED",
+        details={"refunded_amount": "11746"},
+    )
+
+
+def _confirmed_refund(evidence_id: str = "ev-refund-confirmed"):
+    return ev(
+        evidence_id,
+        Stage.REFUND,
+        EventType.REFUND_TX_CONFIRMED,
+        Verification.CONFIRMED,
+        source="evm_rpc",
+        reported_status="CONFIRMED",
+        tx_hash="0xrefund",
+        chain="eth",
+        details={"reason": "matched"},
+    )
+
+
+def test_confirmed_delivery_and_reported_refund_conflict():
+    result = reconcile(
+        [_confirmed_delivery(), _reported_refund()],
+        {"evm_rpc": SourceStatus.OK, "oneclick_status": SourceStatus.OK},
+    )
+    assert result.contradictions
+    ids = {i for c in result.contradictions for i in c.evidence_ids}
+    assert "ev-dest-transfer" in ids and "ev-oneclick-refund" in ids
+    _assert_no_invariant_violated(result)
+
+
+def test_confirmed_delivery_and_confirmed_refund_conflict():
+    """An independently confirmed refund must not suppress the contradiction."""
+    result = reconcile(
+        [_confirmed_delivery(), _confirmed_refund()],
+        {"evm_rpc": SourceStatus.OK},
+    )
+    assert result.contradictions, "a confirmed delivery + confirmed refund must conflict"
+    ids = {i for c in result.contradictions for i in c.evidence_ids}
+    assert "ev-dest-transfer" in ids and "ev-refund-confirmed" in ids
+    # The report must not present the contradiction as a clean refund.
+    assert result.outcome is OverallOutcome.CONTRADICTORY
+    _assert_no_invariant_violated(result)
+
+
+def test_confirmed_refund_without_delivery_is_verified():
+    result = reconcile([_confirmed_refund()], {"evm_rpc": SourceStatus.OK})
+    assert not result.contradictions
+    assert result.outcome is OverallOutcome.REFUND_VERIFIED
+    _assert_no_invariant_violated(result)
+
+
+def test_confirmed_delivery_without_refund_has_no_contradiction():
+    result = reconcile(
+        [_confirmed_delivery()],
+        {"evm_rpc": SourceStatus.OK, "oneclick_status": SourceStatus.OK},
+    )
+    assert not result.contradictions
+    assert result.outcome is OverallOutcome.DELIVERY_UNVERIFIED
+    _assert_no_invariant_violated(result)
+
+
+def test_unavailable_refund_marker_does_not_conflict_with_delivery():
+    """A refund marker that asserts *no* refund must not create a contradiction."""
+    result = reconcile(
+        [
+            _confirmed_delivery(),
+            ev(
+                "ev-refund-unavailable",
+                Stage.REFUND,
+                EventType.REFUND_TX_CONFIRMED,
+                Verification.UNAVAILABLE,
+                source="btc_rpc",
+                details={"reason": "SOURCE_UNAVAILABLE"},
+            ),
+        ],
+        {"evm_rpc": SourceStatus.OK, "btc_rpc": SourceStatus.TIMEOUT},
+    )
+    assert not result.contradictions
+    assert result.outcome is OverallOutcome.DELIVERY_UNVERIFIED
+    _assert_no_invariant_violated(result)
