@@ -32,6 +32,11 @@ from conftest import (
     load_raw,
 )
 
+#: Sentinel for a connection-level overload refusal: the server closed the
+#: connection (reset / broken pipe) before the client finished sending its body.
+#: This is a distinct, expected outcome from an HTTP status response.
+CONNECTION_REFUSED = object()
+
 
 @contextmanager
 def running_server(opener: FakeOpener | None = None, max_attempts: int = 1, **server_kwargs):
@@ -711,16 +716,37 @@ def test_concurrent_investigations_all_succeed_within_cap():
 
 
 def test_overload_returns_503_and_recovers():
-    """Under more load than the cap allows, excess is refused and the server recovers."""
+    """Under more load than the cap allows, excess is refused and the server recovers.
+
+    A refusal has two legitimate forms, both documented by ``_reject_overloaded``:
+    an HTTP ``503`` when the request is refused after the body arrives, or a
+    connection-level reset when the server closes before the client finishes
+    uploading. The test records both explicitly and still requires that *every*
+    request reaches a definite outcome (none hangs) and that the server recovers.
+    A timeout is never accepted as a refusal: a hung request must fail the test.
+    """
     opener = _wire_full_success(FakeOpener())
     with running_server(opener, max_concurrency=2) as base:
-        seen: list[int] = []
+        outcomes: list[object] = []  # an HTTP status int, or the refusal sentinel
         lock = threading.Lock()
 
         def worker():
-            status, _ = _post(base + "/api/investigate", {"identifier": REAL_DEPOSIT_ADDRESS})
+            try:
+                status, _ = _post(
+                    base + "/api/investigate", {"identifier": REAL_DEPOSIT_ADDRESS}
+                )
+                outcome: object = status
+            except urllib.error.URLError as exc:
+                # A timeout is a hang, not a refusal: let it fail the test.
+                if isinstance(exc.reason, TimeoutError):
+                    raise
+                # Broken pipe / reset: the server refused at the connection level
+                # before the request body finished uploading.
+                outcome = CONNECTION_REFUSED
+            except ConnectionError:
+                outcome = CONNECTION_REFUSED
             with lock:
-                seen.append(status)
+                outcomes.append(outcome)
 
         threads = [threading.Thread(target=worker) for _ in range(12)]
         for t in threads:
@@ -728,9 +754,15 @@ def test_overload_returns_503_and_recovers():
         for t in threads:
             t.join(timeout=20)
 
-        # Every request got a definite answer; none hung.
-        assert len(seen) == 12
-        assert set(seen) <= {200, 503}
+        # Every request reached a definite outcome; none hung.
+        assert len(outcomes) == 12
+        http_statuses = [o for o in outcomes if o is not CONNECTION_REFUSED]
+        # Every HTTP response was an admission or an overload refusal.
+        assert set(http_statuses) <= {200, 503}
+        # The server is genuinely functional under this load, not dead: at least
+        # one request was served. This also rules out a vacuous pass where every
+        # request failed at the connection level.
+        assert 200 in http_statuses
         # Once the load subsides the server serves normally again.
         status, _, _ = _get(base + "/api/health")
         assert status == 200
