@@ -72,6 +72,33 @@ def test_missing_destination_never_failed(source_statuses):
     _assert_no_invariant_violated(result)
 
 
+def test_missing_destination_is_not_failure_but_a_genuine_failure_is_not_a_violation():
+    """The invariant forbids inferring failure from absence, not confirmed failure.
+
+    A confirmed transaction-level failure with no confirmed delivery is a genuine
+    FAILED_VERIFIED and must not be reported as an invariant violation; a verdict
+    with no confirmed failure evidence must never be FAILED_VERIFIED.
+    """
+    genuine = reconcile(
+        [
+            ev(
+                "ev-near-exec",
+                Stage.NEAR_SETTLEMENT,
+                EventType.NEAR_TX_EXECUTION,
+                Verification.CONFIRMED,
+                tx_hash="h",
+                chain="near",
+                reported_status="FAILED",
+                details={"execution_failed": True},
+            )
+        ],
+        {"near_rpc": SourceStatus.OK},
+    )
+    assert genuine.outcome is OverallOutcome.FAILED_VERIFIED
+    assert genuine.safety["no_missing_destination_is_failure"] is True
+    _assert_no_invariant_violated(genuine)
+
+
 # 2. refundedAmount "0" is not proof no refund occurred/can occur.
 
 

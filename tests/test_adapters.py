@@ -763,3 +763,44 @@ def test_rpc_map_has_no_secrets():
         assert "key=" not in rpc.url
         assert "apikey" not in rpc.url.lower()
         assert "token=" not in rpc.url.lower()
+
+
+# --- NEAR RPC: transaction-level failure attribution ------------------------
+#
+# ``intents.near`` batches intents into one transaction, so a sibling receipt's
+# failure must not be attributed to the transaction. Only the transaction-level
+# outcome decides ``execution_failed``.
+
+
+def test_near_execution_failed_ignores_sibling_receipt_failure(opener: FakeOpener):
+    """A failed sibling receipt does not mark the transaction as failed."""
+    payload = load_raw("near_rpc_tx.json")
+    payload["result"]["receipts_outcome"].append(
+        {"outcome": {"status": {"Failure": {"ActionError": "slippage"}}, "logs": []}}
+    )
+    opener.json("POST", "/", payload)
+    report, data = near_rpc.fetch_tx(REAL_NEAR_TX, client_for(opener))
+    assert report.status is SourceStatus.OK
+    assert data.execution_failed is False
+    exec_items = [i for i in report.evidence if i.event_type.value == "NEAR_TX_EXECUTION"]
+    assert exec_items and exec_items[0].reported_status == "SUCCESS"
+
+
+def test_near_execution_failed_true_for_transaction_level_failure(opener: FakeOpener):
+    """A transaction-level failure is still reported as a failure."""
+    payload = load_raw("near_rpc_tx.json")
+    payload["result"]["transaction_outcome"]["outcome"]["status"] = {
+        "Failure": {"ActionError": "out of gas"}
+    }
+    opener.json("POST", "/", payload)
+    report, data = near_rpc.fetch_tx(REAL_NEAR_TX, client_for(opener))
+    assert report.status is SourceStatus.OK
+    assert data.execution_failed is True
+    exec_items = [i for i in report.evidence if i.event_type.value == "NEAR_TX_EXECUTION"]
+    assert exec_items and exec_items[0].reported_status == "FAILED"
+
+
+def test_near_execution_failed_false_without_transaction_outcome():
+    """A response with no transaction outcome is not treated as a failure."""
+    assert near_rpc._execution_failed({}) is False
+    assert near_rpc._execution_failed({"receipts_outcome": [{"outcome": {"status": {"Failure": {}}}}]}) is False

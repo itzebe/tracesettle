@@ -806,14 +806,21 @@ def _derive_outcome(
     ):
         return OverallOutcome.REFUND_REPORTED_UNVERIFIED
 
-    # Failure, only when independently established.
+    # Failure, only when independently established and not overridden by
+    # independently confirmed settlement or delivery. A confirmed transfer means the
+    # funds demonstrably arrived, so a transaction-level failure flag cannot be
+    # allowed to report the swap as failed.
     confirmed_failure = any(
         e.event_type is EventType.NEAR_TX_EXECUTION
         and e.details.get("execution_failed")
         and e.verification is Verification.CONFIRMED
         for e in items
     )
-    if confirmed_failure:
+    if (
+        confirmed_failure
+        and settle is not StageState.CONFIRMED
+        and delivery is not StageState.CONFIRMED
+    ):
         return OverallOutcome.FAILED_VERIFIED
 
     # Delivery path.
@@ -979,6 +986,18 @@ def _safety_report(
     refund_state = _state(stages, Stage.REFUND)
     settle_state = _state(stages, Stage.NEAR_SETTLEMENT)
 
+    # A failure verdict is only ever derived from independently confirmed on-chain
+    # execution failure, never from a missing destination. The invariant therefore
+    # holds precisely when a FAILED_VERIFIED outcome is backed by such evidence: a
+    # missing destination alone can never produce the verdict, while a genuine
+    # confirmed failure must not be reported as a spurious violation.
+    confirmed_failure = any(
+        e.event_type is EventType.NEAR_TX_EXECUTION
+        and e.details.get("execution_failed")
+        and e.verification is Verification.CONFIRMED
+        for e in items
+    )
+
     refund_claims = [e for e in items if e.event_type is EventType.REFUND_CLAIMED]
     supporting_ids = _refund_supporting_ids(stages)
     confirmed_refund = [
@@ -993,9 +1012,10 @@ def _safety_report(
     ]
 
     return {
-        # A missing destination is never reported as a failure.
+        # A failure verdict is never inferred from a missing destination; it must be
+        # backed by independently confirmed on-chain execution failure.
         "no_missing_destination_is_failure": not (
-            delivery_state is StageState.MISSING and outcome is OverallOutcome.FAILED_VERIFIED
+            outcome is OverallOutcome.FAILED_VERIFIED and not confirmed_failure
         ),
         # Zero refund is never treated as proof no refund can occur.
         "zero_refund_is_not_proof_of_no_refund": not (

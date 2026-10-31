@@ -874,3 +874,135 @@ def test_ambiguous_refund_payout_reads_as_correlation_gap():
     assert "source-availability" not in stage.summary.lower()
     assert result.outcome is OverallOutcome.REFUND_REPORTED_UNVERIFIED
     _assert_no_invariant_violated(result)
+
+
+# --- Transaction-level failure vs. independently confirmed delivery ----------
+#
+# intents.near batches many intents into one NEAR transaction, so a sibling
+# receipt's failure must never be attributed to the transaction (or to another
+# intent). Independently confirmed settlement/delivery must outrank a
+# transaction-level failure flag, and a genuine transaction-level failure must
+# still be reported as FAILED_VERIFIED.
+
+
+def test_failed_sibling_receipt_does_not_mask_confirmed_settlement():
+    """A confirmed intent event wins over a sibling receipt's failure."""
+    result = reconcile(
+        [
+            ev(
+                "ev-near-intent",
+                Stage.NEAR_SETTLEMENT,
+                EventType.INTENT_EVENT_OBSERVED,
+                Verification.CONFIRMED,
+                tx_hash="nearhash",
+                chain="near",
+                details={"intent_hashes": ["intent1"], "standard": "dip4"},
+            ),
+            ev(
+                "ev-near-exec",
+                Stage.NEAR_SETTLEMENT,
+                EventType.NEAR_TX_EXECUTION,
+                Verification.CONFIRMED,
+                tx_hash="nearhash",
+                chain="near",
+                reported_status="FAILED",
+                details={"execution_failed": True},
+            ),
+        ],
+        {"near_rpc": SourceStatus.OK},
+        expected_intent_hashes=["intent1"],
+    )
+    assert result.outcome is not OverallOutcome.FAILED_VERIFIED
+    assert result.stage(Stage.NEAR_SETTLEMENT).state is StageState.CONFIRMED
+    _assert_no_invariant_violated(result)
+
+
+def test_failed_sibling_receipt_does_not_mask_confirmed_delivery():
+    """A confirmed destination transfer wins over a sibling receipt's failure."""
+    result = reconcile(
+        [
+            ev(
+                "ev-near-intent",
+                Stage.NEAR_SETTLEMENT,
+                EventType.INTENT_EVENT_OBSERVED,
+                Verification.CONFIRMED,
+                tx_hash="nearhash",
+                chain="near",
+                details={"intent_hashes": ["intent1"], "standard": "dip4"},
+            ),
+            ev(
+                "ev-near-exec",
+                Stage.NEAR_SETTLEMENT,
+                EventType.NEAR_TX_EXECUTION,
+                Verification.CONFIRMED,
+                tx_hash="nearhash",
+                chain="near",
+                reported_status="FAILED",
+                details={"execution_failed": True},
+            ),
+            ev(
+                "ev-dest-transfer",
+                Stage.DESTINATION_CHAIN_DELIVERY,
+                EventType.DESTINATION_TRANSFER_OBSERVED,
+                Verification.CONFIRMED,
+                reported_status="SUCCESS",
+                tx_hash="0xdest",
+                chain="eth",
+            ),
+        ],
+        {"near_rpc": SourceStatus.OK, "evm_rpc": SourceStatus.OK},
+        expected_intent_hashes=["intent1"],
+    )
+    assert result.outcome is OverallOutcome.SETTLED_VERIFIED
+    assert result.stage(Stage.DESTINATION_CHAIN_DELIVERY).state is StageState.CONFIRMED
+    _assert_no_invariant_violated(result)
+
+
+def test_genuine_transaction_level_failure_is_failed_verified():
+    """A transaction-level failure with no confirmed settlement/delivery still reports FAILED_VERIFIED."""
+    result = reconcile(
+        [
+            ev(
+                "ev-near-exec",
+                Stage.NEAR_SETTLEMENT,
+                EventType.NEAR_TX_EXECUTION,
+                Verification.CONFIRMED,
+                tx_hash="nearhash",
+                chain="near",
+                reported_status="FAILED",
+                details={"execution_failed": True},
+            ),
+        ],
+        {"near_rpc": SourceStatus.OK},
+    )
+    assert result.outcome is OverallOutcome.FAILED_VERIFIED
+    _assert_no_invariant_violated(result)
+
+
+def test_failure_without_confirmed_settlement_or_delivery_is_not_masked():
+    """A failure flag with only reported (not confirmed) downstream evidence still fails."""
+    result = reconcile(
+        [
+            ev(
+                "ev-near-exec",
+                Stage.NEAR_SETTLEMENT,
+                EventType.NEAR_TX_EXECUTION,
+                Verification.CONFIRMED,
+                tx_hash="nearhash",
+                chain="near",
+                reported_status="FAILED",
+                details={"execution_failed": True},
+            ),
+            ev(
+                "ev-oneclick",
+                Stage.NEAR_SETTLEMENT,
+                EventType.SETTLEMENT_CLAIMED,
+                Verification.REPORTED,
+                source="oneclick_status",
+                reported_status="PROCESSING",
+            ),
+        ],
+        {"near_rpc": SourceStatus.OK, "oneclick_status": SourceStatus.OK},
+    )
+    assert result.outcome is OverallOutcome.FAILED_VERIFIED
+    _assert_no_invariant_violated(result)
