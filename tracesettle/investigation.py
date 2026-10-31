@@ -124,9 +124,12 @@ def investigate(
         # Ambiguous base58 identifiers: offer the intent-hash path and explain the boundary.
         if is_intent_hash(identifier) or is_near_tx_hash(identifier):
             inv.notes.append(
-                "This identifier is a base58 hash. It is treated as an intent hash for the "
-                "solver-relay lookup. If it is actually a NEAR transaction hash, that lookup "
-                "will simply find no record."
+                "This identifier is a 43-44 character base58 value. That is ambiguous: a NEAR "
+                "transaction hash, an intent hash, and a Solana public key share the same "
+                "encoding, so it cannot be classified from the string alone. It is treated as an "
+                "intent hash for the solver-relay lookup. If it is actually a NEAR transaction "
+                "hash or a Solana deposit address, that lookup will simply find no record; supply "
+                "the 1Click deposit address to investigate the full path."
             )
             inv.identifier_type = IdentifierType.INTENT_HASH
             _investigate_by_intent_hash(inv, client)
@@ -351,18 +354,43 @@ def _fetch_origin_receipt(
     return evm_rpc.fetch_receipt(tx_hash, chain, client, expected=None)
 
 
+def _transfer_recipient(log: Any) -> str | None:
+    """The recipient of an ERC-20 ``Transfer`` log, normalized, or ``None``.
+
+    The event signature must be the canonical ``Transfer(address,address,uint256)``
+    topic and topic 2 must be a well-formed 32-byte word. Anything else — a
+    different event, a malformed topic, a non-object log — is irrelevant and is
+    ignored rather than guessed at. The topic is decoded with the adapter's own
+    normalizer so the recipient comparison has a single source of truth.
+    """
+    if not isinstance(log, dict):
+        return None
+    topics = log.get("topics")
+    if not isinstance(topics, list) or len(topics) < 3:
+        return None
+    signature = topics[0]
+    if not isinstance(signature, str) or signature.lower() != evm_rpc.TRANSFER_TOPIC:
+        return None
+    return evm_rpc._topic_to_address(topics[2])
+
+
 def _receipt_pays(receipt: Any, address: str | None) -> bool:
     """True when an origin-chain transaction pays ``address``.
 
-    EVM: the top-level ``to`` equals the address. Bitcoin: any output's address
-    equals the address. This is an exact-identifier comparison, never an amount.
+    EVM: the top-level ``to`` equals the address, or an ERC-20 ``Transfer`` log
+    names it as the recipient — for an ERC-20 transfer the top-level ``to`` is the
+    token contract, not the recipient, so the log is the only correct anchor.
+    Bitcoin: any output's address equals the address. This is an exact-identifier
+    comparison, never an amount.
     """
     if not address:
         return False
     if isinstance(receipt, btc_rpc.BtcTxData):
         return bool(receipt.paying_outputs(address))
-    to_addr = (getattr(receipt, "to_address", None) or "").lower()
-    return to_addr == address.lower()
+    want = address.lower()
+    if (getattr(receipt, "to_address", None) or "").lower() == want:
+        return True
+    return any(_transfer_recipient(log) == want for log in (getattr(receipt, "logs", None) or []))
 
 
 def _classify_origin(receipt: Any, deposit_address: str | None, refund_to: str | None) -> str:

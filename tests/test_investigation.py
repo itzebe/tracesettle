@@ -8,8 +8,14 @@ from __future__ import annotations
 
 import copy
 
+from tracesettle.adapters import btc_rpc, evm_rpc
 from tracesettle.identifiers import classify_identifier, validate_deposit_address
-from tracesettle.investigation import build_result, investigate
+from tracesettle.investigation import (
+    _classify_origin,
+    _receipt_pays,
+    build_result,
+    investigate,
+)
 from tracesettle.model import (
     IdentifierType,
     OverallOutcome,
@@ -772,3 +778,106 @@ def test_btc_refund_unknown_state_appears_in_report(opener: FakeOpener):
     assert "REFUND" in data["unknown_stages"]
     assert data["outcome"] == "REFUND_REPORTED_UNVERIFIED"
     assert "insufficient evidence" in report.to_markdown()
+
+
+# --- ERC-20 origin attribution ------------------------------------------------
+#
+# For an ERC-20 transfer the receipt's top-level ``to`` is the token contract,
+# not the recipient, so deposit/refund attribution must read the recipient from
+# the Transfer event log. Native transfers keep using the top-level ``to``.
+
+
+def _erc20_transfer_log(recipient: str, *, signature: str | None = None) -> dict:
+    topic0 = signature or evm_rpc.TRANSFER_TOPIC
+    return {
+        "address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+        "topics": [
+            topic0,
+            "0x" + "0" * 24 + "1111111111111111111111111111111111111111",
+            "0x" + "0" * 24 + recipient[2:].lower(),
+        ],
+        "data": "0x1",
+    }
+
+
+def _erc20_receipt(recipient: str, *, signature: str | None = None) -> evm_rpc.EvmReceiptData:
+    return evm_rpc.EvmReceiptData(
+        tx_hash="0xerc20",
+        chain="eth",
+        included=True,
+        status="0x1",
+        from_address="0x1111111111111111111111111111111111111111",
+        # Top-level recipient is the token contract, never the payee.
+        to_address="0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+        logs=[_erc20_transfer_log(recipient, signature=signature)],
+    )
+
+
+def _native_receipt(recipient: str) -> evm_rpc.EvmReceiptData:
+    return evm_rpc.EvmReceiptData(
+        tx_hash="0xnative",
+        chain="eth",
+        included=True,
+        status="0x1",
+        from_address="0x1111111111111111111111111111111111111111",
+        to_address=recipient,
+        logs=[],
+    )
+
+
+def _btc_receipt(recipient: str) -> btc_rpc.BtcTxData:
+    return btc_rpc.BtcTxData(
+        txid="btctx",
+        found=True,
+        confirmed=True,
+        outputs=[btc_rpc.BtcOutput(address=recipient, value=1000, script_type="p2wpkh", index=0)],
+    )
+
+
+def test_receipt_pays_erc20_transfer_to_deposit_address():
+    assert _receipt_pays(_erc20_receipt(REAL_DEPOSIT_ADDRESS), REAL_DEPOSIT_ADDRESS) is True
+
+
+def test_receipt_pays_erc20_transfer_to_unrelated_address_is_false():
+    other = "0x0000000000000000000000000000000000000099"
+    assert _receipt_pays(_erc20_receipt(REAL_DEPOSIT_ADDRESS), other) is False
+
+
+def test_receipt_pays_erc20_transfer_to_refund_address():
+    refund = "0x2222222222222222222222222222222222222222"
+    assert _receipt_pays(_erc20_receipt(refund), refund) is True
+
+
+def test_receipt_pays_native_evm_transfer():
+    assert _receipt_pays(_native_receipt(REAL_DEPOSIT_ADDRESS), REAL_DEPOSIT_ADDRESS) is True
+    assert _receipt_pays(_native_receipt(REAL_DEPOSIT_ADDRESS), "0x0000000000000000000000000000000000000099") is False
+
+
+def test_receipt_pays_bitcoin_output():
+    assert _receipt_pays(_btc_receipt(BTC_REFUND_DEPOSIT), BTC_REFUND_DEPOSIT) is True
+    assert _receipt_pays(_btc_receipt(BTC_REFUND_DEPOSIT), "bc1qother") is False
+
+
+def test_receipt_pays_ignores_malformed_transfer_logs():
+    """A wrong signature, a short topic list, or a non-object log never matches."""
+    want = REAL_DEPOSIT_ADDRESS
+    wrong_sig = _erc20_receipt(want, signature="0x" + "ab" * 32)
+    assert _receipt_pays(wrong_sig, want) is False
+    short = _erc20_receipt(want)
+    short.logs[0]["topics"] = short.logs[0]["topics"][:2]
+    assert _receipt_pays(short, want) is False
+    non_object = _erc20_receipt(want)
+    non_object.logs = ["not-a-log"]  # type: ignore[list-item]
+    assert _receipt_pays(non_object, want) is False
+    malformed_topic = _erc20_receipt(want)
+    malformed_topic.logs[0]["topics"][2] = "0x1234"
+    assert _receipt_pays(malformed_topic, want) is False
+
+
+def test_classify_origin_erc20_transfer_to_deposit_is_deposit():
+    assert _classify_origin(_erc20_receipt(REAL_DEPOSIT_ADDRESS), REAL_DEPOSIT_ADDRESS, None) == "deposit"
+
+
+def test_classify_origin_erc20_transfer_to_refund_is_refund():
+    refund = "0x2222222222222222222222222222222222222222"
+    assert _classify_origin(_erc20_receipt(refund), REAL_DEPOSIT_ADDRESS, refund) == "refund"

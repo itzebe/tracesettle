@@ -57,6 +57,44 @@ BACKOFF_BASE_SECONDS = float(os.environ.get("TRACESETTLE_HTTP_BACKOFF", "0.6"))
 USER_AGENT = "TraceSettle/0.2 (read-only settlement investigator)"
 
 # ---------------------------------------------------------------------------
+# Interface hardening
+# ---------------------------------------------------------------------------
+#
+# Every value below is read from the environment so a deployment can tune it
+# without a code change. None of them is a secret; the API key is the only
+# sensitive value and it is never logged or echoed back to a client.
+
+#: When set, ``POST /api/investigate`` requires this key. When unset, the
+#: endpoint is open — the default for local, loopback-only use. Set it before
+#: exposing the server on a shared host.
+API_KEY = os.environ.get("TRACESETTLE_API_KEY") or None
+
+#: Per-connection socket timeout. Bounds how long a slow or idle client can hold
+#: a worker thread (slowloris defence).
+CLIENT_SOCKET_TIMEOUT_SECONDS = float(os.environ.get("TRACESETTLE_CLIENT_TIMEOUT", "10"))
+
+#: Hard cap on concurrently served connections. Excess connections are rejected
+#: immediately with HTTP 503 rather than queued behind a slow client.
+MAX_CONCURRENT_REQUESTS = int(os.environ.get("TRACESETTLE_MAX_CONCURRENCY", "16"))
+
+#: Accept backlog. Bounds how many connections the kernel queues before accept.
+REQUEST_QUEUE_SIZE = int(os.environ.get("TRACESETTLE_REQUEST_QUEUE", "64"))
+
+#: Per-client-IP request budget for the investigation endpoint.
+RATE_LIMIT_PER_MINUTE = int(os.environ.get("TRACESETTLE_RATE_LIMIT_PER_MINUTE", "60"))
+RATE_LIMIT_BURST = int(os.environ.get("TRACESETTLE_RATE_LIMIT_BURST", "15"))
+
+#: Per-upstream-host request budget, shared across all investigations, so one
+#: abusive client cannot exhaust a free public endpoint's shared rate limit.
+HOST_RATE_LIMIT_PER_MINUTE = int(os.environ.get("TRACESETTLE_HOST_RATE_LIMIT_PER_MINUTE", "240"))
+HOST_RATE_LIMIT_BURST = int(os.environ.get("TRACESETTLE_HOST_RATE_LIMIT_BURST", "60"))
+
+#: Bounded TTL cache for read-only upstream responses.
+UPSTREAM_CACHE_TTL_SECONDS = float(os.environ.get("TRACESETTLE_CACHE_TTL", "45"))
+UPSTREAM_CACHE_MAX_ENTRIES = int(os.environ.get("TRACESETTLE_CACHE_MAX_ENTRIES", "512"))
+
+
+# ---------------------------------------------------------------------------
 # Chain / RPC map
 # ---------------------------------------------------------------------------
 

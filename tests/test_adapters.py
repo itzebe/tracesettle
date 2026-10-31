@@ -6,6 +6,8 @@ classification, and error mapping are genuinely tested.
 
 from __future__ import annotations
 
+import urllib.parse
+
 import pytest
 
 from tracesettle import config
@@ -763,3 +765,105 @@ def test_rpc_map_has_no_secrets():
         assert "key=" not in rpc.url
         assert "apikey" not in rpc.url.lower()
         assert "token=" not in rpc.url.lower()
+
+
+# --- NEAR RPC: transaction-level failure attribution ------------------------
+#
+# ``intents.near`` batches intents into one transaction, so a sibling receipt's
+# failure must not be attributed to the transaction. Only the transaction-level
+# outcome decides ``execution_failed``.
+
+
+def test_near_execution_failed_ignores_sibling_receipt_failure(opener: FakeOpener):
+    """A failed sibling receipt does not mark the transaction as failed."""
+    payload = load_raw("near_rpc_tx.json")
+    payload["result"]["receipts_outcome"].append(
+        {"outcome": {"status": {"Failure": {"ActionError": "slippage"}}, "logs": []}}
+    )
+    opener.json("POST", "/", payload)
+    report, data = near_rpc.fetch_tx(REAL_NEAR_TX, client_for(opener))
+    assert report.status is SourceStatus.OK
+    assert data.execution_failed is False
+    exec_items = [i for i in report.evidence if i.event_type.value == "NEAR_TX_EXECUTION"]
+    assert exec_items and exec_items[0].reported_status == "SUCCESS"
+
+
+def test_near_execution_failed_true_for_transaction_level_failure(opener: FakeOpener):
+    """A transaction-level failure is still reported as a failure."""
+    payload = load_raw("near_rpc_tx.json")
+    payload["result"]["transaction_outcome"]["outcome"]["status"] = {
+        "Failure": {"ActionError": "out of gas"}
+    }
+    opener.json("POST", "/", payload)
+    report, data = near_rpc.fetch_tx(REAL_NEAR_TX, client_for(opener))
+    assert report.status is SourceStatus.OK
+    assert data.execution_failed is True
+    exec_items = [i for i in report.evidence if i.event_type.value == "NEAR_TX_EXECUTION"]
+    assert exec_items and exec_items[0].reported_status == "FAILED"
+
+
+def test_near_execution_failed_false_without_transaction_outcome():
+    """A response with no transaction outcome is not treated as a failure."""
+    assert near_rpc._execution_failed({}) is False
+    assert near_rpc._execution_failed({"receipts_outcome": [{"outcome": {"status": {"Failure": {}}}}]}) is False
+
+
+# --- 1Click status URL encoding ---------------------------------------------
+
+
+def test_build_status_url_encodes_an_ordinary_address():
+    url = oneclick.build_status_url("0xABC123")
+    assert url == f"{config.ONECLICK_BASE}{config.ONECLICK_STATUS_PATH}?depositAddress=0xABC123"
+
+
+@pytest.mark.parametrize(
+    "raw, expected_query",
+    [
+        ("a&b", "depositAddress=a%26b"),
+        ("a=b", "depositAddress=a%3Db"),
+        ("a?b", "depositAddress=a%3Fb"),
+        ("a b", "depositAddress=a+b"),
+        ("a/b", "depositAddress=a%2Fb"),
+        ("a#b", "depositAddress=a%23b"),
+        ("a+b", "depositAddress=a%2Bb"),
+        ("\u00e9", "depositAddress=%C3%A9"),
+        ("\u4e2d\u6587", "depositAddress=%E4%B8%AD%E6%96%87"),
+        ("\U0001f600", "depositAddress=%F0%9F%98%80"),
+    ],
+)
+def test_build_status_url_encodes_special_characters(raw, expected_query):
+    url = oneclick.build_status_url(raw)
+    prefix = f"{config.ONECLICK_BASE}{config.ONECLICK_STATUS_PATH}?"
+    assert url == prefix + expected_query
+
+
+def test_build_status_url_keeps_a_single_depositaddress_parameter():
+    """A '&' in the value must not create a second query parameter."""
+    url = oneclick.build_status_url("0xdead&evil=1")
+    query = url.split("?", 1)[1]
+    parsed = urllib.parse.parse_qs(query)
+    assert list(parsed.keys()) == ["depositAddress"]
+    assert parsed["depositAddress"] == ["0xdead&evil=1"]
+
+
+@pytest.mark.parametrize(
+    "raw",
+    ["a&b=c", "x?y#z", "space here", "unicode\u00e9", "0x" + "a" * 40, "TQn9Y2khEsLJW1ChVWFMSMeRDow5KcbLSE"],
+)
+def test_build_status_url_round_trips_the_address(raw):
+    url = oneclick.build_status_url(raw)
+    query = url.split("?", 1)[1]
+    parsed = urllib.parse.parse_qs(query)
+    assert parsed["depositAddress"] == [raw]
+
+
+def test_build_status_url_does_not_alter_the_live_request(opener: FakeOpener):
+    """The real HTTP request still uses urlencoded params and the same endpoint."""
+    opener.json("GET", "/v0/status", load_raw("oneclick_status_SUCCESS.json"))
+    report, data = oneclick.investigate(REAL_DEPOSIT_ADDRESS, client_for(opener))
+    assert report.status is SourceStatus.OK
+    # The request the client actually issued carried the address as one parameter.
+    assert opener.calls, "expected at least one HTTP call"
+    request = opener.calls[0]
+    assert "depositAddress=" in request
+    assert REAL_DEPOSIT_ADDRESS in urllib.parse.unquote(request)

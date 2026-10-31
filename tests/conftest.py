@@ -173,9 +173,15 @@ class FakeOpener:
         raise AssertionError(f"no fake route for {method} {url}")
 
 
-def client_for(opener: FakeOpener, attempts: int = 1) -> HttpClient:
+def client_for(opener: FakeOpener, attempts: int = 1, cache=None, host_limiter=None) -> HttpClient:
     return HttpClient(
-        opener=opener, max_attempts=attempts, timeout=1.0, backoff_base=0.0, sleeper=lambda _: None
+        opener=opener,
+        max_attempts=attempts,
+        timeout=1.0,
+        backoff_base=0.0,
+        sleeper=lambda _: None,
+        cache=cache,
+        host_limiter=host_limiter,
     )
 
 

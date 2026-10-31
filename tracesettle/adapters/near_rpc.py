@@ -105,6 +105,14 @@ def _extract_logs(result: dict[str, Any]) -> list[str]:
 
 
 def _execution_failed(result: dict[str, Any]) -> bool:
+    """Whether the *transaction itself* failed.
+
+    This must inspect only the transaction-level outcome. ``intents.near`` batches
+    many intents into one transaction, and each intent's receipt is an independent
+    outcome; a sibling receipt failing says nothing about whether this transaction
+    — or the intent under investigation — failed. A failed sibling must therefore
+    never be attributed to the transaction.
+    """
     def failed(status: Any) -> bool:
         if not isinstance(status, dict):
             return False
@@ -114,12 +122,9 @@ def _execution_failed(result: dict[str, Any]) -> bool:
         return any(k == "Failure" for k in status.keys())
 
     tx_outcome = result.get("transaction_outcome")
-    if isinstance(tx_outcome, dict) and failed(tx_outcome.get("outcome", {}).get("status")):
-        return True
-    for outcome in result.get("receipts_outcome") or []:
-        if isinstance(outcome, dict) and failed(outcome.get("outcome", {}).get("status")):
-            return True
-    return False
+    if not isinstance(tx_outcome, dict):
+        return False
+    return failed(tx_outcome.get("outcome", {}).get("status"))
 
 
 def _intent_hashes_in_logs(logs: list[str]) -> list[str]:

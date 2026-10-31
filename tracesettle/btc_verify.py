@@ -24,6 +24,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Iterable
 
+from .base58 import b58check_decode, b58decode
+
 # ---------------------------------------------------------------------------
 # Verification levels (weakest -> strongest). The tool reports the level it
 # actually reached; it never claims a stronger one than the evidence supports.
@@ -79,33 +81,17 @@ def verification_level_for(
 # Base58 / bech32 decoding -> scriptPubKey
 # ---------------------------------------------------------------------------
 
-_B58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 _BECH32_CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
 _BECH32_HRP = "bc"  # mainnet
 _BECH32M_CONST = 0x2BC830A3
 
 
 def _b58decode(s: str) -> bytes | None:
-    num = 0
-    for ch in s:
-        idx = _B58_ALPHABET.find(ch)
-        if idx < 0:
-            return None
-        num = num * 58 + idx
-    # Leading '1's are leading zero bytes.
-    pad = len(s) - len(s.lstrip("1"))
-    body = num.to_bytes((num.bit_length() + 7) // 8, "big") if num else b""
-    return b"\x00" * pad + body
+    return b58decode(s)
 
 
 def _b58check(address: str) -> bytes | None:
-    raw = _b58decode(address)
-    if raw is None or len(raw) < 5:
-        return None
-    payload, checksum = raw[:-4], raw[-4:]
-    if hashlib.sha256(hashlib.sha256(payload).digest()).digest()[:4] != checksum:
-        return None
-    return payload
+    return b58check_decode(address)
 
 
 def _bech32_polymod(values: list[int]) -> int:
