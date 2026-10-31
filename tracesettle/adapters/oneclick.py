@@ -27,6 +27,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlencode
 
 from .. import config
 from ..httpclient import HttpClient
@@ -153,7 +154,15 @@ def _hash_list(value: Any) -> list[str]:
 
 
 def build_status_url(deposit_address: str) -> str:
-    return f"{config.ONECLICK_BASE}{config.ONECLICK_STATUS_PATH}?depositAddress={deposit_address}"
+    """Build the 1Click status URL for a deposit address.
+
+    The address is percent-encoded with :func:`urllib.parse.urlencode` so that
+    characters such as ``&``, ``=``, ``?``, spaces, and non-ASCII input stay part
+    of the single ``depositAddress`` parameter instead of being interpreted as
+    query syntax. The value is not altered; only its transport encoding is.
+    """
+    query = urlencode({"depositAddress": deposit_address})
+    return f"{config.ONECLICK_BASE}{config.ONECLICK_STATUS_PATH}?{query}"
 
 
 def investigate(
