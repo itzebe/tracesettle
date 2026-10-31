@@ -451,3 +451,45 @@ verification was weakened.
   and wrong-key POST → `401`; correct key → `200`; rapid POSTs → `200 200 429 429`
   at burst 2; `?format=markdown` → Markdown; `?format=xml` → `400`; 20 KB body →
   `413`; `GET /api/health` → `200`; server log contained no key or identifier.
+
+## Tier 1 follow-up — deposit-address classification + status-URL encoding (2026-10-31)
+
+Two launch-critical defects found in review, both fixed with regression tests.
+
+- **Deposit-address classification (`identifiers.py`).** `classify_identifier`
+  previously returned `UNKNOWN` for legitimate TRON and legacy-Bitcoin deposit
+  addresses. It now recognises each format by its exact encoding, never by length
+  or a leading character alone:
+  - TRON mainnet — Base58Check, payload `0x41` + 20 bytes, verified checksum.
+  - Bitcoin legacy — Base58Check P2PKH (`0x00`) / P2SH (`0x05`).
+  - Bitcoin segwit — bech32 v0 / bech32m v1 (delegated to
+    `btc_verify.address_to_scriptpubkey`).
+  - Solana — a base58 string decoding to exactly 32 bytes (`is_solana_address`).
+  Base58Check decoding moved to the new shared `tracesettle/base58.py`
+  (`b58decode`, `b58check_decode`); `btc_verify._b58decode`/`_b58check` now
+  delegate to it, so classification and script decoding cannot disagree.
+- **Solana is recognised but not auto-classified.** Every 32-byte base58 value
+  encodes to 43-44 characters (verified empirically over 25k random keys), which
+  is exactly the NEAR-tx-hash / intent-hash window. So a Solana address is
+  *indistinguishable* from those by the string alone. `classify_identifier`
+  therefore returns `UNKNOWN` for the whole 43-44 char window rather than guess;
+  the investigation adds a note naming all three possibilities and offers the
+  intent-hash path. `is_solana_address` exposes the encoding check for callers
+  that already know the chain. This is the "preserve the assumption, attach a
+  note, never silently reinterpret" rule.
+- **Ordering bug caught and fixed while testing.** A 43-char run of `1`s is valid
+  base58 and matched the permissive NEAR named-account rule before the ambiguous
+  window check, which would have regressed existing intent-hash handling. The
+  ambiguous window is now checked before the NEAR account rules in both
+  `classify_identifier` and `validate_deposit_address`. `validate_deposit_address`
+  also reports *why* a `T…` / `1…` / `3…` value failed (bad checksum) instead of a
+  generic message.
+- **Status-URL encoding (`adapters/oneclick.py`).** `build_status_url` interpolated
+  the address raw into the query string, so `&`, `=`, `?` etc. would be parsed as
+  query syntax. It now uses `urllib.parse.urlencode({"depositAddress": ...})`. The
+  real HTTP request already used `params={...}` (urlencoded) and is unchanged; the
+  string form is now safe too. Tests cover `&`, `=`, `?`, spaces, `/`, `#`, `+`,
+  Unicode, an emoji, and a single-parameter round-trip, plus a live-request check.
+- **Tests:** 306 → **353 passed**. New `tests/test_identifiers.py` (28) and 15
+  new URL-encoding tests in `tests/test_adapters.py`. pyflakes clean; compileall
+  OK; offline demo byte-identical to baseline `383e586`.

@@ -124,9 +124,12 @@ def investigate(
         # Ambiguous base58 identifiers: offer the intent-hash path and explain the boundary.
         if is_intent_hash(identifier) or is_near_tx_hash(identifier):
             inv.notes.append(
-                "This identifier is a base58 hash. It is treated as an intent hash for the "
-                "solver-relay lookup. If it is actually a NEAR transaction hash, that lookup "
-                "will simply find no record."
+                "This identifier is a 43-44 character base58 value. That is ambiguous: a NEAR "
+                "transaction hash, an intent hash, and a Solana public key share the same "
+                "encoding, so it cannot be classified from the string alone. It is treated as an "
+                "intent hash for the solver-relay lookup. If it is actually a NEAR transaction "
+                "hash or a Solana deposit address, that lookup will simply find no record; supply "
+                "the 1Click deposit address to investigate the full path."
             )
             inv.identifier_type = IdentifierType.INTENT_HASH
             _investigate_by_intent_hash(inv, client)
