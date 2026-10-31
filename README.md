@@ -84,10 +84,10 @@ a bare interpreter.
 **1. Run the tests.**
 
 ```sh
-python -m pytest tests/ --collect-only -q   # 233 tests collected
-python -m pytest tests/ -q                  # 233 passed
+python -m pytest tests/ --collect-only -q   # 304 tests collected
+python -m pytest tests/ -q                  # 304 passed
 ```
-→ `233 passed`.
+→ `304 passed`.
 
 **2. Investigate a real, known-good swap from the command line.**
 
@@ -150,6 +150,16 @@ python3 -m tracesettle serve --host 127.0.0.1 --port 8000
 → open `http://127.0.0.1:8000`, enter a deposit address, press **Investigate**,
 and read the evidence in chronological order with links to every source record.
 Copy or download the report as JSON or Markdown.
+
+To expose the interface beyond loopback, set an API key first so
+`POST /api/investigate` requires it:
+
+```sh
+TRACESETTLE_API_KEY=… python3 -m tracesettle serve --host 0.0.0.0 --port 8000
+```
+→ requests without a matching `X-API-Key` header receive `401`; `GET /` and
+`GET /api/health` stay open. See **Interface hardening** below for the
+concurrency, rate-limit, and cache settings.
 
 **7. Or run all three cases at once.**
 
@@ -255,10 +265,12 @@ No LLM decides whether a transaction is confirmed.
 | `tracesettle/investigation.py` | Orchestrator. |
 | `tracesettle/report.py` | Report generation. |
 | `tracesettle/ui.py` | Standard-library web interface. |
+| `tracesettle/ratelimit.py` | Token buckets for per-IP and per-host limits. |
+| `tracesettle/cache.py` | Bounded TTL cache with single-flight. |
 | `tracesettle/__main__.py` | CLI. |
 | `demo/demonstrate.py` | Read-only walkthrough (live, or `--offline` replay of captures). |
 | `demo/replay_opener.py` | Offline transport that replays `evidence/raw/` through the real code. |
-| `tests/` | 233 tests. `evidence/raw/` fixtures are real captures; `tests/fixtures/synthetic/` are clearly labelled synthetic. |
+| `tests/` | 304 tests. `evidence/raw/` fixtures are real captures; `tests/fixtures/synthetic/` are clearly labelled synthetic. |
 | `PHASE1_FEASIBILITY.md` | Phase 1 feasibility and API verification. |
 | `submission/` | Hackathon artifacts: API payload shape, technical summary, demo post draft, publication checklist. |
 | `docs/official/` | NEAR documentation captured during Phase 1. |
@@ -284,10 +296,48 @@ tool. Supported interpreter: CPython 3.11+; verified on 3.13.15.
 - A blockchain hash commitment is never treated as proof the underlying event is
   true.
 
+### Interface hardening
+
+The web interface is hardened against resource exhaustion and abuse, with every
+limit configurable by environment variable:
+
+- **Client socket timeouts.** Each connection has a read timeout
+  (`TRACESETTLE_CLIENT_TIMEOUT`, default 10s), so a slow or idle client cannot
+  hold a worker thread open (slowloris).
+- **Hard concurrency cap.** At most `TRACESETTLE_MAX_CONCURRENCY` (default 16)
+  connections are served at once. Excess connections get an immediate
+  `503 Service Unavailable` with `Retry-After` instead of being queued. The
+  concurrency slot is released on every path, including errors.
+- **Bounded request bodies.** `Content-Length` is checked against an 8 KiB cap
+  *before* the body is read; an oversized or missing body is `413`, never
+  buffered.
+- **API-key authentication.** Set `TRACESETTLE_API_KEY` to require an `X-API-Key`
+  header on `POST /api/investigate` (constant-time comparison; the key is never
+  logged or echoed). Unset, the endpoint is open — the default for loopback use.
+- **Per-IP rate limiting.** `TRACESETTLE_RATE_LIMIT_PER_MINUTE` /
+  `_BURST` bound each client IP (keyed on the socket peer, so a spoofed
+  `X-Forwarded-For` cannot bypass it); over-budget requests get `429` with
+  `Retry-After`.
+- **Per-host upstream budgets.** `TRACESETTLE_HOST_RATE_LIMIT_*` cap calls per
+  upstream host, so one client cannot exhaust a free public endpoint's shared
+  rate limit for everyone.
+- **Bounded upstream caching.** Read-only GET responses (1Click status, Esplora
+  transaction and address endpoints) are cached for
+  `TRACESETTLE_CACHE_TTL` seconds (default 45) and keyed on the exact URL, so
+  distinct investigations never share an entry. Only successful responses are
+  cached; failures, timeouts, and incomplete results are never stored. Concurrent
+  identical misses are coalesced into one upstream call.
+- **No version disclosure.** The `Server` header is `TRACESETTLE`; the Python
+  build and package version are not disclosed.
+
+`POST /api/investigate` returns the structured report (`{"data": ...}`) by
+default. `?format=json`, `?format=markdown`, and `?format=full` (all three, as
+earlier versions returned) select other representations.
+
 ## Tests
 
 ```sh
-python3 -m pytest tests/ -q          # all 233
+python3 -m pytest tests/ -q          # all 304
 python3 -m pytest tests/test_safety_invariants.py -q
 python3 -m pytest tests/test_ui.py -q
 ```

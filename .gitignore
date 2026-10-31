@@ -27,3 +27,6 @@ build/
 
 # Local scratch
 *.log
+
+# Agent workspace state (not part of the project)
+.openhands/

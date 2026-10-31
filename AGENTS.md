@@ -75,7 +75,7 @@ when evidence is insufficient.
 - **Dev setup:** `python3 -m venv .venv && . .venv/bin/activate &&
   python -m pip install -r requirements-dev.txt`. Verified working in a clean venv
   with no globally installed pytest/pyflakes.
-- **Tests:** `python3 -m pytest tests/ -q` (233 tests). `tests/conftest.py` provides
+- **Tests:** `python3 -m pytest tests/ -q` (304 tests). `tests/conftest.py` provides
   `FakeOpener`, which substitutes only `urllib`'s opener; adapters, engine, report,
   and UI are the real code paths. Real captures are loaded from `evidence/raw/`;
   synthetic fixtures live in `tests/fixtures/synthetic/` and carry a `_provenance`
@@ -139,7 +139,7 @@ when evidence is insufficient.
   plain unverified report. A refund whose on-chain search could not be *completed*
   resolves to `UNKNOWN` (insufficient evidence) instead, and is still never
   confirmed.
-- **Tests:** `python3 -m pytest tests/ -q` (233 tests).
+- **Tests:** `python3 -m pytest tests/ -q` (304 tests).
 
 ## Independent verification (pre-submission)
 
@@ -397,3 +397,54 @@ answered 200 again, and the demo was re-run against real endpoints.
 - **Lesson recorded.** Verdicts must follow the live evidence. Demo/report prose
   that asserts a fixed upstream behavior will go stale; derive it from the
   observed result instead.
+
+## Tier 1/2 interface hardening (2026-10-31, HEAD `b7196e9` + this commit)
+
+Security hardening of the read-only web interface, plus upstream caching. No
+runtime dependency was added; the engine and evidence model are untouched, so no
+verification was weakened.
+
+- **Slowloris / resource exhaustion.** `InvestigationServer` sets a per-connection
+  socket timeout (`TRACESETTLE_CLIENT_TIMEOUT`, default 10s) and a hard
+  concurrency cap (`TRACESETTLE_MAX_CONCURRENCY`, default 16) via a
+  `BoundedSemaphore`. `process_request_thread` acquires the slot, sets the
+  timeout, and releases in a `finally`, so a slot is returned on every path.
+  Excess connections are answered `503` with `Retry-After` — the rejection
+  half-closes and drains the socket so the 503 is delivered rather than lost to a
+  RST. `handle_error` suppresses `BrokenPipeError`/`ConnectionResetError`/
+  `TimeoutError` noise (a client that disconnects mid-response is normal, and a
+  per-event traceback is a log-flood vector).
+- **Bounded bodies.** `Content-Length` is validated against the 8 KiB cap before
+  the body is read; a stalled read is caught and answered `408`.
+- **Auth.** `TRACESETTLE_API_KEY` (env) gates `POST /api/investigate`; comparison
+  is `hmac.compare_digest`. The key is never logged or echoed. `GET /` and
+  `GET /api/health` stay open. Unset = open (loopback default).
+- **Rate limits.** `ratelimit.TokenBucketLimiter` — per-client-IP on the
+  investigate endpoint (keyed on `client_address`, so a spoofed
+  `X-Forwarded-For` cannot bypass it) and per-upstream-host inside `HttpClient`.
+  Bucket maps are LRU-bounded, so cycling keys cannot exhaust memory.
+- **Caching.** `cache.TtlCache` — bounded, TTL, single-flight. `HttpClient`
+  caches only GETs on `/v0/status`, `/tx/`, `/address/`, keyed on the exact URL,
+  and only when `status is OK`; failures/timeouts/NOT_FOUND are never stored.
+  A cached value is byte-identical to the live parse, so reconciliation is
+  unaffected. POSTs are never cached.
+- **Response optimization.** `POST /api/investigate` now returns `{"data": ...}`
+  by default; `?format=json|markdown|full` select others, and `full` reproduces
+  the old three-key shape for compatibility. The page requests `format=full`.
+- **Version disclosure.** `Handler.version_string()` returns `TRACESETTLE`; the
+  Python build and package version are not in the `Server` header. Verified live
+  with `curl -I`.
+- **New modules:** `tracesettle/ratelimit.py`, `tracesettle/cache.py`.
+- **New tests:** `tests/test_ratelimit.py` (10), `tests/test_cache.py` (8),
+  `tests/test_httpclient.py` (9), plus Phase 1/2/3/5 tests in `tests/test_ui.py`
+  (slow client, concurrency cap + recovery, slot release on success/error, body
+  bounding, idle-connection bounding, auth required/accepted/rejected/ungated,
+  per-IP 429, forwarded-header non-bypass, `Retry-After`, cache reuse through the
+  server, format selection, response-size bounds, Server header). `conftest.client_for`
+  gained `cache`/`host_limiter`; `running_server(**server_kwargs)` forwards tunables.
+- **Counts:** 254 → **304 passed**, 0 skipped; pyflakes clean; compileall OK;
+  offline demo byte-identical; all three demo cases unchanged.
+- **Verified live** (real server, `curl`): `Server: TRACESETTLE`; unauthenticated
+  and wrong-key POST → `401`; correct key → `200`; rapid POSTs → `200 200 429 429`
+  at burst 2; `?format=markdown` → Markdown; `?format=xml` → `400`; 20 KB body →
+  `413`; `GET /api/health` → `200`; server log contained no key or identifier.

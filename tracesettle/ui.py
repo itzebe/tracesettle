@@ -16,23 +16,36 @@ Design constraints honoured here:
 
 from __future__ import annotations
 
+import hmac
 import json
 import logging
+import socket
+import sys
+import threading
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
-from . import DISCLAIMER, __version__
+from . import DISCLAIMER, __version__, config
+from .cache import TtlCache
 from .httpclient import HttpClient
 from .investigation import build_result, investigate
 from .model import IdentifierType
+from .ratelimit import TokenBucketLimiter
 from .report import build_report
 
 log = logging.getLogger("tracesettle.ui")
 
 MAX_BODY_BYTES = 8 * 1024
 MAX_IDENTIFIER_CHARS = 128
+
+#: Response formats for ``POST /api/investigate``.
+#:   * ``default``  — ``data`` only (the structured report; leanest).
+#:   * ``json``     — the pretty-printed JSON document.
+#:   * ``markdown`` — the Markdown document.
+#:   * ``full``     — all three, for backward compatibility with earlier clients.
+_VALID_FORMATS = frozenset({"default", "json", "markdown", "full"})
 
 _INDEX_HTML = """<!DOCTYPE html>
 <html lang="en">
@@ -273,7 +286,7 @@ form.addEventListener('submit', async (ev) => {
     '</code>&hellip;</div>';
   submit.disabled = true;
   try {
-    const res = await fetch('api/investigate', {
+    const res = await fetch('api/investigate?format=full', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ identifier }),
@@ -303,21 +316,42 @@ def _classify_override(identifier: str) -> IdentifierType | None:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = f"TRACESETTLE/{__version__}"
     protocol_version = "HTTP/1.1"
 
+    def version_string(self) -> str:
+        """A non-identifying server token.
+
+        The default leaks the package version and the exact Python build. Neither
+        helps a client and both help an attacker fingerprint the deployment, so
+        the header states the product name and nothing else.
+        """
+        return "TRACESETTLE"
+
     def log_message(self, fmt: str, *args: Any) -> None:  # noqa: A003
-        # Never log the full request line: identifiers are user data.
-        log.info("request handled: %s", self.command)
+        # Never log the full request line: identifiers are user data. Never log
+        # headers either: the API key travels in one. ``command`` is absent when a
+        # connection closes before a request line is read (idle or overloaded).
+        log.info("request handled: %s", getattr(self, "command", None) or "-")
 
     # -- helpers ------------------------------------------------------------
 
-    def _send(self, status: int, body: bytes, content_type: str) -> None:
+    def _send(
+        self, status: int, body: bytes, content_type: str, extra_headers: dict[str, str] | None = None
+    ) -> None:
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
+        # An error response may be sent before the request body is read (auth,
+        # rate limit, size, format). Keeping the connection alive would leave the
+        # unread body bytes to be parsed as the next request, so errors always
+        # close the connection. ``Connection: close`` sets close_connection, so
+        # the handler tears the socket down after this response.
+        if status >= 400:
+            self.send_header("Connection", "close")
+        for name, value in (extra_headers or {}).items():
+            self.send_header(name, value)
         self.send_header(
             "Content-Security-Policy",
             "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; "
@@ -327,8 +361,31 @@ class Handler(BaseHTTPRequestHandler):
         if self.command != "HEAD":
             self.wfile.write(body)
 
-    def _json(self, status: int, payload: dict[str, Any]) -> None:
-        self._send(status, json.dumps(payload).encode("utf-8"), "application/json; charset=utf-8")
+    def _json(
+        self,
+        status: int,
+        payload: dict[str, Any],
+        extra_headers: dict[str, str] | None = None,
+    ) -> None:
+        self._send(
+            status,
+            json.dumps(payload).encode("utf-8"),
+            "application/json; charset=utf-8",
+            extra_headers,
+        )
+
+    def _authorized(self) -> bool:
+        """Whether the request carries the configured API key.
+
+        When no key is configured the endpoint is open (local, loopback-only use).
+        The comparison is constant-time so the check does not leak the key length
+        or content through timing. The key is never logged or echoed back.
+        """
+        expected = config.API_KEY
+        if expected is None:
+            return True
+        provided = self.headers.get("X-API-Key") or ""
+        return hmac.compare_digest(provided.encode("utf-8"), expected.encode("utf-8"))
 
     # -- routes -------------------------------------------------------------
 
@@ -348,11 +405,41 @@ class Handler(BaseHTTPRequestHandler):
         self.do_GET()
 
     def do_POST(self) -> None:  # noqa: N802
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path = parsed.path
         if path != "/api/investigate":
             self._json(404, {"error": "not found"})
             return
 
+        # Per-client-IP rate limit, applied before authentication so that a
+        # brute-force attempt against the API key is throttled too. The key is
+        # the socket peer address, which the client cannot spoof over TCP; a
+        # forwarded-for header is deliberately not trusted, so the limit cannot
+        # be bypassed by adding one.
+        client_ip = self.client_address[0] if self.client_address else "unknown"
+        limiter = self.server.client_limiter  # type: ignore[attr-defined]
+        if not limiter.allow(client_ip):
+            retry_after = limiter.retry_after_seconds(client_ip)
+            self._json(
+                429,
+                {"error": "rate limit exceeded; retry later"},
+                {"Retry-After": str(retry_after)},
+            )
+            return
+
+        if not self._authorized():
+            # Generic message; never echo the key, the expected value, or a
+            # prefix of either.
+            self._json(401, {"error": "unauthorized"}, {"WWW-Authenticate": "X-API-Key"})
+            return
+
+        fmt = (parse_qs(parsed.query).get("format", ["default"])[0] or "default").lower()
+        if fmt not in _VALID_FORMATS:
+            self._json(400, {"error": f"unknown format; expected one of {sorted(_VALID_FORMATS)}"})
+            return
+
+        # Bound the body *before* reading a single byte, so an oversized or
+        # mis-declared request cannot make the server allocate or block.
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
@@ -363,7 +450,14 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         try:
-            payload = json.loads(self.rfile.read(length).decode("utf-8"))
+            raw = self.rfile.read(length)
+        except (TimeoutError, OSError):
+            # A slow or stalled client; the socket read timeout fired.
+            self._json(408, {"error": "request body read timed out"})
+            return
+
+        try:
+            payload = json.loads(raw.decode("utf-8"))
         except (json.JSONDecodeError, UnicodeDecodeError):
             self._json(400, {"error": "request body must be valid JSON"})
             return
@@ -395,19 +489,35 @@ class Handler(BaseHTTPRequestHandler):
             self._json(502, {"error": "investigation failed; see server logs"})
             return
 
-        self._json(
-            200,
-            {
-                "data": report.to_dict(),
-                "json": report.to_json(),
-                "markdown": report.to_markdown(),
-            },
-        )
+        self._json(200, self._render_report(report, fmt))
+
+    @staticmethod
+    def _render_report(report: Any, fmt: str) -> dict[str, Any]:
+        """Serialise the report in the requested format.
+
+        The default returns the structured ``data`` only; the pretty JSON and
+        Markdown documents are available on request. ``full`` preserves the
+        earlier behaviour of returning all three, so existing clients keep working.
+        """
+        if fmt == "json":
+            return {"json": report.to_json()}
+        if fmt == "markdown":
+            return {"markdown": report.to_markdown()}
+        data = report.to_dict()
+        if fmt == "full":
+            return {"data": data, "json": report.to_json(), "markdown": report.to_markdown()}
+        return {"data": data}
 
     # -- investigation ------------------------------------------------------
 
     def _run_investigation(self, identifier: str):
-        client = HttpClient(timeout=self.server.timeout_seconds, max_attempts=self.server.max_attempts)  # type: ignore[attr-defined]
+        server = self.server  # type: ignore[attr-defined]
+        client = HttpClient(
+            timeout=server.timeout_seconds,
+            max_attempts=server.max_attempts,
+            cache=server.upstream_cache,
+            host_limiter=server.host_limiter,
+        )
         inv = investigate(identifier, client)
         result = build_result(inv)
         created_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -417,11 +527,105 @@ class Handler(BaseHTTPRequestHandler):
 class InvestigationServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
+    request_queue_size = config.REQUEST_QUEUE_SIZE
 
-    def __init__(self, address: tuple[str, int], timeout_seconds: float = 15.0, max_attempts: int = 3):
+    def __init__(
+        self,
+        address: tuple[str, int],
+        timeout_seconds: float = 15.0,
+        max_attempts: int = 3,
+        *,
+        max_concurrency: int | None = None,
+        client_socket_timeout: float | None = None,
+        client_limiter: TokenBucketLimiter | None = None,
+        host_limiter: TokenBucketLimiter | None = None,
+        upstream_cache: TtlCache | None = None,
+    ):
         super().__init__(address, Handler)
         self.timeout_seconds = timeout_seconds
         self.max_attempts = max_attempts
+        self.client_socket_timeout = (
+            config.CLIENT_SOCKET_TIMEOUT_SECONDS
+            if client_socket_timeout is None
+            else client_socket_timeout
+        )
+        cap = config.MAX_CONCURRENT_REQUESTS if max_concurrency is None else max_concurrency
+        # A hard cap on concurrently served connections. Threads that cannot get a
+        # slot are rejected with 503 rather than queued, so a slow client cannot
+        # exhaust memory or file descriptors.
+        self._semaphore = threading.BoundedSemaphore(max(1, cap))
+        self.client_limiter = client_limiter or TokenBucketLimiter(
+            config.RATE_LIMIT_PER_MINUTE, config.RATE_LIMIT_BURST
+        )
+        self.host_limiter = host_limiter or TokenBucketLimiter(
+            config.HOST_RATE_LIMIT_PER_MINUTE, config.HOST_RATE_LIMIT_BURST
+        )
+        self.upstream_cache = upstream_cache or TtlCache(
+            config.UPSTREAM_CACHE_TTL_SECONDS, max_entries=config.UPSTREAM_CACHE_MAX_ENTRIES
+        )
+
+    def process_request_thread(self, request: Any, client_address: Any) -> None:
+        """Serve one connection, bounded by the concurrency cap and a read timeout.
+
+        The semaphore is acquired before the handler runs and released in a
+        ``finally`` so a slot is returned on *every* path: success, client error,
+        timeout, or an unexpected exception inside the handler.
+        """
+        if not self._semaphore.acquire(blocking=False):
+            _reject_overloaded(request)
+            self.shutdown_request(request)
+            return
+        try:
+            request.settimeout(self.client_socket_timeout)
+            super().process_request_thread(request, client_address)
+        finally:
+            self._semaphore.release()
+
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        """Keep connection-level noise out of the log.
+
+        A client that disconnects mid-response (a broken pipe or reset) is normal
+        and not worth a traceback; logging it on every such event is also a cheap
+        log-flooding vector. Anything genuinely unexpected is logged once, at
+        error level, without the traceback unless debug logging is on.
+        """
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (BrokenPipeError, ConnectionResetError, TimeoutError)):
+            log.debug("client disconnected before the response completed")
+            return
+        log.error("unhandled error while serving a request")
+        log.debug("request error detail", exc_info=True)
+
+
+def _reject_overloaded(request: Any) -> None:
+    """Best-effort 503 to a client we are refusing to serve.
+
+    The client's request bytes are drained before the socket closes. Closing a
+    socket that still has unread inbound data makes the kernel send RST, which
+    discards the response we just wrote, so the client would see a connection
+    reset instead of the 503. A half-close plus a bounded drain avoids that.
+    """
+    body = b'{"error":"server busy; retry later"}'
+    try:
+        request.sendall(
+            b"HTTP/1.1 503 Service Unavailable\r\n"
+            b"Content-Type: application/json; charset=utf-8\r\n"
+            b"Retry-After: 1\r\n"
+            b"Connection: close\r\n"
+            b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body
+        )
+        try:
+            request.shutdown(socket.SHUT_WR)
+        except OSError:
+            pass
+        request.settimeout(0.25)
+        try:
+            while request.recv(4096):
+                pass
+        except OSError:
+            pass
+    except OSError:
+        pass
 
 
 def serve(host: str = "127.0.0.1", port: int = 8000, timeout_seconds: float = 15.0, max_attempts: int = 3) -> None:
