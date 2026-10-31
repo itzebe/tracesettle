@@ -407,8 +407,11 @@ verification was weakened.
 - **Slowloris / resource exhaustion.** `InvestigationServer` sets a per-connection
   socket timeout (`TRACESETTLE_CLIENT_TIMEOUT`, default 10s) and a hard
   concurrency cap (`TRACESETTLE_MAX_CONCURRENCY`, default 16) via a
-  `BoundedSemaphore`. `process_request_thread` acquires the slot, sets the
-  timeout, and releases in a `finally`, so a slot is returned on every path.
+  `BoundedSemaphore`. The slot is taken in `process_request` (the accept loop),
+  *before* `ThreadingMixIn` spawns a worker, so a connection flood cannot create
+  unbounded threads; `process_request_thread` sets the timeout and releases in a
+  `finally`, so a slot is returned on every path. Verified: 50 connections at
+  cap 2 spawn 3 threads, not 51.
   Excess connections are answered `503` with `Retry-After` — the rejection
   half-closes and drains the socket so the 503 is delivered rather than lost to a
   RST. `handle_error` suppresses `BrokenPipeError`/`ConnectionResetError`/

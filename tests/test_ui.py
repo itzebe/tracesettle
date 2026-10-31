@@ -492,6 +492,40 @@ def test_many_idle_connections_do_not_exhaust_threads():
         assert status == 200
 
 
+def test_connection_flood_does_not_spawn_a_thread_per_connection():
+    """Overload is refused at accept time, so a flood cannot create threads."""
+    created: list[str] = []
+    original_init = threading.Thread.__init__
+
+    def counting_init(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        created.append(self.name)
+
+    threading.Thread.__init__ = counting_init
+    try:
+        with running_server(max_concurrency=2, client_socket_timeout=1.0) as base:
+            host, port = _host_port(base)
+            socks = []
+            try:
+                for _ in range(40):
+                    try:
+                        socks.append(socket.create_connection((host, port), timeout=1))
+                    except OSError:
+                        break
+                time.sleep(0.4)
+                spawned = len(created)
+            finally:
+                for s in socks:
+                    s.close()
+    finally:
+        threading.Thread.__init__ = original_init
+
+    # ThreadingMixIn would spawn one thread per connection without the accept-time
+    # check; with it, only the capped workers exist. Allow a small margin for the
+    # accept thread and the test's own thread.
+    assert spawned <= 6, f"spawned {spawned} threads for {len(socks)} connections"
+
+
 # --- Phase 2: authentication and rate limiting ------------------------------
 
 

@@ -564,17 +564,32 @@ class InvestigationServer(ThreadingHTTPServer):
             config.UPSTREAM_CACHE_TTL_SECONDS, max_entries=config.UPSTREAM_CACHE_MAX_ENTRIES
         )
 
-    def process_request_thread(self, request: Any, client_address: Any) -> None:
-        """Serve one connection, bounded by the concurrency cap and a read timeout.
+    def process_request(self, request: Any, client_address: Any) -> None:
+        """Admit a connection or refuse it *before* a worker thread is created.
 
-        The semaphore is acquired before the handler runs and released in a
-        ``finally`` so a slot is returned on *every* path: success, client error,
-        timeout, or an unexpected exception inside the handler.
+        ``ThreadingMixIn`` spawns one thread per accepted connection, so refusing
+        overload inside the thread would still let a flood create unbounded
+        threads. The slot is taken here, in the single accepting thread, and
+        released by the worker in :meth:`process_request_thread`.
         """
         if not self._semaphore.acquire(blocking=False):
             _reject_overloaded(request)
             self.shutdown_request(request)
             return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            # The thread could not be started; return the slot rather than leak it.
+            self._semaphore.release()
+            raise
+
+    def process_request_thread(self, request: Any, client_address: Any) -> None:
+        """Serve one connection, bounded by the concurrency cap and a read timeout.
+
+        The slot was taken in :meth:`process_request`; it is released in a
+        ``finally`` so it is returned on *every* path: success, client error,
+        timeout, or an unexpected exception inside the handler.
+        """
         try:
             request.settimeout(self.client_socket_timeout)
             super().process_request_thread(request, client_address)
@@ -600,10 +615,12 @@ class InvestigationServer(ThreadingHTTPServer):
 def _reject_overloaded(request: Any) -> None:
     """Best-effort 503 to a client we are refusing to serve.
 
-    The client's request bytes are drained before the socket closes. Closing a
-    socket that still has unread inbound data makes the kernel send RST, which
-    discards the response we just wrote, so the client would see a connection
-    reset instead of the 503. A half-close plus a bounded drain avoids that.
+    This runs in the accept loop, so it must never block: it sends the response,
+    half-closes, and drains only bytes that have already arrived. Draining avoids
+    the kernel sending RST (which would discard the response we just wrote)
+    because a socket closed with unread inbound data is reset rather than
+    finished. A client that has not sent anything yet gets a reset, which is an
+    acceptable rejection and, crucially, cannot stall acceptance.
     """
     body = b'{"error":"server busy; retry later"}'
     try:
@@ -618,11 +635,11 @@ def _reject_overloaded(request: Any) -> None:
             request.shutdown(socket.SHUT_WR)
         except OSError:
             pass
-        request.settimeout(0.25)
+        request.setblocking(False)
         try:
             while request.recv(4096):
                 pass
-        except OSError:
+        except (BlockingIOError, OSError):
             pass
     except OSError:
         pass
