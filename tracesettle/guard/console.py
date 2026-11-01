@@ -1,0 +1,874 @@
+"""The security operations console.
+
+A single self-contained page (standard library only, no build step, no CDN) that
+gives an operator the eight sections the product requires. It is served by
+:mod:`tracesettle.ui` at ``/console`` and talks only to this server's own JSON
+endpoints.
+
+Design notes
+------------
+* Information hierarchy first: an outcome is always a labelled status, never a
+  bare colour. Colour is additive, never the only signal (WCAG 2.2 AA).
+* Every asynchronous panel has explicit loading, empty, and error states.
+* Nothing is fabricated: if a panel has no data it says so.
+* A simulation banner is shown whenever any rendered item is simulated.
+"""
+
+from __future__ import annotations
+
+CONSOLE_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TRACESETTLE — Security Operations Console</title>
+<style>
+  :root {
+    --bg: #0b0e14; --panel: #121722; --panel-2: #0e131c; --line: #232b3a;
+    --fg: #e8eef7; --muted: #93a1b5; --accent: #6ea8fe; --accent-2: #b98bff;
+    --ok: #3fb950; --warn: #e3b341; --bad: #ff7b72; --hold: #d2a8ff; --info: #79c0ff;
+    --sim: #b98bff;
+    --focus: #ffd33d;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background: var(--bg); color: var(--fg);
+    font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    -webkit-text-size-adjust: 100%;
+  }
+  a { color: var(--accent); }
+  .skip { position: absolute; left: -999px; top: 0; background: var(--focus); color: #111;
+    padding: 8px 12px; border-radius: 0 0 6px 0; z-index: 20; }
+  .skip:focus { left: 0; }
+  :focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; border-radius: 4px; }
+  header.app { border-bottom: 1px solid var(--line); background: linear-gradient(180deg,#101623,#0b0e14);
+    position: sticky; top: 0; z-index: 10; }
+  .bar { max-width: 1240px; margin: 0 auto; padding: 14px 18px; display: flex; gap: 16px;
+    align-items: center; flex-wrap: wrap; }
+  .brand { font-weight: 700; letter-spacing: .12em; font-size: 16px; }
+  .brand span { color: var(--accent); }
+  .tagline { color: var(--muted); font-size: 12.5px; }
+  .badges { margin-left: auto; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .badge { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; border: 1px solid var(--line);
+    border-radius: 999px; padding: 3px 9px; color: var(--muted); white-space: nowrap; }
+  .badge.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 55%, var(--line)); }
+  .badge.sim { color: var(--sim); border-color: color-mix(in srgb, var(--sim) 55%, var(--line)); }
+  .badge.bad { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 55%, var(--line)); }
+  nav.tabs { border-bottom: 1px solid var(--line); background: var(--panel-2); position: sticky;
+    top: 61px; z-index: 9; }
+  nav.tabs ul { max-width: 1240px; margin: 0 auto; padding: 0 10px; display: flex; gap: 2px;
+    list-style: none; overflow-x: auto; }
+  nav.tabs button { appearance: none; background: none; border: none; border-bottom: 2px solid transparent;
+    color: var(--muted); font: inherit; font-size: 13.5px; padding: 11px 13px; cursor: pointer;
+    white-space: nowrap; }
+  nav.tabs button[aria-selected="true"] { color: var(--fg); border-bottom-color: var(--accent); }
+  nav.tabs button:hover { color: var(--fg); }
+  main { max-width: 1240px; margin: 0 auto; padding: 20px 18px 64px; }
+  section[role="tabpanel"] { display: none; }
+  section[role="tabpanel"].active { display: block; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  h2 { font-size: 15px; margin: 0 0 12px; letter-spacing: .02em; }
+  h3 { font-size: 13px; margin: 16px 0 8px; color: var(--muted); text-transform: uppercase;
+    letter-spacing: .08em; }
+  .lede { color: var(--muted); font-size: 13.5px; margin: 0 0 18px; max-width: 78ch; }
+  .grid { display: grid; gap: 14px; }
+  .grid.kpi { grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); }
+  .grid.two { grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 15px 16px; }
+  .card.kpi .n { font-size: 30px; font-weight: 700; line-height: 1.1; }
+  .card.kpi .l { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .07em; }
+  .card.kpi .hint { color: var(--muted); font-size: 12px; margin-top: 4px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 16px; margin-bottom: 16px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  caption { text-align: left; color: var(--muted); font-size: 12.5px; padding-bottom: 8px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 11.5px; text-transform: uppercase;
+    letter-spacing: .06em; white-space: nowrap; }
+  td.wrap { word-break: break-word; }
+  .status { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; font-weight: 600;
+    letter-spacing: .04em; text-transform: uppercase; padding: 2px 8px; border-radius: 999px;
+    border: 1px solid currentColor; }
+  .status::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+  .s-ALLOW, .s-CONFIRMED, .s-EXECUTED, .s-OK, .s-RESOLVED, .s-VALID { color: var(--ok); }
+  .s-REQUIRE_APPROVAL, .s-REPORTED, .s-ACKNOWLEDGED { color: var(--warn); }
+  .s-HOLD, .s-UNKNOWN, .s-INCOMPLETE, .s-OPEN { color: var(--hold); }
+  .s-BLOCK, .s-REFUSED, .s-CONTRADICTORY, .s-UNAVAILABLE, .s-FAILED { color: var(--bad); }
+  .s-SIMULATED, .s-NOTICE { color: var(--sim); }
+  .s-MISSING { color: var(--muted); }
+  .sev-LOW { color: var(--info); } .sev-MEDIUM { color: var(--warn); }
+  .sev-HIGH { color: #ffa657; } .sev-CRITICAL { color: var(--bad); }
+  .sev-INFO { color: var(--muted); }
+  button.act { appearance: none; font: inherit; font-size: 13px; padding: 9px 14px; border-radius: 8px;
+    border: 1px solid var(--line); background: #1a2130; color: var(--fg); cursor: pointer; }
+  button.act:hover { border-color: var(--accent); }
+  button.act.primary { background: #1d4ed8; border-color: #1d4ed8; }
+  button.act.primary:hover { background: #2563eb; }
+  button.act[disabled] { opacity: .55; cursor: progress; }
+  input[type=text], input[type=password], textarea, select {
+    font: inherit; font-size: 13.5px; color: var(--fg); background: #0a0e15;
+    border: 1px solid var(--line); border-radius: 8px; padding: 9px 11px; width: 100%; }
+  label { display: block; font-size: 12px; color: var(--muted); margin: 0 0 4px; }
+  .field { margin-bottom: 12px; }
+  .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-end; }
+  .row > .field { flex: 1 1 180px; margin-bottom: 0; }
+  .kv { display: grid; grid-template-columns: max-content 1fr; gap: 5px 16px; font-size: 13px; }
+  .kv dt { color: var(--muted); } .kv dd { margin: 0; word-break: break-word; }
+  code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; }
+  code { background: #0a0e15; padding: 1px 5px; border-radius: 4px; word-break: break-all; }
+  .note { border-left: 3px solid var(--accent); background: #101a2b; padding: 9px 12px;
+    border-radius: 6px; color: #cfe0f7; font-size: 13px; margin: 0 0 14px; }
+  .note.sim { border-left-color: var(--sim); background: #171327; color: #ded0ff; }
+  .note.bad { border-left-color: var(--bad); background: #2a1518; color: #ffc9c4; }
+  .empty { color: var(--muted); font-size: 13px; padding: 12px; border: 1px dashed var(--line);
+    border-radius: 8px; text-align: center; }
+  .loading { color: var(--muted); font-size: 13px; }
+  ul.plain { list-style: none; margin: 0; padding: 0; }
+  ul.plain li { border-bottom: 1px solid var(--line); padding: 10px 0; }
+  ul.plain li:last-child { border-bottom: none; }
+  .muted { color: var(--muted); }
+  .small { font-size: 12px; }
+  .stack { display: flex; flex-direction: column; gap: 10px; }
+  .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
+  details.raw summary { cursor: pointer; color: var(--muted); font-size: 12.5px; }
+  pre { background: #080b11; border: 1px solid var(--line); border-radius: 8px; padding: 12px;
+    overflow: auto; font-size: 12px; max-height: 420px; }
+  footer { color: var(--muted); font-size: 12px; text-align: center; padding: 24px 16px;
+    border-top: 1px solid var(--line); }
+  .sr { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden;
+    clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+  @media (max-width: 640px) {
+    .bar { padding: 12px; } nav.tabs { top: 0; position: static; }
+    .hide-sm { display: none; } .card.kpi .n { font-size: 24px; }
+  }
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to main content</a>
+<header class="app">
+  <div class="bar">
+    <div>
+      <div class="brand">TRACE<span>SETTLE</span></div>
+      <div class="tagline">Blockchain transaction security &amp; settlement assurance</div>
+    </div>
+    <div class="badges">
+      <span class="badge" id="badge-version">v__VERSION__</span>
+      <span class="badge ok" id="badge-audit">audit: checking</span>
+      <span class="badge" id="badge-key">key: checking</span>
+      <label class="sr" for="apikey">API key (sent as X-API-Key when configured)</label>
+      <input type="password" id="apikey" placeholder="API key (if required)" autocomplete="off"
+        style="width: 190px" aria-describedby="apikey-hint">
+      <span id="apikey-hint" class="sr">Only needed when the server is configured with an API key.</span>
+    </div>
+  </div>
+</header>
+<nav class="tabs" aria-label="Sections">
+  <ul role="tablist">
+    <li role="presentation"><button role="tab" id="tab-overview" aria-controls="panel-overview" aria-selected="true">Security Overview</button></li>
+    <li role="presentation"><button role="tab" id="tab-guard" aria-controls="panel-guard" aria-selected="false">Transaction Guard</button></li>
+    <li role="presentation"><button role="tab" id="tab-lab" aria-controls="panel-lab" aria-selected="false">Attack Simulations</button></li>
+    <li role="presentation"><button role="tab" id="tab-investigations" aria-controls="panel-investigations" aria-selected="false">Investigations</button></li>
+    <li role="presentation"><button role="tab" id="tab-incidents" aria-controls="panel-incidents" aria-selected="false">Security Incidents</button></li>
+    <li role="presentation"><button role="tab" id="tab-policies" aria-controls="panel-policies" aria-selected="false">Policies &amp; Controls</button></li>
+    <li role="presentation"><button role="tab" id="tab-integrations" aria-controls="panel-integrations" aria-selected="false">Integrations</button></li>
+    <li role="presentation"><button role="tab" id="tab-audit" aria-controls="panel-audit" aria-selected="false">Audit Logs</button></li>
+    <li role="presentation"><button role="tab" id="tab-settings" aria-controls="panel-settings" aria-selected="false">Settings</button></li>
+  </ul>
+</nav>
+<main id="main">
+  <div class="note" id="global-note">__DISCLAIMER__</div>
+
+  <section role="tabpanel" id="panel-overview" class="active" aria-labelledby="tab-overview">
+    <h1>Security Overview</h1>
+    <p class="lede">Every transaction request is evaluated before execution. A decision of ALLOW
+      produces a short-lived, transaction-bound authorization; anything else produces none, so a
+      signer that consults TraceSettle refuses it. Values below are live counters from this process.</p>
+    <div class="grid kpi" id="kpis"></div>
+    <div class="grid two" style="margin-top:16px">
+      <div class="panel"><h2>Recent security events</h2><div id="overview-events"></div></div>
+      <div class="panel"><h2>Open incidents</h2><div id="overview-incidents"></div></div>
+    </div>
+    <div class="panel"><h2>Recent investigations</h2><div id="overview-investigations"></div></div>
+  </section>
+
+  <section role="tabpanel" id="panel-guard" aria-labelledby="tab-guard">
+    <h1>Transaction Guard</h1>
+    <p class="lede">Evaluate a transaction request against policy, then hand the result to the
+      reference signer. The signer validates the authorization independently and refuses anything
+      that is missing, expired, replayed, or bound to different parameters.</p>
+    <div class="panel">
+      <h2>Evaluate a request</h2>
+      <form id="guard-form" autocomplete="off">
+        <div class="row">
+          <div class="field"><label for="g-service">Service identity</label>
+            <input type="text" id="g-service" value="treasury-agent"></div>
+          <div class="field"><label for="g-operation">Operation</label>
+            <input type="text" id="g-operation" value="WITHDRAWAL"></div>
+          <div class="field"><label for="g-chain">Chain</label>
+            <input type="text" id="g-chain" value="eth"></div>
+          <div class="field"><label for="g-asset">Asset</label>
+            <input type="text" id="g-asset" value="USDC"></div>
+        </div>
+        <div class="row" style="margin-top:12px">
+          <div class="field"><label for="g-amount">Amount</label>
+            <input type="text" id="g-amount" value="1250.50"></div>
+          <div class="field" style="flex:2 1 320px"><label for="g-destination">Destination</label>
+            <input type="text" id="g-destination" value="0x4e6d3A556e485188E9C9a528bc72c88BD92BD735"></div>
+        </div>
+        <div class="row" style="margin-top:12px">
+          <div class="field"><label for="g-request-id">Request reference (optional)</label>
+            <input type="text" id="g-request-id" placeholder="auto-generated"></div>
+          <div class="field"><label for="g-flag">Include a client approval flag (test)</label>
+            <select id="g-flag">
+              <option value="">none</option>
+              <option value="approved">approved: true</option>
+              <option value="skip_checks">skip_checks: true</option>
+            </select></div>
+        </div>
+        <div class="actions">
+          <button class="act primary" type="submit" id="g-submit">Evaluate</button>
+          <button class="act" type="button" id="g-reset">Reset</button>
+        </div>
+      </form>
+      <p class="small muted" style="margin:12px 0 0">A client approval flag is never honoured: its
+        presence is reported as a finding and forces human review.</p>
+    </div>
+    <div id="guard-result" aria-live="polite"></div>
+  </section>
+
+  <section role="tabpanel" id="panel-lab" aria-labelledby="tab-lab">
+    <h1>Attack Simulations</h1>
+    <p class="lede">Controlled simulations that exercise the enforcement boundary. The transaction
+      parameters are synthetic and the executor is simulated; nothing is broadcast to any chain. A
+      simulated result never describes a real blockchain transaction.</p>
+    <div id="lab-scenarios"></div>
+    <div id="lab-output" aria-live="polite"></div>
+  </section>
+
+  <section role="tabpanel" id="panel-investigations" aria-labelledby="tab-investigations">
+    <h1>Investigations</h1>
+    <p class="lede">The settlement investigation engine is unchanged and read-only. It reconstructs
+      on-chain evidence around a completed NEAR Intents swap and reports what it can and cannot
+      independently verify.</p>
+    <div class="panel">
+      <h2>Investigate a transaction</h2>
+      <form id="inv-form" autocomplete="off">
+        <div class="row">
+          <div class="field" style="flex:3 1 340px"><label for="inv-id">Identifier</label>
+            <input type="text" id="inv-id" placeholder="Deposit address, intent hash, or NEAR transaction hash" maxlength="128"></div>
+          <div class="field" style="flex:0 0 auto"><button class="act primary" type="submit" id="inv-submit">Investigate</button></div>
+        </div>
+      </form>
+      <p class="small muted" style="margin:10px 0 0">Supported: 1Click deposit addresses (full path)
+        and intent hashes (settlement status only). No keys required. Read-only.</p>
+    </div>
+    <div id="inv-result" aria-live="polite"></div>
+  </section>
+
+  <section role="tabpanel" id="panel-incidents" aria-labelledby="tab-incidents">
+    <h1>Security Incidents</h1>
+    <p class="lede">Incidents are opened by explicit rules when a control blocks a request, when a
+      denied destination or unregistered identity is used, or when the signer refuses a transaction.</p>
+    <div class="actions" style="margin-bottom:14px">
+      <button class="act" type="button" data-incident-filter="OPEN">Open</button>
+      <button class="act" type="button" data-incident-filter="ACKNOWLEDGED">Acknowledged</button>
+      <button class="act" type="button" data-incident-filter="RESOLVED">Resolved</button>
+      <button class="act" type="button" data-incident-filter="">All</button>
+    </div>
+    <div class="panel"><div id="incidents-body"></div></div>
+  </section>
+
+  <section role="tabpanel" id="panel-policies" aria-labelledby="tab-policies">
+    <h1>Policies &amp; Controls</h1>
+    <p class="lede">The active authorization policy and the deterministic controls that enforce it.
+      Every control is a pure function of the request, the policy, and recorded history.</p>
+    <div class="panel"><h2>Controls</h2><div id="controls-body"></div></div>
+    <div class="panel"><h2>Active policy</h2><div id="policy-body"></div></div>
+  </section>
+
+  <section role="tabpanel" id="panel-integrations" aria-labelledby="tab-integrations">
+    <h1>Integrations</h1>
+    <p class="lede">The enforcement interface a signing system integrates with, and the external
+      sources the settlement engine reads. Every external source is public and read-only.</p>
+    <div class="panel"><h2>Authorization boundary</h2><div id="integration-body"></div></div>
+    <div class="panel"><h2>Settlement data sources</h2><div id="sources-body"></div></div>
+  </section>
+
+  <section role="tabpanel" id="panel-audit" aria-labelledby="tab-audit">
+    <h1>Audit Logs</h1>
+    <p class="lede">Every evaluation, authorization, and signing attempt is appended to a
+      hash-chained log. The chain gives tamper-evidence: an edit, reorder, or removal of a stored
+      record is detectable by recomputation. It is not tamper-proof against an attacker who can
+      rewrite the whole log, which is why the head digest is shown for external anchoring.</p>
+    <div class="panel">
+      <div class="actions" style="margin-bottom:12px">
+        <button class="act" type="button" id="audit-verify">Verify chain</button>
+        <button class="act" type="button" id="audit-refresh">Refresh</button>
+      </div>
+      <div id="audit-verification"></div>
+      <div id="audit-body"></div>
+    </div>
+  </section>
+
+  <section role="tabpanel" id="panel-settings" aria-labelledby="tab-settings">
+    <h1>Settings</h1>
+    <p class="lede">Runtime configuration reported by the server. Secrets are never displayed; the
+      authorization key is shown only as a key identifier.</p>
+    <div class="panel"><h2>Runtime</h2><div id="settings-body"></div></div>
+  </section>
+</main>
+<footer>
+  TRACESETTLE prevents an unauthorized transaction from reaching a signer that consults it. It does
+  not sign, hold funds, or broadcast to any chain.
+</footer>
+<script>
+"use strict";
+const S = { key: "", tab: "overview", investigations: [] };
+
+function esc(v) {
+  return String(v == null ? "" : v)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+function status(v) {
+  return '<span class="status s-' + esc(v) + '">' + esc(v) + "</span>";
+}
+function sev(v) { return '<span class="status sev-' + esc(v) + '">' + esc(v) + "</span>"; }
+function loading(text) { return '<div class="loading">' + esc(text) + "</div>"; }
+function empty(text) { return '<div class="empty">' + esc(text) + "</div>"; }
+function fmtAt(iso) { return esc(iso || ""); }
+
+function headers() {
+  const h = { "Content-Type": "application/json" };
+  if (S.key) { h["X-API-Key"] = S.key; }
+  return h;
+}
+async function api(method, path, body) {
+  const res = await fetch(path, {
+    method: method,
+    headers: headers(),
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  let payload = null;
+  try { payload = await res.json(); } catch (e) { payload = null; }
+  if (!res.ok) {
+    const msg = (payload && payload.error) || ("HTTP " + res.status);
+    throw new Error(msg);
+  }
+  return payload;
+}
+
+/* ---- tabs ---- */
+function showTab(name) {
+  S.tab = name;
+  document.querySelectorAll('nav.tabs button[role="tab"]').forEach((b) => {
+    const on = b.id === "tab-" + name;
+    b.setAttribute("aria-selected", on ? "true" : "false");
+  });
+  document.querySelectorAll('section[role="tabpanel"]').forEach((s) => {
+    s.classList.toggle("active", s.id === "panel-" + name);
+  });
+  const loaders = {
+    overview: loadOverview, guard: () => {}, lab: loadLab, investigations: () => {},
+    incidents: () => loadIncidents("OPEN"), policies: loadPolicies, integrations: loadIntegrations,
+    audit: loadAudit, settings: loadSettings,
+  };
+  if (loaders[name]) { loaders[name](); }
+  if (location.hash !== "#" + name) { history.replaceState(null, "", "#" + name); }
+}
+
+/* ---- overview ---- */
+async function loadOverview() {
+  document.getElementById("kpis").innerHTML = loading("Loading metrics…");
+  document.getElementById("overview-events").innerHTML = loading("Loading…");
+  document.getElementById("overview-incidents").innerHTML = loading("Loading…");
+  try {
+    const m = await api("GET", "/api/guard/metrics");
+    const c = m.counts || {};
+    const cards = [
+      ["Evaluated requests", c.evaluated || 0, "total pre-execution evaluations"],
+      ["Approved", c.ALLOW || 0, "decision ALLOW"],
+      ["Blocked", c.BLOCK || 0, "decision BLOCK"],
+      ["Pending approvals", c.REQUIRE_APPROVAL || 0, "decision REQUIRE_APPROVAL"],
+      ["Held", c.HOLD || 0, "decision HOLD"],
+      ["Open incidents", c.open_incidents || 0, "not yet resolved"],
+      ["Authorizations issued", c.authorizations_issued || 0, "short-lived, single-use"],
+      ["Signer refusals", c.signer_refusals || 0, "refused at the signing boundary"],
+    ];
+    document.getElementById("kpis").innerHTML = cards.map(([l, n, h]) =>
+      '<div class="card kpi"><div class="l">' + esc(l) + '</div><div class="n">' + esc(n) +
+      '</div><div class="hint">' + esc(h) + "</div></div>").join("");
+    renderEvents(m.recent_events || []);
+    const inc = await api("GET", "/api/guard/incidents?status=OPEN&limit=5");
+    renderIncidentList(document.getElementById("overview-incidents"), inc.incidents || [], true);
+    renderInvestigations();
+    updateBadges(m);
+  } catch (err) {
+    document.getElementById("kpis").innerHTML = '<div class="note bad">' + esc(err.message) + "</div>";
+  }
+}
+function updateBadges(m) {
+  const audit = (m && m.audit) || {};
+  const badge = document.getElementById("badge-audit");
+  badge.textContent = "audit: " + (audit.length || 0) + " records";
+  const auth = (m && m.authorization) || {};
+  const kb = document.getElementById("badge-key");
+  kb.textContent = "key: " + (auth.ephemeral_key ? "ephemeral" : "configured");
+  kb.className = "badge " + (auth.ephemeral_key ? "sim" : "ok");
+}
+function renderEvents(events) {
+  const el = document.getElementById("overview-events");
+  if (!events.length) { el.innerHTML = empty("No security events yet. Evaluate a request in Transaction Guard."); return; }
+  el.innerHTML = '<ul class="plain">' + events.map((e) => {
+    let label = e.kind;
+    let detail = "";
+    if (e.kind === "DECISION") { label = status(e.decision); detail = esc(e.summary || ""); }
+    else if (e.kind === "SIGNER") { label = status(e.outcome); detail = esc(e.detail || ""); }
+    else if (e.kind === "AUTHORIZATION_ISSUED") { detail = "authorization issued for " + esc(e.service_id || ""); }
+    return "<li>" + label + ' <span class="small muted">' + fmtAt(e.at) + "</span><div>" + detail + "</div></li>";
+  }).join("") + "</ul>";
+}
+
+/* ---- guard ---- */
+function guardPayload() {
+  const flag = document.getElementById("g-flag").value;
+  const t = {
+    service_id: document.getElementById("g-service").value.trim(),
+    operation: document.getElementById("g-operation").value.trim(),
+    chain: document.getElementById("g-chain").value.trim(),
+    asset: document.getElementById("g-asset").value.trim(),
+    amount: document.getElementById("g-amount").value.trim(),
+    destination: document.getElementById("g-destination").value.trim(),
+  };
+  const rid = document.getElementById("g-request-id").value.trim();
+  if (rid) { t.request_id = rid; }
+  if (flag) { t[flag] = true; }
+  return t;
+}
+function renderDecision(d, authorization, signResult) {
+  let html = "";
+  if (d.simulated) {
+    html += '<div class="note sim"><strong>Simulation.</strong> This request was labelled simulated; ' +
+      "the executor is simulated and nothing is broadcast to any chain.</div>";
+  }
+  html += '<div class="panel"><h2>Decision</h2><div class="kv">' +
+    "<dt>Decision</dt><dd>" + status(d.decision) + "</dd>" +
+    "<dt>Decision ID</dt><dd><code>" + esc(d.decision_id) + "</code></dd>" +
+    "<dt>Risk level</dt><dd>" + sev(d.risk_level) + "</dd>" +
+    "<dt>Request reference</dt><dd><code>" + esc(d.request.request_id) + "</code></dd>" +
+    "<dt>Service</dt><dd>" + esc(d.request.service_id) + "</dd>" +
+    "<dt>Transfer</dt><dd>" + esc(d.request.amount) + " " + esc(d.request.asset) + " on " +
+      esc(d.request.chain) + "</dd>" +
+    "<dt>Destination</dt><dd><code>" + esc(d.request.destination) + "</code></dd>" +
+    "<dt>Bound parameters (digest)</dt><dd><code>" + esc(d.fingerprint.digest) + "</code></dd>" +
+    "<dt>Authorizes signing</dt><dd>" + esc(d.authorizes_signing) + "</dd>" +
+    "<dt>Evaluated at</dt><dd>" + fmtAt(d.created_at) + "</dd></div>" +
+    "<p>" + esc(d.explanation) + "</p></div>";
+
+  const findings = d.findings || [];
+  html += '<div class="panel"><h2>Risk findings</h2>';
+  if (!findings.length) { html += empty("No findings: every control passed."); }
+  else {
+    html += "<table><caption>Each finding is produced by a named control and is reproducible.</caption>" +
+      "<thead><tr><th>Severity</th><th>Code</th><th>Finding</th><th>Policy</th></tr></thead><tbody>" +
+      findings.map((f) => "<tr><td>" + sev(f.severity) + "</td><td><code>" + esc(f.code) +
+        '</code></td><td class="wrap">' + esc(f.detail) + "</td><td>" + esc(f.policy) +
+        "</td></tr>").join("") + "</tbody></table>";
+  }
+  html += "</div>";
+
+  html += '<div class="panel"><h2>Controls</h2><table><thead><tr><th>Control</th><th>Outcome</th>' +
+    "<th>Detail</th></tr></thead><tbody>" +
+    (d.controls || []).map((c) => "<tr><td>" + esc(c.title) + "</td><td>" + status(c.outcome) +
+      '</td><td class="wrap">' + esc(c.detail) + "</td></tr>").join("") + "</tbody></table></div>";
+
+  if (authorization) {
+    html += '<div class="panel"><h2>Issued authorization</h2><div class="kv">' +
+      "<dt>Authorization ID</dt><dd><code>" + esc(authorization.authorization_id) + "</code></dd>" +
+      "<dt>Bound digest</dt><dd><code>" + esc(authorization.fingerprint) + "</code></dd>" +
+      "<dt>Issued at</dt><dd>" + esc(authorization.issued_at) + "</dd>" +
+      "<dt>Expires at</dt><dd>" + esc(authorization.expires_at) + "</dd>" +
+      "<dt>Nonce (single use)</dt><dd><code>" + esc(authorization.nonce) + "</code></dd>" +
+      "</div></div>";
+  } else if (d.decision === "ALLOW") {
+    html += '<div class="panel">' + empty("An authorization was issued but was not requested in the response.") + "</div>";
+  } else {
+    html += '<div class="panel"><div class="note">No authorization was issued. A signer that ' +
+      "consults TraceSettle will refuse this transaction.</div></div>";
+  }
+
+  if (signResult) {
+    html += '<div class="panel"><h2>Reference signer</h2><div class="kv">' +
+      "<dt>Outcome</dt><dd>" + status(signResult.outcome) + "</dd>" +
+      "<dt>Authorization state</dt><dd>" + status(signResult.state) + "</dd>" +
+      "<dt>Detail</dt><dd>" + esc(signResult.detail) + "</dd></div>" +
+      (signResult.receipt ? '<p class="small muted">' + esc(signResult.receipt.note) +
+        ' Execution <code>' + esc(signResult.receipt.execution_id) + "</code>.</p>" : "") +
+      "</div>";
+  }
+  return html;
+}
+async function submitGuard(ev) {
+  ev.preventDefault();
+  const out = document.getElementById("guard-result");
+  const btn = document.getElementById("g-submit");
+  out.innerHTML = loading("Evaluating…");
+  btn.disabled = true;
+  try {
+    const transaction = guardPayload();
+    const d = await api("POST", "/api/guard/evaluate",
+      { transaction: transaction, return_authorization: true });
+    let signResult = null;
+    if (d.decision === "ALLOW" && d.authorization) {
+      signResult = await api("POST", "/api/guard/sign",
+        { transaction: transaction, authorization: d.authorization, expected_service_id: transaction.service_id });
+    } else {
+      signResult = await api("POST", "/api/guard/sign",
+        { transaction: transaction, authorization: d.authorization || null,
+          expected_service_id: transaction.service_id });
+    }
+    out.innerHTML = renderDecision(d, d.authorization, signResult);
+    loadOverview();
+  } catch (err) {
+    out.innerHTML = '<div class="note bad">' + esc(err.message) + "</div>";
+  } finally { btn.disabled = false; }
+}
+
+/* ---- lab ---- */
+async function loadLab() {
+  const el = document.getElementById("lab-scenarios");
+  el.innerHTML = loading("Loading scenarios…");
+  try {
+    const data = await api("GET", "/api/guard/scenarios");
+    document.getElementById("lab-output").innerHTML =
+      '<div class="note sim">' + esc(data.note) + "</div>";
+    el.innerHTML = '<div class="grid two">' + data.scenarios.map((s) =>
+      '<div class="card"><h2>' + esc(s.title) + "</h2><p class=\"small\">" + esc(s.narrative) +
+      '</p><div class="kv small"><dt>Expected</dt><dd>' + status(s.expected_decision) +
+      "</dd></div><div class=\"actions\"><button class=\"act primary\" type=\"button\" " +
+      'data-scenario="' + esc(s.id) + '">Run simulation</button></div></div>').join("") + "</div>";
+    el.querySelectorAll("button[data-scenario]").forEach((b) => {
+      b.addEventListener("click", () => runScenario(b.getAttribute("data-scenario"), data.scenarios));
+    });
+  } catch (err) { el.innerHTML = '<div class="note bad">' + esc(err.message) + "</div>"; }
+}
+async function runScenario(id, scenarios) {
+  const s = scenarios.find((x) => x.id === id);
+  const out = document.getElementById("lab-output");
+  out.innerHTML = loading("Running simulation: " + s.title + "…");
+  const steps = [];
+  try {
+    const transaction = Object.assign({}, s.transaction);
+    const evaluated = await api("POST", "/api/guard/evaluate",
+      { transaction: transaction, simulated: true, return_authorization: true });
+    steps.push({ label: "Guard evaluation", decision: evaluated, authorization: evaluated.authorization });
+
+    if (s.signing === "with_authorization") {
+      const r = await api("POST", "/api/guard/sign",
+        { transaction: transaction, authorization: evaluated.authorization, simulated: true });
+      steps.push({ label: "Signer, with the issued authorization", sign: r });
+    } else if (s.signing === "without_authorization") {
+      const r = await api("POST", "/api/guard/sign",
+        { transaction: transaction, authorization: null, simulated: true });
+      steps.push({ label: "Signer, with no authorization", sign: r });
+    } else {
+      const none = await api("POST", "/api/guard/sign",
+        { transaction: transaction, authorization: null, simulated: true });
+      steps.push({ label: "Signer, with no authorization", sign: none });
+      if (evaluated.authorization) {
+        const other = Object.assign({}, transaction, {
+          destination: "0xb741c00f6d63b6ded0ccada1a82bcbadc38a572b", amount: "42",
+        });
+        const sub = await api("POST", "/api/guard/sign",
+          { transaction: other, authorization: evaluated.authorization, simulated: true });
+        steps.push({ label: "Signer, with a valid token minted for different parameters", sign: sub });
+        const tampered = JSON.parse(JSON.stringify(evaluated.authorization));
+        tampered.parameters.destination = "0x1111111111111111111111111111111111111111";
+        const forged = await api("POST", "/api/guard/sign",
+          { transaction: transaction, authorization: tampered, simulated: true });
+        steps.push({ label: "Signer, with an edited token (signature no longer covers it)", sign: forged });
+        const ok = await api("POST", "/api/guard/sign",
+          { transaction: transaction, authorization: evaluated.authorization, simulated: true });
+        steps.push({ label: "Signer, with the correct authorization", sign: ok });
+      }
+    }
+    out.innerHTML = '<div class="note sim">Simulated scenario: ' + esc(s.title) +
+      ". No real transaction was created.</div>" +
+      steps.map((st) => {
+        if (st.decision) { return renderDecision(st.decision, st.authorization, null); }
+        return '<div class="panel"><h2>' + esc(st.label) + "</h2>" +
+          '<div class="kv"><dt>Outcome</dt><dd>' + status(st.sign.outcome) +
+          "</dd><dt>Authorization state</dt><dd>" + status(st.sign.state) +
+          "</dd><dt>Detail</dt><dd>" + esc(st.sign.detail) + "</dd></div></div>";
+      }).join("");
+    loadOverview();
+  } catch (err) { out.innerHTML = '<div class="note bad">' + esc(err.message) + "</div>"; }
+}
+
+/* ---- investigations ---- */
+async function submitInvestigation(ev) {
+  ev.preventDefault();
+  const id = document.getElementById("inv-id").value.trim();
+  const out = document.getElementById("inv-result");
+  const btn = document.getElementById("inv-submit");
+  if (!id) { out.innerHTML = '<div class="note bad">Enter an identifier.</div>'; return; }
+  out.innerHTML = loading("Investigating…");
+  btn.disabled = true;
+  try {
+    const res = await fetch("api/investigate?format=full", {
+      method: "POST", headers: headers(), body: JSON.stringify({ identifier: id }),
+    });
+    const body = await res.json();
+    if (!res.ok) { out.innerHTML = '<div class="note bad">' + esc(body.error || ("HTTP " + res.status)) + "</div>"; return; }
+    S.investigations.unshift({ id: id, outcome: body.data.outcome, at: body.data.created_at });
+    S.investigations = S.investigations.slice(0, 8);
+    out.innerHTML = renderInvestigation(body.data);
+  } catch (err) {
+    out.innerHTML = '<div class="note bad">' + esc(err.message) + "</div>";
+  } finally { btn.disabled = false; }
+}
+function renderInvestigation(d) {
+  const simulated = (d.evidence || []).some((e) => e.provenance === "SIMULATED");
+  let html = simulated ? '<div class="note sim"><strong>Simulated evidence present.</strong> At least one item is simulated test data.</div>' : "";
+  html += '<div class="panel"><h2>Conclusion</h2><div class="kv">' +
+    "<dt>Outcome</dt><dd>" + status(d.outcome) + "</dd>" +
+    "<dt>Last confirmed stage</dt><dd>" + esc(d.last_confirmed_stage || "none") + "</dd>" +
+    "<dt>Identifier</dt><dd><code>" + esc(d.input.identifier) + "</code></dd>" +
+    "<dt>Identifier type</dt><dd>" + esc(d.input.identifier_type) + "</dd>" +
+    "<dt>Investigation</dt><dd><code>" + esc(d.investigation_id) + "</code></dd>" +
+    "<dt>Observed at</dt><dd>" + fmtAt(d.created_at) + "</dd></div><p>" + esc(d.summary) + "</p></div>";
+  html += '<div class="panel"><h2>Settlement timeline</h2><table><thead><tr><th>Stage</th>' +
+    "<th>State</th><th>Explanation</th></tr></thead><tbody>" +
+    (d.stages || []).map((s) => "<tr><td>" + esc(s.stage) + "</td><td>" + status(s.state) +
+      '</td><td class="wrap">' + esc(s.summary) + "</td></tr>").join("") + "</tbody></table></div>";
+  const sources = d.sources || [];
+  if (sources.length) {
+    html += '<div class="panel"><h2>Provider status and source availability</h2><table><thead><tr>' +
+      "<th>Source</th><th>Status</th><th>Detail</th></tr></thead><tbody>" +
+      sources.map((s) => "<tr><td>" + esc(s.source) + "</td><td>" + status(s.status) +
+        '</td><td class="wrap">' + esc(s.message || "") + "</td></tr>").join("") + "</tbody></table></div>";
+  }
+  const evidence = (d.evidence || []).slice().sort((a, b) =>
+    String(a.timestamp || "").localeCompare(String(b.timestamp || "")) || a.id.localeCompare(b.id));
+  if (evidence.length) {
+    html += '<div class="panel"><h2>Evidence</h2><table><thead><tr><th>Stage</th><th>Event</th>' +
+      "<th>Source</th><th>Class</th><th>Method</th><th>Hash</th></tr></thead><tbody>" +
+      evidence.map((e) => "<tr><td>" + esc(e.stage) + "</td><td>" + esc(e.event_type) + "</td><td>" +
+        esc(e.source) + "</td><td>" + status(e.verification) + '</td><td class="wrap">' +
+        esc(e.verification_method || "") + '</td><td><code class="mono">' + esc(e.tx_hash || "") +
+        "</code></td></tr>").join("") + "</tbody></table></div>";
+  }
+  const notes = (d.notes || []).concat(d.known_limitations || []);
+  if (notes.length) {
+    html += '<div class="panel"><h2>Notes and limitations</h2><ul>' +
+      notes.map((n) => "<li>" + esc(n) + "</li>").join("") + "</ul></div>";
+  }
+  return html;
+}
+function renderInvestigations() {
+  const el = document.getElementById("overview-investigations");
+  if (!S.investigations.length) {
+    el.innerHTML = empty("No investigations in this session. Run one from the Investigations tab.");
+    return;
+  }
+  el.innerHTML = '<ul class="plain">' + S.investigations.map((i) =>
+    "<li><code>" + esc(i.id) + "</code> " + status(i.outcome) +
+    ' <span class="small muted">' + fmtAt(i.at) + "</span></li>").join("") + "</ul>";
+}
+
+/* ---- incidents ---- */
+async function loadIncidents(filter) {
+  const el = document.getElementById("incidents-body");
+  el.innerHTML = loading("Loading incidents…");
+  try {
+    const q = filter ? ("?status=" + encodeURIComponent(filter) + "&limit=100") : "?limit=100";
+    const data = await api("GET", "/api/guard/incidents" + q);
+    renderIncidentList(el, data.incidents || [], false);
+  } catch (err) { el.innerHTML = '<div class="note bad">' + esc(err.message) + "</div>"; }
+}
+function renderIncidentList(el, incidents, compact) {
+  if (!incidents.length) { el.innerHTML = empty("No incidents in this view."); return; }
+  el.innerHTML = "<table><thead><tr><th>Severity</th><th>Status</th><th>Incident</th>" +
+    (compact ? "" : "<th class=\"hide-sm\">Service</th><th class=\"hide-sm\">Occurrences</th><th>Updated</th>") +
+    "</tr></thead><tbody>" + incidents.map((i) => {
+      let row = "<tr><td>" + sev(i.severity) + "</td><td>" + status(i.status) + "</td><td>" +
+        "<div>" + esc(i.title) + "</div><div class=\"small muted\"><code>" + esc(i.code) +
+        "</code> · " + esc(i.incident_id) + "</div><div class=\"small\">" + esc(i.detail) + "</div>" +
+        (compact ? "" : incidentActions(i)) + "</td>";
+      if (!compact) {
+        row += '<td class="hide-sm">' + esc(i.service_id || "") + '</td><td class="hide-sm">' +
+          esc(i.occurrence_count) + '</td><td class="hide-sm">' + fmtAt(i.updated_at) + "</td>";
+      }
+      return row + "</tr>";
+    }).join("") + "</tbody></table>";
+  el.querySelectorAll("button[data-incident-status]").forEach((b) => {
+    b.addEventListener("click", async () => {
+      try {
+        await api("POST", "/api/guard/incidents/" + b.getAttribute("data-incident") + "/status",
+          { status: b.getAttribute("data-incident-status") });
+        loadIncidents("OPEN");
+      } catch (err) { alert(err.message); }
+    });
+  });
+}
+function incidentActions(i) {
+  if (i.status === "RESOLVED") { return ""; }
+  const next = i.status === "OPEN" ? "ACKNOWLEDGED" : "RESOLVED";
+  return '<div class="actions"><button class="act" type="button" data-incident="' + esc(i.incident_id) +
+    '" data-incident-status="' + next + '">Mark ' + next.toLowerCase() + "</button></div>";
+}
+
+/* ---- policies ---- */
+async function loadPolicies() {
+  const controls = document.getElementById("controls-body");
+  const policy = document.getElementById("policy-body");
+  controls.innerHTML = loading("Loading…"); policy.innerHTML = loading("Loading…");
+  try {
+    const data = await api("GET", "/api/guard/policy");
+    const p = data.policy;
+    controls.innerHTML = "<table><caption>Seven deterministic controls. The decision is the " +
+      "strictest control outcome; a control can only make the outcome stricter.</caption>" +
+      "<thead><tr><th>Control</th><th>Enforces</th></tr></thead><tbody>" +
+      [["Identity allowlist", "the requesting service is registered, enabled, and permitted this operation, chain and asset"],
+       ["Destination policy", "the destination is not denied, and either approved or explicitly reviewed"],
+       ["Amount limits", "the amount is within the per-transaction limit; above the threshold it needs approval"],
+       ["Velocity", "request rate, blocked-request rate, and rolling window volume stay within limits"],
+       ["Rejected authorization attempts", "repeated refusals at the signing boundary hold the service"],
+       ["Client-asserted approval", "client-supplied approval or bypass flags are ignored and reported"],
+       ["Request integrity", "required parameters are present and internally consistent"],
+      ].map(([n, d]) => "<tr><td>" + esc(n) + '</td><td class="wrap">' + esc(d) + "</td></tr>").join("") +
+      "</tbody></table>";
+    policy.innerHTML = '<div class="kv">' +
+      "<dt>Policy</dt><dd>" + esc(p.name) + " (" + esc(p.policy_id) + ", v" + esc(p.version) + ")</dd>" +
+      "<dt>Per-transaction limit</dt><dd>" + esc(p.per_transaction_limit || "none") + "</dd>" +
+      "<dt>Approval threshold</dt><dd>" + esc(p.approval_threshold || "none") + "</dd>" +
+      "<dt>Approvals required</dt><dd>" + esc(p.min_approvals) + "</dd>" +
+      "<dt>Window</dt><dd>" + esc(p.window_seconds) + "s, max " + esc(p.max_requests_per_window) +
+        " requests, max " + esc(p.max_blocked_per_window) + " blocked</dd>" +
+      "<dt>Authorization TTL</dt><dd>" + esc(p.authorization_ttl_seconds) + "s</dd>" +
+      "<dt>Unlisted destinations</dt><dd>" +
+        (p.allow_unlisted_destinations ? "require approval" : "refused") + "</dd>" +
+      "<dt>Approved destinations</dt><dd><code>" + esc((p.approved_destinations || []).join(", ") || "none") + "</code></dd>" +
+      "<dt>Denied destinations</dt><dd><code>" + esc((p.blocked_destinations || []).join(", ") || "none") + "</code></dd>" +
+      "</div>";
+    if ((p.services || []).length) {
+      policy.innerHTML += "<h3>Service identities</h3><table><thead><tr><th>Service</th><th>Operations</th>" +
+        "<th>Chains</th><th>Assets</th><th>Max / tx</th><th>Max / window</th></tr></thead><tbody>" +
+        p.services.map((s) => "<tr><td>" + esc(s.service_id) + "</td><td>" + esc((s.allowed_operations || []).join(", ")) +
+          "</td><td>" + esc((s.allowed_chains || []).join(", ")) + "</td><td>" + esc((s.allowed_assets || []).join(", ")) +
+          "</td><td>" + esc(s.max_amount_per_transaction || "none") + "</td><td>" +
+          esc(s.max_amount_per_window || "none") + "</td></tr>").join("") + "</tbody></table>";
+    }
+  } catch (err) {
+    controls.innerHTML = '<div class="note bad">' + esc(err.message) + "</div>";
+    policy.innerHTML = "";
+  }
+}
+
+/* ---- integrations ---- */
+async function loadIntegrations() {
+  const el = document.getElementById("integration-body");
+  const sources = document.getElementById("sources-body");
+  el.innerHTML = loading("Loading…"); sources.innerHTML = loading("Loading…");
+  try {
+    const m = await api("GET", "/api/guard/metrics");
+    el.innerHTML = '<p class="small">A signing integration calls the guard, receives an ' +
+      "authorization only for an ALLOW decision, then validates it before signing. The reference " +
+      "signer shipped here is a working adapter; a real signer keeps the same validation and " +
+      "replaces only the simulated executor.</p><div class=\"kv\">" +
+      "<dt>Endpoint</dt><dd><code>POST /api/guard/evaluate</code> then <code>POST /api/guard/sign</code></dd>" +
+      "<dt>Authorization TTL</dt><dd>" + esc(m.authorization.ttl_seconds) + " seconds</dd>" +
+      "<dt>Key identifier</dt><dd><code>" + esc(m.authorization.key_id) + "</code></dd>" +
+      "<dt>Key origin</dt><dd>" + (m.authorization.ephemeral_key
+        ? "ephemeral, generated at start-up (no key configured)"
+        : "configured via TRACESETTLE_GUARD_AUTH_KEY") + "</dd>" +
+      "<dt>Enforcement</dt><dd>the signer refuses unless validation is exactly VALID</dd></div>";
+    sources.innerHTML = '<table><caption>All external sources are public, read-only, and keyless.</caption>' +
+      "<thead><tr><th>Source</th><th>Purpose</th><th>Access</th></tr></thead><tbody>" +
+      [["1Click API", "NEAR Intents swap status, keyed on the deposit address", "HTTPS GET, no key"],
+       ["Solver relay", "intent settlement status", "JSON-RPC POST, no key"],
+       ["NEAR RPC", "settlement transaction and DIP-4 intent events", "JSON-RPC POST, no key"],
+       ["EVM RPC", "origin and destination receipt verification", "JSON-RPC POST, no key"],
+       ["Esplora (mempool.space / blockstream.info)", "Bitcoin origin and refund verification", "HTTPS GET, no key"],
+      ].map(([n, p, a]) => "<tr><td>" + esc(n) + '</td><td class="wrap">' + esc(p) + "</td><td>" +
+        esc(a) + "</td></tr>").join("") + "</tbody></table>";
+  } catch (err) {
+    el.innerHTML = '<div class="note bad">' + esc(err.message) + "</div>";
+    sources.innerHTML = "";
+  }
+}
+
+/* ---- audit ---- */
+async function loadAudit(verify) {
+  const body = document.getElementById("audit-body");
+  const v = document.getElementById("audit-verification");
+  body.innerHTML = loading("Loading audit records…");
+  try {
+    const data = await api("GET", "/api/guard/audit?limit=100" + (verify ? "&verify=1" : ""));
+    if (data.verification) {
+      const ok = data.verification.ok;
+      v.innerHTML = '<div class="note' + (ok ? "" : " bad") + '">Chain verification: ' +
+        (ok ? "intact" : "BROKEN") + " over " + esc(data.verification.length) + " records — " +
+        esc(data.verification.reason) +
+        (ok ? "" : " (first inconsistency at record " + esc(data.verification.broken_at) + ")") + "</div>";
+    } else { v.innerHTML = ""; }
+    const records = data.records || [];
+    if (!records.length) { body.innerHTML = empty("No audit records yet."); return; }
+    body.innerHTML = "<table><caption>Newest first. Each record's digest covers the previous " +
+      "record's digest, so an edit or removal breaks the chain from that point.</caption>" +
+      "<thead><tr><th>#</th><th>When</th><th>Event</th><th>Actor</th><th>Outcome</th>" +
+      '<th class="hide-sm">Detail</th><th class="hide-sm">Digest</th></tr></thead><tbody>' +
+      records.map((r) => "<tr><td>" + esc(r.sequence) + "</td><td>" + fmtAt(r.recorded_at) +
+        "</td><td><code>" + esc(r.event_type) + "</code></td><td>" + esc(r.actor) + "</td><td>" +
+        status(r.outcome) + '</td><td class="wrap hide-sm">' + esc(r.detail) +
+        '</td><td class="hide-sm"><code class="mono">' + esc(String(r.digest).slice(0, 16)) +
+        "…</code></td></tr>").join("") + "</tbody></table>";
+  } catch (err) { body.innerHTML = '<div class="note bad">' + esc(err.message) + "</div>"; }
+}
+
+/* ---- settings ---- */
+async function loadSettings() {
+  const el = document.getElementById("settings-body");
+  el.innerHTML = loading("Loading…");
+  try {
+    const m = await api("GET", "/api/guard/metrics");
+    el.innerHTML = '<div class="kv">' +
+      "<dt>Tool</dt><dd>TRACESETTLE v__VERSION__</dd>" +
+      "<dt>Mode</dt><dd>read-only for settlements; pre-execution evaluation for transfers</dd>" +
+      "<dt>Policy</dt><dd>" + esc(m.policy.name) + " (" + esc(m.policy.policy_id) + ")</dd>" +
+      "<dt>Authorization key</dt><dd><code>" + esc(m.authorization.key_id) + "</code> — " +
+        (m.authorization.ephemeral_key ? "ephemeral" : "configured") + "</dd>" +
+      "<dt>Audit records</dt><dd>" + esc(m.audit.length) + "</dd>" +
+      "<dt>Audit head digest</dt><dd><code class=\"mono\">" + esc(m.audit.head_digest) + "</code></dd>" +
+      "<dt>Open incidents</dt><dd>" + esc(m.counts.open_incidents || 0) + "</dd></div>" +
+      '<p class="small muted">The authorization signing key is never displayed. Configure one with ' +
+      "<code>TRACESETTLE_GUARD_AUTH_KEY</code> (hex or base64, at least 32 bytes) to keep " +
+      "authorizations valid across restarts.</p>";
+  } catch (err) { el.innerHTML = '<div class="note bad">' + esc(err.message) + "</div>"; }
+}
+
+/* ---- wiring ---- */
+document.querySelectorAll('nav.tabs button[role="tab"]').forEach((b) => {
+  b.addEventListener("click", () => showTab(b.id.replace("tab-", "")));
+});
+document.getElementById("apikey").addEventListener("input", (e) => {
+  S.key = e.target.value.trim();
+  if (S.tab === "overview") { loadOverview(); }
+});
+document.getElementById("guard-form").addEventListener("submit", submitGuard);
+document.getElementById("g-reset").addEventListener("click", () => { document.getElementById("guard-form").reset(); });
+document.getElementById("inv-form").addEventListener("submit", submitInvestigation);
+document.querySelectorAll("button[data-incident-filter]").forEach((b) => {
+  b.addEventListener("click", () => loadIncidents(b.getAttribute("data-incident-filter")));
+});
+document.getElementById("audit-verify").addEventListener("click", () => loadAudit(true));
+document.getElementById("audit-refresh").addEventListener("click", () => loadAudit(false));
+
+const initial = (location.hash || "#overview").replace("#", "");
+showTab(document.getElementById("tab-" + initial) ? initial : "overview");
+</script>
+</body>
+</html>
+"""

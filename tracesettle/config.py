@@ -95,6 +95,32 @@ UPSTREAM_CACHE_MAX_ENTRIES = int(os.environ.get("TRACESETTLE_CACHE_MAX_ENTRIES",
 
 
 # ---------------------------------------------------------------------------
+# Transaction security layer (guard)
+# ---------------------------------------------------------------------------
+#
+# None of these is a secret. The authorization signing key is read separately by
+# ``tracesettle.guard.authorization.load_key`` from TRACESETTLE_GUARD_AUTH_KEY and
+# is never read here, logged, or returned to a client.
+
+#: Optional JSON policy file. Unset means the built-in default policy.
+GUARD_POLICY_PATH = os.environ.get("TRACESETTLE_GUARD_POLICY") or None
+
+#: Optional append-only audit log file. Unset keeps the audit trail in memory,
+#: bounded by GUARD_AUDIT_MAX_RECORDS; the hash chain still proves in-place edits.
+GUARD_AUDIT_LOG_PATH = os.environ.get("TRACESETTLE_GUARD_AUDIT_LOG") or None
+GUARD_AUDIT_MAX_RECORDS = int(os.environ.get("TRACESETTLE_GUARD_AUDIT_MAX_RECORDS", "10000"))
+
+#: Per-client-IP budget for the guard endpoints. Tighter than the investigation
+#: endpoint: these endpoints make no outbound calls, so a high rate is abusive.
+GUARD_RATE_LIMIT_PER_MINUTE = int(os.environ.get("TRACESETTLE_GUARD_RATE_LIMIT_PER_MINUTE", "120"))
+GUARD_RATE_LIMIT_BURST = int(os.environ.get("TRACESETTLE_GUARD_RATE_LIMIT_BURST", "30"))
+
+#: Body cap for guard requests. A transaction request is small; anything larger
+#: is rejected before it is read.
+GUARD_MAX_BODY_BYTES = int(os.environ.get("TRACESETTLE_GUARD_MAX_BODY_BYTES", "8192"))
+
+
+# ---------------------------------------------------------------------------
 # Chain / RPC map
 # ---------------------------------------------------------------------------
 

@@ -1,31 +1,95 @@
 # TRACESETTLE
 
-A read-only cross-chain settlement investigator for NEAR Intents.
+**Blockchain Transaction Security & Settlement Assurance.**
 
-TRACESETTLE takes one identifier, gathers what public sources actually say about
-a NEAR Intents (1Click) swap, separates what is **independently verified** from
-what is **merely reported**, flags contradictions and gaps, and prints an
-evidence-backed investigation report.
+> Prevent unauthorized transactions. Detect suspicious activity. Verify every settlement.
 
-It never signs, submits, holds, or moves anything. It never asks for a private
-key or seed phrase. It never claims funds were recovered.
+TRACESETTLE has two halves that share one idea: do not trust a claim you have not
+checked.
+
+1. **Transaction security (new).** A pre-execution **Transaction Guard** evaluates a
+   transaction request against a policy, a **Risk Engine** explains what is wrong,
+   and an **Authorization Firewall** issues a short-lived, transaction-bound
+   authorization that a **reference signer** independently validates before it will
+   execute anything. If the authorization is missing, expired, replayed, or bound to
+   different parameters, the signer refuses and nothing is executed.
+
+2. **Settlement verification (existing).** A read-only cross-chain settlement
+   investigator for NEAR Intents. It takes one identifier, gathers what public
+   sources actually say about a 1Click swap, separates what is **independently
+   verified** from what is **merely reported**, flags contradictions and gaps, and
+   prints an evidence-backed report.
+
+TRACESETTLE never signs a real transaction, never submits one, never holds funds,
+and never asks for a private key or seed phrase. The reference signer simulates
+execution; it is the *enforcement boundary*, not a wallet.
+
+**Hackathon track: `security` (AI Security & Defense)** — the track that names
+policy engines and spending limits for agents, i.e. "give AI money without giving
+it the keys to everything". See [Submission](#hackathon-submission).
 
 ## The problem
 
-When a cross-chain swap goes wrong, the evidence is scattered: a 1Click status
-record, an origin-chain receipt, a NEAR transaction, a destination-chain
-receipt. Each source speaks a different vocabulary (`SUCCESS`, `SETTLED`,
-`FINAL`, `0x1`). A user is left guessing which of those statements is actually
-proof.
+Two failures, one root cause.
 
-The common failure mode is treating an upstream service's word as ground truth.
-A status of `FAILED` is not proof funds were lost. A `refundedAmount` of `0` is
-not proof no refund can occur. A transaction hash is not proof the event it
-describes happened. TRACESETTLE is built to keep those distinctions explicit.
+**Unauthorized transactions.** Protecting a private key is not enough. An attacker
+who can make an otherwise legitimate system *authorize* an illegitimate transfer
+causes the damage without ever touching the key. The defenses that matter are the
+ones at the authorization boundary: who is asking, for how much, to where, how
+often, and whether the approval that arrived is actually bound to this transaction.
+
+**Unverified settlement.** When a cross-chain swap goes wrong, the evidence is
+scattered: a 1Click status record, an origin-chain receipt, a NEAR transaction, a
+destination-chain receipt. Each source speaks a different vocabulary (`SUCCESS`,
+`SETTLED`, `FINAL`, `0x1`). The common failure mode is treating an upstream
+service's word as ground truth. A status of `FAILED` is not proof funds were lost.
+A `refundedAmount` of `0` is not proof no refund can occur. A transaction hash is
+not proof the event it describes happened.
 
 ## What it does
 
-For each transaction stage it records evidence, then classifies it:
+### Transaction security
+
+For every transaction request, seven deterministic controls run — all of them,
+never short-circuiting — and produce one explained decision.
+
+| Decision | Meaning | Authorization issued |
+| --- | --- | --- |
+| `ALLOW` | every control passed | yes |
+| `REQUIRE_APPROVAL` | a human decision is needed | no |
+| `HOLD` | rate or volume anomaly; retry later | no |
+| `BLOCK` | a blocking finding | no |
+
+Controls: service identity and its allowed operations/chains/assets; destination
+denylist and allowlist; per-transaction amount limits and an approval threshold;
+request rate, blocked-request rate and rolling per-asset volume; repeated rejected
+authorization attempts; caller-supplied approval flags; and request integrity.
+
+Every decision carries a decision id, timestamp, request reference, the policy and
+version, every control result with the policy that produced it, the findings, a
+human-readable explanation, and an audit record.
+
+An `ALLOW` decision mints an **authorization**: an HMAC-SHA256-signed statement
+bound to the exact `service_id`, `operation`, `chain`, `asset`, `amount` and
+`destination`, with an expiry (90s default) and a single-use nonce. The signer
+re-derives the binding from the transaction it was asked to sign. A genuine,
+unexpired, unused authorization minted for a *different* transaction is refused as
+`WRONG_PARAMETERS` — which is the whole point of binding it to the transaction
+rather than merely authenticating the caller.
+
+Amounts are exact `Decimal`s: a limit of `0.3` admits `0.3` and refuses
+`0.30000000000000004`. Severity is compared by an explicit rank, never by the
+severity's string value (`"MEDIUM"` sorts after `"HIGH"` alphabetically).
+
+Ten structural guarantees are checked by *running the real code*, on demand, at
+`GET /api/guard/invariants` — including `refusal_never_reaches_the_executor` and
+`authorization_is_single_use`. Each checker is also mutation-tested: the guarded
+behaviour is deliberately broken and the checker must notice. A checker that
+cannot fail proves nothing.
+
+### Settlement verification
+
+For each transaction stage TRACESETTLE records evidence, then classifies it:
 
 | Classification | Meaning |
 | --- | --- |
@@ -84,12 +148,65 @@ a bare interpreter.
 **1. Run the tests.**
 
 ```sh
-python -m pytest tests/ --collect-only -q   # 304 tests collected
-python -m pytest tests/ -q                  # 304 passed
+python -m pytest tests/ --collect-only -q   # 540 tests collected
+python -m pytest tests/ -q                  # 540 passed
 ```
-→ `304 passed`.
+→ `540 passed`.
 
-**2. Investigate a real, known-good swap from the command line.**
+**2. Prove the enforcement boundary: a permitted request executes, a suspicious
+one cannot.**
+
+```sh
+python3 -m tracesettle serve --port 8080 &
+```
+
+Then open `http://127.0.0.1:8080/console`, go to **Transaction Guard**, and run
+the three scenarios. Or drive it with `curl`:
+
+```sh
+# a) Legitimate: evaluated, authorized, then executed by the reference signer.
+AUTH=$(curl -sS -X POST http://127.0.0.1:8080/api/guard/evaluate \
+  -H 'Content-Type: application/json' \
+  -d '{"transaction":{"service_id":"treasury-agent","operation":"WITHDRAWAL",
+       "chain":"eth","asset":"USDC","amount":"1250.50",
+       "destination":"0x4e6d3A556e485188E9C9a528bc72c88BD92BD735"},
+       "return_authorization":true}')
+echo "$AUTH" | python3 -c 'import sys,json;d=json.load(sys.stdin);print("decision:",d["decision"])'
+```
+→ `decision: ALLOW`.
+
+```sh
+# b) Suspicious: 480,000 to an unapproved address.
+curl -sS -X POST http://127.0.0.1:8080/api/guard/evaluate \
+  -H 'Content-Type: application/json' \
+  -d '{"transaction":{"service_id":"treasury-agent","operation":"WITHDRAWAL",
+       "chain":"eth","asset":"USDC","amount":"480000",
+       "destination":"0x9f8A2c4b7e6D1f03aB5C8e2947D6f10B3aE4c5D6"}}' \
+  | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d["decision"],[f["code"] for f in d["findings"]], "authorization:", d.get("authorization"))'
+```
+→ `BLOCK ['UNAPPROVED_DESTINATION', 'AMOUNT_EXCEEDS_LIMIT'] authorization: None`.
+
+```sh
+# c) The bypass attempt: no authorization at all.
+curl -sS -X POST http://127.0.0.1:8080/api/guard/sign \
+  -H 'Content-Type: application/json' \
+  -d '{"transaction":{"service_id":"treasury-agent","operation":"WITHDRAWAL",
+       "chain":"eth","asset":"USDC","amount":"480000",
+       "destination":"0x9f8A2c4b7e6D1f03aB5C8e2947D6f10B3aE4c5D6"},
+       "authorization":null}' \
+  | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d["outcome"],d["state"])'
+```
+→ `REFUSED MISSING`. The executor was never called.
+
+**3. See the structural guarantees hold on the running build.**
+
+```sh
+curl -sS http://127.0.0.1:8080/api/guard/invariants \
+  | python3 -c 'import sys,json;d=json.load(sys.stdin);print("all hold:",d["all_hold"]);[print(" ",i["name"]) for i in d["invariants"]]'
+```
+→ `all hold: True` and the ten invariant names.
+
+**4. Investigate a real, known-good swap from the command line.**
 
 ```sh
 python3 -m tracesettle investigate 0xB741c00f6D63b6dEd0cCADA1a82bCBADc38A572B
@@ -98,7 +215,7 @@ python3 -m tracesettle investigate 0xB741c00f6D63b6dEd0cCADA1a82bCBADc38A572B
 deposit, bridge deposit credit, NEAR settlement, and destination delivery each
 marked `CONFIRMED` and each linking to its real explorer page.
 
-**3. See conservative handling of an unknown address.**
+**5. See conservative handling of an unknown address.**
 
 ```sh
 python3 -m tracesettle investigate 0x000000000000000000000000000000000000dEaD
@@ -106,7 +223,7 @@ python3 -m tracesettle investigate 0x000000000000000000000000000000000000dEaD
 → outcome `NOT_FOUND`, and the report says plainly that not found is not proof
 the swap failed.
 
-**4. See that a reported-only settlement is not called verified.**
+**6. See that a reported-only settlement is not called verified.**
 
 ```sh
 python3 -m tracesettle investigate 7ypUiXpjHmDoFFzo8nRWvY4BMfcKR5YkF5Cez28N94dG --json
@@ -114,7 +231,7 @@ python3 -m tracesettle investigate 7ypUiXpjHmDoFFzo8nRWvY4BMfcKR5YkF5Cez28N94dG 
 → outcome `SETTLED_REPORTED_ONLY`: the intent hash path can read a service
 statement but cannot reach the whole path, and the report says so.
 
-**5. See how a real reported Bitcoin refund is handled.**
+**7. See how a real reported Bitcoin refund is handled.**
 
 ```sh
 python3 -m tracesettle investigate bc1qjrkwt3v42j4am6csmkaelmpwd9shufl4laxkxm
@@ -142,7 +259,7 @@ refund likewise stays `UNAVAILABLE` (a source problem, not a failed refund). The
 demo states the outcome it actually observed in that run rather than a fixed
 verdict.
 
-**6. Run the web interface.**
+**8. Run the web interface.**
 
 ```sh
 python3 -m tracesettle serve --host 127.0.0.1 --port 8000
@@ -161,7 +278,7 @@ TRACESETTLE_API_KEY=… python3 -m tracesettle serve --host 0.0.0.0 --port 8000
 `GET /api/health` stay open. See **Interface hardening** below for the
 concurrency, rate-limit, and cache settings.
 
-**7. Or run all three cases at once.**
+**9. Or run all three settlement cases at once.**
 
 ```sh
 python3 demo/demonstrate.py
@@ -175,7 +292,7 @@ unreachable it says so and does not fabricate a result. The upstream record can
 change between runs, so the third case states what it observed in that run rather
 than a fixed verdict.
 
-**7b. If a public endpoint is down, replay the captured evidence.**
+**10. If a public endpoint is down, replay the captured evidence.**
 
 ```sh
 python3 demo/demonstrate.py --offline
@@ -231,7 +348,28 @@ Other limits, stated in every report:
 
 ## Architecture
 
+Two layers. The security layer gates what may be executed; the settlement layer
+verifies what was. They share one principle: never trust a claim you have not
+checked.
+
 ```
+                        ┌───────────── security layer ─────────────┐
+transaction request ──▶ │ guard/rules.py      7 controls, all run  │
+                        │ guard/policy.py     policy + version     │
+                        │ guard/model.py      explained Decision   │
+                        │ guard/authorization.py  transaction-bound │
+                        │                     HMAC authorization    │
+                        │ guard/signer.py     reference signer:     │
+                        │                     validate, then execute │
+                        │ guard/audit.py      hash-chained records  │
+                        │ guard/monitor.py    counters + incidents  │
+                        │ guard/invariants.py 10 checked guarantees │
+                        └────────────────────┬─────────────────────┘
+                                             │ ALLOW + authorization
+                                             ▼
+                                     execution or refusal
+                                     (SimulatedExecutor: no chain)
+
 identifier
    │
    ▼
@@ -260,7 +398,9 @@ ui.py / __main__.py ── web interface + CLI
 ```
 
 The engine is deterministic: identical evidence produces an identical result.
-No LLM decides whether a transaction is confirmed.
+No LLM decides whether a transaction is confirmed. The security controls are
+equally deterministic: identical requests against an identical policy produce
+identical decisions.
 
 ## Files
 
@@ -270,19 +410,31 @@ No LLM decides whether a transaction is confirmed.
 | `tracesettle/base58.py` | Shared Base58/Base58Check decoding (used by classification and Bitcoin script decoding). |
 | `tracesettle/model.py` | Evidence model: stages, states, outcomes, safety invariants. |
 | `tracesettle/assets.py` | `nep141:` asset id parsing to chain/contract. |
-| `tracesettle/config.py` | Public chain RPC map and explorer URL builders. |
+| `tracesettle/config.py` | Public chain RPC map, explorer URL builders, guard settings. |
 | `tracesettle/httpclient.py` | Timeouts, bounded retries, error classification. |
 | `tracesettle/adapters/` | One adapter per data source (1Click, solver relay, NEAR, EVM, Bitcoin). |
 | `tracesettle/reconcile.py` | Deterministic reconciliation engine. |
 | `tracesettle/investigation.py` | Orchestrator. |
 | `tracesettle/report.py` | Report generation. |
-| `tracesettle/ui.py` | Standard-library web interface. |
+| `tracesettle/ui.py` | Standard-library web interface, guard routes, console. |
 | `tracesettle/ratelimit.py` | Token buckets for per-IP and per-host limits. |
 | `tracesettle/cache.py` | Bounded TTL cache with single-flight. |
 | `tracesettle/__main__.py` | CLI. |
+| `tracesettle/guard/model.py` | Transaction request, policy, decision, finding, authorization models. |
+| `tracesettle/guard/policy.py` | Default policy and JSON override loading. |
+| `tracesettle/guard/rules.py` | The seven deterministic controls. |
+| `tracesettle/guard/authorization.py` | Issuing, validating, expiring, single-use nonces. |
+| `tracesettle/guard/signer.py` | Reference signer + simulated executor (the enforcement boundary). |
+| `tracesettle/guard/audit.py` | Hash-chained, verifiable audit log. |
+| `tracesettle/guard/monitor.py` | Security counters and incident records. |
+| `tracesettle/guard/service.py` | Orchestration: controls → authorization → monitor → audit. |
+| `tracesettle/guard/invariants.py` | The ten structural guarantees, checked by execution. |
+| `tracesettle/guard/api.py` | Guard HTTP routing and JSON serialization. |
+| `tracesettle/guard/console.py` | The security operations console page. |
+| `docs/TRANSACTION_SECURITY.md` | The security layer in full, including what it does not do. |
 | `demo/demonstrate.py` | Read-only walkthrough (live, or `--offline` replay of captures). |
 | `demo/replay_opener.py` | Offline transport that replays `evidence/raw/` through the real code. |
-| `tests/` | 304 tests. `evidence/raw/` fixtures are real captures; `tests/fixtures/synthetic/` are clearly labelled synthetic. |
+| `tests/` | 540 tests. `evidence/raw/` fixtures are real captures; `tests/fixtures/synthetic/` are clearly labelled synthetic. |
 | `PHASE1_FEASIBILITY.md` | Phase 1 feasibility and API verification. |
 | `submission/` | Hackathon artifacts: API payload shape, technical summary, demo post draft, publication checklist. |
 | `docs/official/` | NEAR documentation captured during Phase 1. |
@@ -342,6 +494,37 @@ limit configurable by environment variable:
 - **No version disclosure.** The `Server` header is `TRACESETTLE`; the Python
   build and package version are not disclosed.
 
+### Security-layer hardening
+
+The guard layer adds its own boundary controls, all configurable by environment
+variable and all documented in `docs/TRANSACTION_SECURITY.md`:
+
+- **Fail-closed authorization.** No authorization, or any invalid one, means no
+  execution. There is no "assume approved" path.
+- **Transaction-bound, single-use, short-lived.** An authorization names the exact
+  parameters it approved, carries a 90-second default expiry, and its nonce is
+  consumed atomically on first successful use.
+- **Constant-time secret comparison.** The API key is compared with
+  `hmac.compare_digest`; the authorization signature is verified with
+  `hmac.compare_digest`.
+- **No key material in any response.** The signing key is never returned, logged,
+  or included in metrics; the console never receives it. Asserted by the
+  `no_key_material_in_output` invariant.
+- **Client assertions are never trusted.** A caller-supplied `approved` or
+  `skip_checks` flag produces a finding and a downgraded decision, never ALLOW.
+- **Bounded guard bodies.** Guard request bodies are capped by
+  `TRACESETTLE_GUARD_MAX_BODY_BYTES` (8 KiB) and rejected before being read.
+- **Per-client rate limiting on guard routes**, keyed on the socket peer address
+  so a spoofed `X-Forwarded-For` cannot bypass it; `429` carries `Retry-After`.
+- **Bounded in-memory state.** Audit records, monitor events, incidents, and the
+  replay-nonce store all have explicit caps, so a flood cannot exhaust memory.
+- **Structural invariants, checked by execution.** Ten guarantees at
+  `GET /api/guard/invariants`, each mutation-tested so a checker that cannot fail
+  is treated as a defect.
+- **Honest audit claim.** In-place modification of an audit record is detectable;
+  a whole-log rewrite with recomputed digests is *not*, and the README says so
+  rather than claiming tamper-proofness.
+
 `POST /api/investigate` returns the structured report (`{"data": ...}`) by
 default. `?format=json`, `?format=markdown`, and `?format=full` (all three, as
 earlier versions returned) select other representations.
@@ -349,7 +532,10 @@ earlier versions returned) select other representations.
 ## Tests
 
 ```sh
-python3 -m pytest tests/ -q          # all 304
+python3 -m pytest tests/ -q          # all 540
+python3 -m pytest tests/test_guard_authorization.py -q
+python3 -m pytest tests/test_guard_invariants.py -q
+python3 -m pytest tests/test_guard_end_to_end.py -q
 python3 -m pytest tests/test_safety_invariants.py -q
 python3 -m pytest tests/test_ui.py -q
 ```
@@ -377,8 +563,43 @@ substituted, and real Phase 1 captures are loaded from `evidence/raw/` rather
 than recreated. Synthetic fixtures live in `tests/fixtures/synthetic/` and are
 labelled as such.
 
+The guard tests make no network calls at all: the controls, the authorization
+authority, the replay store, the audit log, the monitor, the reference signer and
+the API are all the real code. The one substitution is the executor, which is the
+real `SimulatedExecutor` with a call counter — so "the signer refused" is asserted
+as "the executor was never called". Coverage includes valid authorization, an
+unapproved destination, amount limits, velocity and window-volume limits, an
+unauthorized service identity, an expired authorization, replay, parameter
+substitution, a missing authorization, a bad signature, a token from an untrusted
+key, an edited token, a token bound to another service, signer enforcement, audit
+records and chain verification, incident creation and resolution, provider and
+RPC failure handling on the settlement side, and the end-to-end vertical slice
+for both the permitted and the refused path.
+
 ## Read-only guarantee
 
 TRACESETTLE cannot recover, reverse, freeze, or move funds. It cannot report a
 refund or a delivery without verifiable on-chain evidence. When the evidence is
 insufficient it says so and returns an explicit unknown.
+
+The security layer adds one honest boundary to that guarantee. TRACESETTLE
+cannot stop an arbitrary blockchain transaction. It can refuse to release a
+transaction through a signer that calls it, explain why, record the attempt, and
+verify the settlement afterward. Enforcement requires the signer to call the
+boundary; the reference signer shows what that looks like, and it simulates
+execution rather than signing anything.
+
+## Hackathon submission
+
+- **Track: `security` (AI Security & Defense).** The track's own hint is "spending
+  limits, policy engines, sandboxed wallets... give AI money without giving it the
+  keys to everything", which is precisely what the Transaction Guard and
+  Authorization Firewall are. A secondary `defi` track could be claimed through the
+  NEAR Intents settlement verification, but the primary contribution is security.
+- **No artificial AI.** No LLM is used, and none was added to qualify for an AI
+  category. Every decision is a deterministic, testable rule; the whole point is
+  that a model must not be able to talk its way past the boundary.
+- **Deadline: 2026-11-14T23:59:00Z.** The repository must be public by then; the
+  submission is a single form POST and cannot be edited afterward.
+- **Not yet done:** making the repository public, posting the demo on X, and sending
+  the submission. All three require explicit human confirmation.
