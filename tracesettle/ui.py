@@ -19,6 +19,7 @@ from __future__ import annotations
 import hmac
 import json
 import logging
+import signal
 import socket
 import sys
 import threading
@@ -648,10 +649,36 @@ def _reject_overloaded(request: Any) -> None:
 def serve(host: str = "127.0.0.1", port: int = 8000, timeout_seconds: float = 15.0, max_attempts: int = 3) -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     server = InvestigationServer((host, port), timeout_seconds=timeout_seconds, max_attempts=max_attempts)
+
+    # A process that is PID 1 (as it is inside a container) gets no default action
+    # for SIGTERM, so without a handler a ``docker stop`` would hang until the
+    # runtime SIGKILLs it. Stop the loop cleanly instead. The handler runs in the
+    # main thread, which is the thread executing ``serve_forever``; calling
+    # ``server.shutdown()`` from there would deadlock (it waits for that loop to
+    # exit), so the handler asks a short-lived helper thread to do it.
+    def _request_shutdown(signum: int, _frame: Any) -> None:
+        log.info("received signal %d; shutting down", signum)
+        threading.Thread(target=server.shutdown, daemon=True).start()
+
+    previous: dict[int, Any] = {}
+    try:
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            previous[sig] = signal.signal(sig, _request_shutdown)
+    except ValueError:
+        # Not in the main thread (e.g. embedded in a test harness); leave the
+        # default handling in place rather than failing to serve.
+        previous = {}
+
     log.info("TRACESETTLE serving on http://%s:%d (read-only)", host, port)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
+        # Belt-and-suspenders: the SIGINT handler above normally prevents this.
         pass
     finally:
+        for sig, handler in previous.items():
+            try:
+                signal.signal(sig, handler)
+            except (ValueError, TypeError):
+                pass
         server.server_close()

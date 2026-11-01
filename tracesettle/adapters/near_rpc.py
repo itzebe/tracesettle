@@ -325,6 +325,36 @@ def fetch_tx(tx_hash: str, client: HttpClient) -> tuple[SourceReport, NearTxData
                 continue
 
             tx = inner.get("transaction") if isinstance(inner.get("transaction"), dict) else {}
+
+            # Identity check: the record must be *this* transaction. A response
+            # that does not echo the hash cannot be tied to the request; one that
+            # echoes a different hash is a contradiction. Neither may be accepted,
+            # and neither may confirm a stage — regardless of how many endpoints
+            # were tried. NEAR hashes are base58 and case-sensitive, so the
+            # comparison is exact (no normalization is permitted by the protocol).
+            returned_hash = tx.get("hash")
+            if not isinstance(returned_hash, str) or not returned_hash:
+                last_status = SourceStatus.MALFORMED
+                last_message = (
+                    "NEAR RPC response did not echo the transaction hash, so the record "
+                    "cannot be tied to the requested transaction."
+                )
+                continue
+            if returned_hash != tx_hash:
+                return (
+                    SourceReport(
+                        source=SOURCE,
+                        status=SourceStatus.MALFORMED,
+                        message=(
+                            "NEAR RPC returned a transaction whose hash differs from the "
+                            "requested hash; the response was ignored to avoid "
+                            "mis-correlation."
+                        ),
+                        endpoint=endpoint,
+                    ),
+                    None,
+                )
+
             logs = _extract_logs(inner)
             data = NearTxData(
                 tx_hash=tx_hash,

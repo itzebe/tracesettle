@@ -162,7 +162,25 @@ def fetch_receipt(
             break
 
         returned_hash = receipt.get("transactionHash")
-        if isinstance(returned_hash, str) and returned_hash.lower() != tx_hash.lower():
+        # The receipt must be for *this* transaction. A receipt that omits the
+        # hash, carries a null/non-string hash, or echoes a different hash cannot
+        # be tied to the request; accepting any of them would mis-correlate the
+        # response. EVM hex hashes are case-insensitive, so equality is compared
+        # case-folded, but a missing field is never treated as a match.
+        if not isinstance(returned_hash, str) or not returned_hash:
+            return (
+                SourceReport(
+                    source=SOURCE,
+                    status=SourceStatus.MALFORMED,
+                    message=(
+                        "EVM RPC receipt did not include a usable transaction hash, so the "
+                        "response cannot be tied to the requested transaction."
+                    ),
+                    endpoint=endpoint,
+                ),
+                None,
+            )
+        if returned_hash.lower() != tx_hash.lower():
             # A receipt for a different hash is a contradiction, not a provider
             # limitation. Do not fall through to another endpoint and do not
             # mis-correlate the response.

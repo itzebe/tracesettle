@@ -83,3 +83,59 @@ def test_near_fallback_env_is_honoured():
         "config.NEAR_RPC.fallback_urls",
     )
     assert value == "('https://a.example', 'https://b.example')"
+
+
+def _wait_for_health(port: int, timeout: float = 10.0) -> bool:
+    import time
+    import urllib.request
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/api/health", timeout=1
+            ) as resp:
+                if resp.status == 200:
+                    return True
+        except Exception:
+            time.sleep(0.1)
+    return False
+
+
+def test_serve_exits_cleanly_on_sigterm():
+    """SIGTERM must stop the server with exit code 0 (PID-1 container semantics).
+
+    A process that is PID 1 inside a container gets no default action for SIGTERM,
+    so ``docker stop`` would hang until the runtime SIGKILLs it unless the server
+    installs its own handler. This runs the real entry point in a subprocess.
+    """
+    import signal
+    import socket
+    import time
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+
+    env = dict(os.environ)
+    env["TRACESETTLE_HOST"] = "127.0.0.1"
+    env["TRACESETTLE_PORT"] = str(port)
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "tracesettle", "serve"],
+        cwd=ROOT,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    try:
+        assert _wait_for_health(port), "server never became healthy"
+        start = time.time()
+        proc.send_signal(signal.SIGTERM)
+        code = proc.wait(timeout=10)
+        elapsed = time.time() - start
+        assert code == 0, f"expected clean exit 0, got {code}"
+        assert elapsed < 8, f"SIGTERM took too long ({elapsed:.1f}s); handler likely missing"
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)

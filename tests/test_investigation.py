@@ -33,6 +33,8 @@ from conftest import (
     RAW_DIR,
     REAL_DEPOSIT_ADDRESS,
     REAL_INTENT_HASH,
+    REAL_NEAR_TX,
+    REAL_NEAR_TX_BRIDGE,
     REAL_ORIGIN_TX,
     client_for,
     load_raw,
@@ -40,6 +42,24 @@ from conftest import (
 )
 
 CREATED_AT = "2026-10-19T22:00:00Z"
+
+
+def _wire_near_pair(opener: FakeOpener) -> FakeOpener:
+    """Route the two NEAR lookups for the ETH->USDC swap by requested hash.
+
+    The status lists the bridge mint tx first, so the capture must be matched by
+    the hash in the request body — never by call order — or the wrong record
+    answers the wrong request.
+    """
+    opener.json(
+        "POST", "rpc.fastnear", load_raw("near_rpc_tx_omft.json"),
+        body_contains=REAL_NEAR_TX_BRIDGE,
+    )
+    opener.json(
+        "POST", "rpc.fastnear", load_raw("near_rpc_tx.json"),
+        body_contains=REAL_NEAR_TX,
+    )
+    return opener
 
 
 def _wire_full_success(opener: FakeOpener, status_payload=None) -> FakeOpener:
@@ -50,9 +70,7 @@ def _wire_full_success(opener: FakeOpener, status_payload=None) -> FakeOpener:
     opener.json("POST", "ethereum-rpc", load_raw("evm_receipt_origin.json"), once=True)
     opener.json("POST", "ethereum-rpc", load_raw("evm_receipt_destination.json"))
     opener.json("POST", "solver-relay", load_raw("solver_relay_get_status_SETTLED.json"))
-    # NEAR RPC: first the intents tx (has the intent logs), then the bridge leg.
-    opener.json("POST", "rpc.fastnear", load_raw("near_rpc_tx.json"), once=True)
-    opener.json("POST", "rpc.fastnear", load_raw("near_rpc_tx_omft.json"))
+    _wire_near_pair(opener)
     return opener
 
 
@@ -233,7 +251,7 @@ def test_destination_exists_but_transfer_unverifiable(opener: FakeOpener):
     dest = load_raw("evm_receipt_destination.json")
     dest["result"]["logs"] = []
     opener.json("POST", "ethereum-rpc", dest)
-    opener.json("POST", "rpc.fastnear", load_raw("near_rpc_tx.json"))
+    _wire_near_pair(opener)
     opener.json("POST", "solver-relay", load_raw("solver_relay_get_status_SETTLED.json"))
     inv = investigate(REAL_DEPOSIT_ADDRESS, client_for(opener))
     result = build_result(inv)
@@ -284,7 +302,7 @@ def test_unsupported_destination_chain_is_unavailable(opener: FakeOpener):
     payload["quoteResponse"]["quoteRequest"]["destinationAsset"] = "nep141:doge-xyz.omft.near"
     opener.json("GET", "/v0/status", payload)
     opener.json("POST", "ethereum-rpc", load_raw("evm_receipt_origin.json"))
-    opener.json("POST", "rpc.fastnear", load_raw("near_rpc_tx.json"))
+    _wire_near_pair(opener)
     opener.json("POST", "solver-relay", load_raw("solver_relay_get_status_SETTLED.json"))
     inv = investigate(REAL_DEPOSIT_ADDRESS, client_for(opener))
     result = build_result(inv)
@@ -353,7 +371,7 @@ def test_origin_deposit_is_attributed_by_recipient_not_amount(opener: FakeOpener
     origin = load_raw("evm_receipt_origin.json")
     origin["result"]["to"] = "0x0000000000000000000000000000000000000099"
     opener.json("POST", "ethereum-rpc", origin)
-    opener.json("POST", "rpc.fastnear", load_raw("near_rpc_tx.json"))
+    _wire_near_pair(opener)
     opener.json("POST", "solver-relay", load_raw("solver_relay_get_status_SETTLED.json"))
     inv = investigate(REAL_DEPOSIT_ADDRESS, client_for(opener))
     result = build_result(inv)
@@ -881,3 +899,73 @@ def test_classify_origin_erc20_transfer_to_deposit_is_deposit():
 def test_classify_origin_erc20_transfer_to_refund_is_refund():
     refund = "0x2222222222222222222222222222222222222222"
     assert _classify_origin(_erc20_receipt(refund), REAL_DEPOSIT_ADDRESS, refund) == "refund"
+
+
+# --- Adversarial: NEAR transaction identity is enforced end-to-end ----------
+
+
+def test_unrelated_near_transaction_never_confirms_settlement(opener: FakeOpener):
+    """A NEAR record whose own hash differs from the requested hash is not accepted.
+
+    This is the exact adversarial case: the RPC (e.g. a fallback endpoint) returns
+    a valid-looking transaction carrying a real DIP-4 intent event, but for a
+    *different* transaction. It must never be correlated to this investigation.
+    """
+    payload = load_raw("near_rpc_tx.json")
+    # Keep the intent logs intact so the record looks semantically valid...
+    assert REAL_INTENT_HASH in " ".join(
+        log
+        for r in payload["result"]["receipts_outcome"]
+        for log in (r["outcome"].get("logs") or [])
+    )
+    # ...but make the transaction's own hash a different one.
+    payload["result"]["transaction"]["hash"] = "UnrelatedTransactionHash1111111111111111111"
+
+    opener.json("GET", "/v0/status", load_raw("oneclick_status_SUCCESS.json"))
+    opener.json("POST", "ethereum-rpc", load_raw("evm_receipt_origin.json"), once=True)
+    opener.json("POST", "ethereum-rpc", load_raw("evm_receipt_destination.json"))
+    opener.json("POST", "solver-relay", load_raw("solver_relay_get_status_SETTLED.json"))
+    # Every NEAR call returns the mismatched record.
+    opener.json("POST", "rpc.fastnear", payload)
+
+    inv = investigate(REAL_DEPOSIT_ADDRESS, client_for(opener))
+    result = build_result(inv)
+    assert result.stage(Stage.NEAR_SETTLEMENT).state is not StageState.CONFIRMED
+    assert not any(
+        e.event_type.value == "INTENT_EVENT_OBSERVED" for e in inv.evidence
+    ), "an unrelated transaction's intent log must not become evidence"
+
+
+def test_near_mismatch_with_empty_expected_intents_never_confirms(opener: FakeOpener):
+    """Even with no expected intent hashes, transaction identity is enforced.
+
+    The independent review showed that an empty expected-intent set disabled the
+    engine's correlation gate, so *any* intent event in a returned record could
+    confirm settlement. Here the status reports NEAR tx hashes but no intent
+    hashes (so ``expected_intent_hashes`` is empty) while the RPC returns a record
+    for a different transaction. The adapter-level identity check must reject it,
+    so no INTENT_EVENT_OBSERVED evidence is produced at all.
+    """
+    status = load_raw("oneclick_status_SUCCESS.json")
+    status["swapDetails"]["intentHashes"] = []
+    opener.json("GET", "/v0/status", status)
+    opener.json("POST", "ethereum-rpc", load_raw("evm_receipt_origin.json"), once=True)
+    opener.json("POST", "ethereum-rpc", load_raw("evm_receipt_destination.json"))
+    opener.json("POST", "solver-relay", load_raw("solver_relay_get_status_SETTLED.json"))
+    # Every NEAR call returns a valid-looking record for a *different* transaction.
+    payload = load_raw("near_rpc_tx.json")
+    payload["result"]["transaction"]["hash"] = "UnrelatedTransactionHash1111111111111111111"
+    opener.json("POST", "rpc.fastnear", payload)
+    inv = investigate(REAL_DEPOSIT_ADDRESS, client_for(opener))
+    result = build_result(inv)
+    assert inv.expected_intent_hashes == []
+    assert result.stage(Stage.NEAR_SETTLEMENT).state is not StageState.CONFIRMED
+    assert not any(e.event_type.value == "INTENT_EVENT_OBSERVED" for e in inv.evidence)
+
+
+def test_matching_near_hash_still_confirms_settlement(opener: FakeOpener):
+    """The positive control: a correctly-echoed hash still confirms settlement."""
+    _wire_full_success(opener)
+    inv = investigate(REAL_DEPOSIT_ADDRESS, client_for(opener))
+    result = build_result(inv)
+    assert result.stage(Stage.NEAR_SETTLEMENT).state is StageState.CONFIRMED
