@@ -12,7 +12,7 @@ import argparse
 import sys
 from datetime import datetime, timezone
 
-from . import __version__
+from . import __version__, config
 from .httpclient import HttpClient
 from .investigation import build_result, investigate
 from .report import build_report
@@ -56,8 +56,8 @@ def build_parser() -> argparse.ArgumentParser:
     inv.set_defaults(func=_cmd_investigate)
 
     srv = sub.add_parser("serve", help="run the local read-only web interface")
-    srv.add_argument("--host", default="127.0.0.1")
-    srv.add_argument("--port", type=int, default=8000)
+    srv.add_argument("--host", default=config.SERVE_HOST)
+    srv.add_argument("--port", type=int, default=config.SERVE_PORT)
     srv.add_argument("--timeout", type=float, default=15.0)
     srv.add_argument("--attempts", type=int, default=3)
     srv.set_defaults(func=_cmd_serve)

@@ -264,90 +264,104 @@ def _bridged_from_origin_hashes(logs: list[str]) -> list[str]:
 
 
 def fetch_tx(tx_hash: str, client: HttpClient) -> tuple[SourceReport, NearTxData | None]:
-    """Fetch a NEAR transaction, trying the known signers in order."""
-    endpoint = config.NEAR_RPC_URL
+    """Fetch a NEAR transaction, trying the known signers and RPC endpoints.
+
+    Endpoints are tried in order: the primary, then any configured archive
+    fallbacks. Free public nodes prune history, so the primary answers
+    ``UNKNOWN_TRANSACTION`` for an old transaction even though it exists; only an
+    archive endpoint can resolve it. A fallback record is validated by the same
+    checks as the primary. A miss on *every* endpoint stays ``NOT_FOUND``; an
+    unreachable endpoint stays ``UNAVAILABLE`` — a provider problem, not proof
+    the transaction is absent.
+    """
     last_status = SourceStatus.NOT_FOUND
     last_message: str | None = None
+    endpoint = config.NEAR_RPC_URL
 
-    for sender in CANDIDATE_SENDERS:
-        payload = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tx",
-            "params": {"tx_hash": tx_hash, "sender_account_id": sender, "wait_until": "NONE"},
-        }
-        result = client.post_json(endpoint, payload)
-        if not result.ok:
-            last_status = result.status
-            last_message = result.message
-            # Unavailable sources should short-circuit; only "not found" benefits
-            # from trying the next candidate signer.
-            if result.status is not SourceStatus.NOT_FOUND:
-                return (
-                    SourceReport(
-                        source=SOURCE,
-                        status=result.status,
-                        message=result.message or "NEAR RPC could not be queried.",
-                        endpoint=endpoint,
-                    ),
-                    None,
-                )
-            continue
+    for endpoint in config.NEAR_RPC.endpoints():
+        for sender in CANDIDATE_SENDERS:
+            payload = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tx",
+                "params": {"tx_hash": tx_hash, "sender_account_id": sender, "wait_until": "NONE"},
+            }
+            result = client.post_json(endpoint, payload)
+            if not result.ok:
+                last_status = result.status
+                last_message = result.message
+                # Unavailable sources short-circuit: with the source down we cannot
+                # tell "absent" from "unknown", and a second endpoint would only
+                # repeat the same outage. Only "not found" benefits from a fallback.
+                if result.status is not SourceStatus.NOT_FOUND:
+                    return (
+                        SourceReport(
+                            source=SOURCE,
+                            status=result.status,
+                            message=result.message or "NEAR RPC could not be queried.",
+                            endpoint=endpoint,
+                        ),
+                        None,
+                    )
+                continue
 
-        body = result.data
-        if not isinstance(body, dict):
-            last_status = SourceStatus.MALFORMED
-            last_message = "NEAR RPC returned a non-object response."
-            continue
-        if "error" in body and "result" not in body:
-            # The RPC could not resolve this hash for this sender; try the next.
-            error = body.get("error")
-            last_status = SourceStatus.NOT_FOUND
-            if isinstance(error, dict) and isinstance(error.get("message"), str):
-                last_message = error["message"]
-            continue
+            body = result.data
+            if not isinstance(body, dict):
+                last_status = SourceStatus.MALFORMED
+                last_message = "NEAR RPC returned a non-object response."
+                continue
+            if "error" in body and "result" not in body:
+                # The RPC could not resolve this hash for this sender; try the next.
+                error = body.get("error")
+                last_status = SourceStatus.NOT_FOUND
+                if isinstance(error, dict) and isinstance(error.get("message"), str):
+                    last_message = error["message"]
+                continue
 
-        inner = body.get("result")
-        if not isinstance(inner, dict):
-            last_status = SourceStatus.MALFORMED
-            last_message = "NEAR RPC response had no 'result' object."
-            continue
+            inner = body.get("result")
+            if not isinstance(inner, dict):
+                last_status = SourceStatus.MALFORMED
+                last_message = "NEAR RPC response had no 'result' object."
+                continue
 
-        tx = inner.get("transaction") if isinstance(inner.get("transaction"), dict) else {}
-        logs = _extract_logs(inner)
-        data = NearTxData(
-            tx_hash=tx_hash,
-            sender_account_id=sender,
-            final_execution_status=(
-                inner.get("final_execution_status")
-                if isinstance(inner.get("final_execution_status"), str)
-                else None
-            ),
-            included=True,
-            execution_failed=_execution_failed(inner),
-            signer_id=tx.get("signer_id") if isinstance(tx.get("signer_id"), str) else None,
-            receiver_id=tx.get("receiver_id") if isinstance(tx.get("receiver_id"), str) else None,
-            block_hash=(
-                inner.get("transaction_outcome", {}).get("block_hash")
-                if isinstance(inner.get("transaction_outcome"), dict)
-                else None
-            ),
-            logs=logs,
-            found_intent_hashes=_intent_hashes_in_logs(logs),
-            bridged_from_origin_hashes=_bridged_from_origin_hashes(logs),
-            btc_utxo_origin_hashes=_btc_utxo_origin_hashes(logs),
-            intent_withdrawals=_intent_withdrawals(logs),
-        )
-        return (
-            SourceReport(
-                source=SOURCE,
-                status=SourceStatus.OK,
-                evidence=tuple(_build_evidence(data, endpoint)),
-                message=f"NEAR transaction {tx_hash} retrieved (status {data.final_execution_status}).",
-                endpoint=endpoint,
-            ),
-            data,
-        )
+            tx = inner.get("transaction") if isinstance(inner.get("transaction"), dict) else {}
+            logs = _extract_logs(inner)
+            data = NearTxData(
+                tx_hash=tx_hash,
+                sender_account_id=sender,
+                final_execution_status=(
+                    inner.get("final_execution_status")
+                    if isinstance(inner.get("final_execution_status"), str)
+                    else None
+                ),
+                included=True,
+                execution_failed=_execution_failed(inner),
+                signer_id=tx.get("signer_id") if isinstance(tx.get("signer_id"), str) else None,
+                receiver_id=tx.get("receiver_id") if isinstance(tx.get("receiver_id"), str) else None,
+                block_hash=(
+                    inner.get("transaction_outcome", {}).get("block_hash")
+                    if isinstance(inner.get("transaction_outcome"), dict)
+                    else None
+                ),
+                logs=logs,
+                found_intent_hashes=_intent_hashes_in_logs(logs),
+                bridged_from_origin_hashes=_bridged_from_origin_hashes(logs),
+                btc_utxo_origin_hashes=_btc_utxo_origin_hashes(logs),
+                intent_withdrawals=_intent_withdrawals(logs),
+            )
+            message = f"NEAR transaction {tx_hash} retrieved (status {data.final_execution_status})."
+            if endpoint != config.NEAR_RPC_URL:
+                message += f" Retrieved from fallback endpoint {endpoint}."
+            return (
+                SourceReport(
+                    source=SOURCE,
+                    status=SourceStatus.OK,
+                    evidence=tuple(_build_evidence(data, endpoint)),
+                    message=message,
+                    endpoint=endpoint,
+                ),
+                data,
+            )
 
     if last_status is SourceStatus.NOT_FOUND:
         return (

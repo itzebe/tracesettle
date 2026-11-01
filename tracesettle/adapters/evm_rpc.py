@@ -116,107 +116,110 @@ def fetch_receipt(
             None,
         )
 
-    endpoint = rpc.url
+    # Free public nodes prune history, so an older receipt can come back null from
+    # the primary even though the transaction exists. Try every configured
+    # endpoint; a fallback answer is validated by the same checks as the primary.
     payload = {
         "jsonrpc": "2.0",
         "id": 1,
         "method": "eth_getTransactionReceipt",
         "params": [tx_hash],
     }
-    result = client.post_json(endpoint, payload)
+    last_status = SourceStatus.NOT_FOUND
+    last_message: str | None = None
+    last_endpoint = rpc.url
 
-    if not result.ok:
-        return (
-            SourceReport(
-                source=SOURCE,
-                status=result.status,
-                message=result.message or f"EVM RPC for {chain} could not be queried.",
-                endpoint=endpoint,
-            ),
-            None,
-        )
+    for endpoint in rpc.endpoints():
+        last_endpoint = endpoint
+        result = client.post_json(endpoint, payload)
+        if not result.ok:
+            last_status = result.status
+            last_message = result.message or f"EVM RPC for {chain} could not be queried."
+            # An unhealthy endpoint short-circuits: with the source down we cannot
+            # tell "absent" from "unknown", and fanning out to every fallback on an
+            # outage only adds load. Only a definitive "not found" tries the next.
+            if result.status is not SourceStatus.NOT_FOUND:
+                break
+            continue
 
-    body = result.data
-    if not isinstance(body, dict):
-        return (
-            SourceReport(
-                source=SOURCE,
-                status=SourceStatus.MALFORMED,
-                message="EVM RPC returned a non-object response.",
-                endpoint=endpoint,
-            ),
-            None,
-        )
+        body = result.data
+        if not isinstance(body, dict):
+            last_status = SourceStatus.MALFORMED
+            last_message = "EVM RPC returned a non-object response."
+            break
 
-    receipt = body.get("result")
-    if receipt is None:
-        return (
-            SourceReport(
-                source=SOURCE,
-                status=SourceStatus.NOT_FOUND,
-                message=(
-                    f"No receipt found for {tx_hash} on {rpc.display_name}. A missing receipt "
-                    "is not proof the transaction failed."
+        receipt = body.get("result")
+        if receipt is None:
+            last_status = SourceStatus.NOT_FOUND
+            last_message = (
+                f"No receipt found for {tx_hash} on {rpc.display_name}. A missing receipt "
+                "is not proof the transaction failed."
+            )
+            continue
+        if not isinstance(receipt, dict):
+            last_status = SourceStatus.MALFORMED
+            last_message = "EVM RPC receipt was not an object."
+            break
+
+        returned_hash = receipt.get("transactionHash")
+        if isinstance(returned_hash, str) and returned_hash.lower() != tx_hash.lower():
+            # A receipt for a different hash is a contradiction, not a provider
+            # limitation. Do not fall through to another endpoint and do not
+            # mis-correlate the response.
+            return (
+                SourceReport(
+                    source=SOURCE,
+                    status=SourceStatus.MALFORMED,
+                    message=(
+                        "EVM RPC returned a receipt for a different transaction hash; "
+                        "the response was ignored to avoid mis-correlation."
+                    ),
+                    endpoint=endpoint,
                 ),
-                endpoint=endpoint,
-            ),
-            None,
+                None,
+            )
+
+        logs = [entry for entry in (receipt.get("logs") or []) if isinstance(entry, dict)]
+        data = EvmReceiptData(
+            tx_hash=tx_hash,
+            chain=chain,
+            chain_id=rpc.chain_id,
+            included=True,
+            status=receipt.get("status") if isinstance(receipt.get("status"), str) else None,
+            from_address=receipt.get("from") if isinstance(receipt.get("from"), str) else None,
+            to_address=receipt.get("to") if isinstance(receipt.get("to"), str) else None,
+            block_number=_hex_to_int(receipt.get("blockNumber")),
+            logs=logs,
         )
-    if not isinstance(receipt, dict):
+
+        match = match_expected_transfer(data, expected) if expected is not None else None
+        evidence = _build_evidence(data, rpc, match, expected)
+
+        message = f"EVM receipt for {tx_hash} on {rpc.display_name} (status {data.status})."
+        if endpoint != rpc.url:
+            message += f" Retrieved from fallback endpoint {endpoint}."
+        if match is not None and not match.matched:
+            message += f" Expected transfer not verified: {match.reason}"
+
         return (
             SourceReport(
                 source=SOURCE,
-                status=SourceStatus.MALFORMED,
-                message="EVM RPC receipt was not an object.",
+                status=SourceStatus.OK,
+                evidence=tuple(evidence),
+                message=message,
                 endpoint=endpoint,
             ),
-            None,
+            data,
         )
-
-    returned_hash = receipt.get("transactionHash")
-    if isinstance(returned_hash, str) and returned_hash.lower() != tx_hash.lower():
-        return (
-            SourceReport(
-                source=SOURCE,
-                status=SourceStatus.MALFORMED,
-                message=(
-                    "EVM RPC returned a receipt for a different transaction hash; "
-                    "the response was ignored to avoid mis-correlation."
-                ),
-                endpoint=endpoint,
-            ),
-            None,
-        )
-
-    logs = [entry for entry in (receipt.get("logs") or []) if isinstance(entry, dict)]
-    data = EvmReceiptData(
-        tx_hash=tx_hash,
-        chain=chain,
-        chain_id=rpc.chain_id,
-        included=True,
-        status=receipt.get("status") if isinstance(receipt.get("status"), str) else None,
-        from_address=receipt.get("from") if isinstance(receipt.get("from"), str) else None,
-        to_address=receipt.get("to") if isinstance(receipt.get("to"), str) else None,
-        block_number=_hex_to_int(receipt.get("blockNumber")),
-        logs=logs,
-    )
-
-    match = match_expected_transfer(data, expected) if expected is not None else None
-    evidence = _build_evidence(data, rpc, match, expected)
-
-    message = f"EVM receipt for {tx_hash} on {rpc.display_name} (status {data.status})."
-    if match is not None and not match.matched:
-        message += f" Expected transfer not verified: {match.reason}"
 
     return (
         SourceReport(
             source=SOURCE,
-            status=SourceStatus.OK,
-            evidence=tuple(evidence),
-            message=message,
-            endpoint=endpoint,
+            status=last_status,
+            message=last_message or f"EVM RPC for {chain} could not be queried.",
+            endpoint=last_endpoint,
         ),
-        data,
+        None,
     )
 
 
