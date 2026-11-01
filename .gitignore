@@ -7,6 +7,9 @@
 # Service credential stores (hashes only, but still never commit)
 *.creds.json
 credentials.json
+# Their advisory lock files
+*.creds.json.lock
+credentials.json.lock
 
 # Python
 __pycache__/

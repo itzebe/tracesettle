@@ -235,6 +235,9 @@ source of identity:
   the API, not only in the socket handler, so a direct caller cannot bypass it.
 - Manage credentials with `python3 -m tracesettle credentials mint|list|revoke`;
   `list` and `revoke` never print a secret, and the store is written `0600`.
+  The read-modify-write of the store is serialised with an exclusive lock
+  (`<store>.lock`), so two concurrent commands cannot lose one another's change
+  or silently restore a credential the other just revoked.
 
 ## 9c. Fail-closed startup (`securityconfig.py`)
 

@@ -59,6 +59,63 @@ def _load_registry(store_path: str | None):
     return ServiceRegistry()
 
 
+def _store_lock(store_path: str | None):
+    """An exclusive advisory lock over a credential store, for read-modify-write.
+
+    Without it, two concurrent ``credentials`` commands could each read the same
+    snapshot, mutate, and write back, so the later write would silently undo the
+    earlier one — including restoring a credential the other command had just
+    revoked. The lock serialises the whole read-modify-write so a revoke cannot
+    be lost. It is a no-op when no store path is configured, and degrades to no
+    locking on platforms without ``fcntl`` (the tool's supported platforms have
+    it).
+    """
+    import contextlib
+    import os
+
+    if not store_path:
+        return contextlib.nullcontext()
+
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - non-POSIX; documented limitation
+        return contextlib.nullcontext()
+
+    lock_path = os.path.abspath(store_path) + ".lock"
+
+    @contextlib.contextmanager
+    def _locked():
+        directory = os.path.dirname(lock_path) or "."
+        os.makedirs(directory, exist_ok=True)
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            finally:
+                os.close(fd)
+
+    return _locked()
+
+
+def _mutate_registry(store_path: str | None, mutate):
+    """Read-modify-write the store under the store lock.
+
+    The lock is taken *before* the read, so a mutation always observes the
+    latest committed state and no concurrent mutation is lost. ``mutate``
+    returns ``(result, changed)``; the store is written only when something
+    changed, so a no-op revoke does not create or rewrite the file.
+    """
+    with _store_lock(store_path):
+        registry = _load_registry(store_path)
+        result, changed = mutate(registry)
+        if store_path and changed:
+            _write_registry(registry, store_path)
+        return result
+
+
 def _write_registry(registry, store_path: str) -> None:
     """Persist the store with owner-only permissions.
 
@@ -88,12 +145,12 @@ def _write_registry(registry, store_path: str) -> None:
 def _cmd_credentials_mint(args: argparse.Namespace) -> int:
     import json
 
-    registry = _load_registry(args.store)
-    credential, secret = registry.mint(args.service_id)
-    written = None
-    if args.store:
-        _write_registry(registry, args.store)
-        written = args.store
+    def mutate(registry):
+        credential, secret = registry.mint(args.service_id)
+        return (credential, secret), True
+
+    credential, secret = _mutate_registry(args.store, mutate)
+    written = args.store if args.store else None
     result = {
         "service_id": credential.service_id,
         "credential_id": credential.credential_id,
@@ -128,10 +185,11 @@ def _cmd_credentials_list(args: argparse.Namespace) -> int:
 def _cmd_credentials_revoke(args: argparse.Namespace) -> int:
     import json
 
-    registry = _load_registry(args.store)
-    revoked = registry.revoke(args.credential_id)
-    if args.store and revoked:
-        _write_registry(registry, args.store)
+    def mutate(registry):
+        revoked = registry.revoke(args.credential_id)
+        return revoked, revoked
+
+    revoked = _mutate_registry(args.store, mutate)
     print(json.dumps({"credential_id": args.credential_id, "revoked": revoked}, indent=2))
     return 0
 

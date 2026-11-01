@@ -649,7 +649,9 @@ functionality. Runtime stays standard-library only; no verification was weakened
   `sha256:` hash is stored (secret shown once at mint); comparison is
   constant-time over every credential; credentials expire, revoke, and rotate.
   Managed by `python3 -m tracesettle credentials mint|list|revoke` (store written
-  `0600`). Scoped to the two service-facing routes (`evaluate`, `sign`); the
+  `0600`; the read-modify-write is serialised with an exclusive `<store>.lock`, so
+  concurrent commands cannot lose a change or restore a revoked credential).
+  Scoped to the two service-facing routes (`evaluate`, `sign`); the
   administrative incident route stays on the API key, keeping the planes separate.
   When no store is configured the loopback workflow is unchanged.
 - **Fail-closed security configuration (`tracesettle/securityconfig.py`).**

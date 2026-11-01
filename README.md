@@ -571,7 +571,9 @@ the identity its credential was issued for:
   TRACESETTLE_REQUIRE_SERVICE_AUTH=1 python3 -m tracesettle serve --host 0.0.0.0 --port 8000
   ```
   → `mint` prints the secret exactly once; `credentials list` and
-  `credentials revoke <id>` never print a secret. With
+  `credentials revoke <id>` never print a secret. The store's read-modify-write is
+  serialised with an exclusive `<store>.lock`, so concurrent `mint`/`revoke`
+  commands cannot lose a change or restore a just-revoked credential. With
   `TRACESETTLE_REQUIRE_SERVICE_AUTH=1` and no store, the server refuses to start.
   Configure the store with `TRACESETTLE_SERVICE_CREDENTIALS` (a path) or
   `TRACESETTLE_SERVICE_CREDENTIALS_JSON` (inline JSON, for platforms without a
