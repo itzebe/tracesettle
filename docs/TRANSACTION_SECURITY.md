@@ -155,7 +155,7 @@ silently downgrade an outcome. This was a real defect caught by a test.
 
 ## 8. Structural invariants (`guard/invariants.py`)
 
-Ten guarantees, each checked by *running the real code* against an isolated
+Twelve guarantees, each checked by *running the real code* against an isolated
 service, exposed at `GET /api/guard/invariants` and asserted in
 `tests/test_guard_invariants.py`:
 
@@ -171,6 +171,8 @@ service, exposed at `GET /api/guard/invariants` and asserted in
 | `no_key_material_in_output` | no response or metric carries the signing key |
 | `unregistered_identity_never_executes` | an unregistered identity is blocked and nothing executes |
 | `amounts_are_exact_decimals` | `0.3` is admitted, `0.30000000000000004` is refused |
+| `service_identity_cannot_be_forged` | a credential authenticates one identity; a mismatched `service_id` is refused |
+| `service_credentials_are_hashed_at_rest` | only a one-way hash is stored; the plaintext secret never appears |
 
 Every checker is also mutation-tested: the guarded behaviour is deliberately
 broken and the checker is shown to notice. A checker that cannot fail proves
@@ -191,7 +193,7 @@ single document with no third-party origins and a restrictive
 | `POST` | `/api/guard/incidents/{id}/status` | acknowledge or resolve |
 | `GET` | `/api/guard/audit` | audit records (`?verify=1` to check the chain) |
 | `GET` | `/api/guard/scenarios` | the three labelled simulation scenarios |
-| `GET` | `/api/guard/invariants` | run the ten structural checks now |
+| `GET` | `/api/guard/invariants` | run the twelve structural checks now |
 | `POST` | `/api/guard/evaluate` | evaluate a transaction request |
 | `POST` | `/api/guard/sign` | attempt a signing through the reference signer |
 
@@ -199,13 +201,57 @@ Controls:
 
 - `TRACESETTLE_API_KEY` gates the guard endpoints with a constant-time
   comparison. `GET /console` and `GET /api/health` stay open. Unset means open,
-  which suits a loopback-only deployment; set it for anything else.
+  which suits a loopback-only deployment; a public bind with it unset refuses to
+  start (see *Fail-closed startup* below).
+- **Per-service authentication.** When a credential store is configured, the two
+  service-facing routes (`evaluate`, `sign`) also require a valid
+  `X-Service-Credential`. The credential resolves to one `service_id`, and a
+  request whose declared `service_id` differs is refused with `403`. The
+  administrative routes (incident status) stay gated by the API key alone, so the
+  two authentication planes remain separate. When no store is configured the
+  behaviour is unchanged.
 - Per-client rate limiting keyed on the socket peer address, so a spoofed
   `X-Forwarded-For` cannot bypass it. `429` carries `Retry-After`.
 - Request bodies are bounded by `TRACESETTLE_GUARD_MAX_BODY_BYTES` (8 KiB) and
   rejected before being read.
 - The signing key is never returned by any endpoint, and the console never
   receives it.
+
+## 9b. Per-service authentication (`serviceauth.py`)
+
+The policy layer evaluates a transaction for the service the request *names*. On
+its own that lets one service name another and inherit its policy. Each service
+can be issued a credential, and the credential — not the request body — is the
+source of identity:
+
+- `ServiceRegistry` stores only a one-way `sha256:` hash per credential; the
+  plaintext secret is returned once, at mint time, and never persisted.
+- `authenticate()` compares in constant time over every credential, so the check
+  does not reveal which credential matched or how many exist.
+- A credential can expire (`expires_at`) or be revoked; either is refused.
+  `rotate()` issues a new secret and revokes the previous one (overlap optional).
+- `guard/api.py` compares the request's declared `service_id` against the
+  authenticated identity and refuses a mismatch with `403`. This is checked in
+  the API, not only in the socket handler, so a direct caller cannot bypass it.
+- Manage credentials with `python3 -m tracesettle credentials mint|list|revoke`;
+  `list` and `revoke` never print a secret, and the store is written `0600`.
+  The read-modify-write of the store is serialised with an exclusive lock
+  (`<store>.lock`), so two concurrent commands cannot lose one another's change
+  or silently restore a credential the other just revoked.
+
+## 9c. Fail-closed startup (`securityconfig.py`)
+
+`serve` validates its posture *before* opening a socket and refuses to start when
+it would expose protected endpoints without authentication:
+
+- A non-loopback bind requires `TRACESETTLE_API_KEY` **and**
+  `TRACESETTLE_GUARD_AUTH_KEY`; otherwise the process exits `2` naming the missing
+  variables. Only a value that provably parses as loopback is treated as local,
+  so an unknown or empty host fails closed.
+- `TRACESETTLE_REQUIRE_SERVICE_AUTH` without a credential store refuses to start
+  on any binding.
+- There is no override: a public bind without the required credentials always
+  refuses to start, so no environment variable can expose the endpoints.
 
 ## 10. Running it
 
@@ -229,6 +275,9 @@ transactions themselves are not real, and the console says so on the page.
 | `TRACESETTLE_GUARD_AUDIT_LOG` | in-memory | path to a persistent audit log |
 | `TRACESETTLE_GUARD_MAX_BODY_BYTES` | 8192 | request body cap |
 | `TRACESETTLE_API_KEY` | unset | guards the guard endpoints |
+| `TRACESETTLE_SERVICE_CREDENTIALS` | unset | path to a per-service credential store |
+| `TRACESETTLE_SERVICE_CREDENTIALS_JSON` | unset | inline credential store (precedence over the path) |
+| `TRACESETTLE_REQUIRE_SERVICE_AUTH` | unset | require a service credential on every service-facing request |
 
 A policy file overrides only the fields it names; everything else keeps the
 default, so a partial file is a valid override.

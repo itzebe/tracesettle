@@ -58,21 +58,63 @@ class GuardAPI:
         path: str,
         params: dict[str, str],
         body: Any,
+        *,
+        authenticated_service_id: str | None = None,
     ) -> ApiResponse:
         method = method.upper()
         try:
-            return self._dispatch(method, path, params, body)
+            return self._dispatch(method, path, params, body, authenticated_service_id)
         except RequestValidationError as exc:
             return _bad_request(str(exc))
 
     def _dispatch(
-        self, method: str, path: str, params: dict[str, str], body: Any
+        self,
+        method: str,
+        path: str,
+        params: dict[str, str],
+        body: Any,
+        authenticated_service_id: str | None = None,
     ) -> ApiResponse:
         if method == "GET":
             return self._get(path, params)
         if method == "POST":
-            return self._post(path, params, body)
+            return self._post(path, params, body, authenticated_service_id)
         return ApiResponse(405, {"error": "method not allowed"})
+
+    @staticmethod
+    def _declared_service_id(body: Any) -> str | None:
+        """The service identity a request declares, across both body shapes.
+
+        ``/api/guard/evaluate`` accepts the transaction fields at the top level
+        or under ``transaction``; ``/api/guard/sign`` always nests them. This
+        finds the declared identity in either form.
+        """
+        if not isinstance(body, dict):
+            return None
+        nested = body.get("transaction")
+        source = nested if isinstance(nested, dict) else body
+        declared = source.get("service_id")
+        if isinstance(declared, str) and declared.strip():
+            return declared.strip()
+        return None
+
+    @classmethod
+    def _identity_matches(cls, body: Any, authenticated_service_id: str | None) -> bool:
+        """Whether the request's declared identity matches the authenticated one.
+
+        When authentication is disabled (``None``) there is nothing to compare
+        against, so the declared identity stands. When it is enabled, a request
+        that declares a different service than its credential was issued for is
+        refused: this is the impersonation case, and it is checked here so the
+        policy layer never sees a forged identity even if a caller reaches the
+        API directly.
+        """
+        if authenticated_service_id is None:
+            return True
+        declared = cls._declared_service_id(body)
+        if declared is None:
+            return False
+        return declared == authenticated_service_id
 
     # -- GET ----------------------------------------------------------------
 
@@ -122,10 +164,20 @@ class GuardAPI:
 
     # -- POST ---------------------------------------------------------------
 
-    def _post(self, path: str, params: dict[str, str], body: Any) -> ApiResponse:
+    def _post(
+        self,
+        path: str,
+        params: dict[str, str],
+        body: Any,
+        authenticated_service_id: str | None = None,
+    ) -> ApiResponse:
         if path == "/api/guard/evaluate":
+            if not self._identity_matches(body, authenticated_service_id):
+                return ApiResponse(403, {"error": "service identity does not match the credential"})
             return self._evaluate(body)
         if path == "/api/guard/sign":
+            if not self._identity_matches(body, authenticated_service_id):
+                return ApiResponse(403, {"error": "service identity does not match the credential"})
             return self._sign(body)
         if path.startswith("/api/guard/incidents/") and path.endswith("/status"):
             incident_id = path[len("/api/guard/incidents/") : -len("/status")].strip("/")

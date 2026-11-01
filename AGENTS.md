@@ -635,3 +635,50 @@ settings. `ui.py` auto-merged: it carries the guard routes and the SIGTERM
 handler. Full suite on the merged branch: **577 passed**. The 577 = 355 (master
 base) + 185 (guard) + 37 (archive RPC + deployment), i.e. the PR #3 delta (392)
 plus the guard delta (185) over the 355-test base.
+
+## Phase 1 production hardening (2026-11-01, post PR #2/#3 merge)
+
+Three items on the merged master `69382c5`, none of which recreate existing
+functionality. Runtime stays standard-library only; no verification was weakened.
+
+- **Verifiable per-service authentication (`tracesettle/serviceauth.py`).** The
+  guard trusts a *declared* `service_id`, so one service could name another and
+  inherit its policy. Now a service presents a credential (`X-Service-Credential`);
+  `ServiceRegistry` resolves it to exactly one identity and `guard/api.py` refuses
+  a request whose declared `service_id` differs with `403`. Only a one-way
+  `sha256:` hash is stored (secret shown once at mint); comparison is
+  constant-time over every credential; credentials expire, revoke, and rotate.
+  Managed by `python3 -m tracesettle credentials mint|list|revoke` (store written
+  `0600`; the read-modify-write is serialised with an exclusive `<store>.lock`, so
+  concurrent commands cannot lose a change or restore a revoked credential).
+  Scoped to the two service-facing routes (`evaluate`, `sign`); the
+  administrative incident route stays on the API key, keeping the planes separate.
+  When no store is configured the loopback workflow is unchanged.
+- **Fail-closed security configuration (`tracesettle/securityconfig.py`).**
+  `serve` validates *before* opening a socket. A non-loopback bind without both
+  `TRACESETTLE_API_KEY` and `TRACESETTLE_GUARD_AUTH_KEY` exits `2` naming the
+  missing variables; only a value that provably parses as loopback is local, so
+  an unknown/empty host fails closed. `TRACESETTLE_REQUIRE_SERVICE_AUTH` without a
+  store refuses on any binding. There is **no override**: a public bind without
+  the required credentials always refuses, so no environment variable can expose
+  the endpoints.
+- **Automated CI security gates (`.github/workflows/ci.yml`).** On every PR and
+  push to `master`: pytest, pyflakes, compileall, offline-demo determinism
+  (byte-identical across two runs), a non-stdlib-runtime-import gate, and a Docker
+  job (build, non-root uid `10001`, health, graceful shutdown, and a **refusal**
+  check with no credentials). `permissions: contents: read`; every third-party
+  action pinned to an immutable SHA (`checkout` v4.2.2, `setup-python` v5.3.0);
+  no deployment/publish/release; needs no repository secrets.
+- **Two new invariants (now 12 total).** `service_identity_cannot_be_forged` and
+  `service_credentials_are_hashed_at_rest`, both checked by execution and
+  mutation-tested. `_identity_matches` is enforced in `GuardAPI`, not only in the
+  socket handler, so a direct caller cannot bypass it.
+- **Tests:** 577 → **661 passed**. New `tests/test_serviceauth.py` (28),
+  `tests/test_serviceauth_http.py` (12, real sockets),
+  `tests/test_securityconfig.py` (25), `tests/test_failclosed_startup.py` (8,
+  subprocess through `serve`), `tests/test_cli_credentials.py` (7), the two new
+  invariants (2 parametrized) and their mutation tests (2). pyflakes
+  clean; compileall OK; offline demo byte-identical (md5 `4864f13c…`).
+- **Docker verified live:** image builds; no credentials → exit `2` with
+  `refusing to start`; with both credentials → non-root uid `10001`, health
+  `healthy`, `Server: TRACESETTLE`, graceful `SIGTERM` exit `0`.

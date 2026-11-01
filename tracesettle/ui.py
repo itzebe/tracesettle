@@ -38,11 +38,24 @@ from .investigation import build_result, investigate
 from .model import IdentifierType
 from .ratelimit import TokenBucketLimiter
 from .report import build_report
+from .serviceauth import CREDENTIAL_HEADER
 
 log = logging.getLogger("tracesettle.ui")
 
 MAX_BODY_BYTES = 8 * 1024
 MAX_IDENTIFIER_CHARS = 128
+
+#: Sentinel returned by :meth:`Handler._authenticate_service` when it has already
+#: sent a refusal. Distinct from ``None``, which means "authentication disabled".
+_AUTH_REFUSED = object()
+
+#: The guard POST routes that carry a service identity and therefore require
+#: per-service authentication when a credential registry is configured.
+_SERVICE_OPERATION_PATHS = frozenset({"/api/guard/evaluate", "/api/guard/sign"})
+
+#: Distinguishes "no registry argument was supplied" (load from configuration)
+#: from an explicit ``None`` (service authentication deliberately disabled).
+_UNSET = object()
 
 #: Response formats for ``POST /api/investigate``.
 #:   * ``default``  — ``data`` only (the structured report; leanest).
@@ -413,6 +426,35 @@ class Handler(BaseHTTPRequestHandler):
             return False
         return True
 
+    def _authenticate_service(self) -> str | None:
+        """Resolve the caller's service identity from its credential.
+
+        Returns the authenticated ``service_id`` when a registry is configured,
+        or ``None`` when service authentication is disabled (loopback default).
+        On refusal it has already sent the response and returns
+        :data:`_AUTH_REFUSED`.
+
+        The identity comes **only** from the credential; the request body is
+        never consulted here. The API layer compares the declared identity
+        against this value, so a caller cannot adopt another service's identity
+        by editing a field. The credential is never logged or echoed.
+        """
+        registry = getattr(self.server, "service_registry", None)  # type: ignore[attr-defined]
+        if registry is None or not registry.enabled():
+            return None
+        presented = self.headers.get(CREDENTIAL_HEADER)
+        result = registry.authenticate(presented)
+        if not result.ok:
+            # Generic message: never say which check failed, never echo the
+            # credential, never reveal whether it was known.
+            self._json(
+                401,
+                {"error": "service authentication failed"},
+                {"WWW-Authenticate": CREDENTIAL_HEADER},
+            )
+            return _AUTH_REFUSED
+        return result.service_id
+
     def _handle_guard_post(self, parsed: Any, path: str) -> None:
         """Serve a guard write endpoint: rate limit, authenticate, then dispatch."""
         if not self._guard_allowed():
@@ -436,7 +478,18 @@ class Handler(BaseHTTPRequestHandler):
         except (json.JSONDecodeError, UnicodeDecodeError):
             self._json(400, {"error": "request body must be valid JSON"})
             return
-        response = self.server.guard_api.dispatch("POST", path, params, body)  # type: ignore[attr-defined]
+        # Bind the request to the caller's authenticated service identity before
+        # it is evaluated. Only the service-facing operations carry a service
+        # identity; the administrative routes (incident status) are gated by the
+        # API key alone, keeping the two authentication planes separate.
+        authenticated: str | None = None
+        if path in _SERVICE_OPERATION_PATHS:
+            authenticated = self._authenticate_service()
+            if authenticated is _AUTH_REFUSED:
+                return
+        response = self.server.guard_api.dispatch(  # type: ignore[attr-defined]
+            "POST", path, params, body, authenticated_service_id=authenticated
+        )
         self._json(response.status, response.payload, response.headers)
 
     # -- routes -------------------------------------------------------------
@@ -614,6 +667,16 @@ def _build_guard_service() -> GuardService:
     return GuardService(policy=policy, audit=audit)
 
 
+def _load_service_registry() -> Any:
+    """Build the per-service credential registry from configuration, or ``None``.
+
+    A configured store that cannot be read or parsed raises here, so the server
+    refuses to start rather than run without the authentication it was told to
+    enforce.
+    """
+    return config.load_service_registry()
+
+
 class InvestigationServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
@@ -632,6 +695,7 @@ class InvestigationServer(ThreadingHTTPServer):
         upstream_cache: TtlCache | None = None,
         guard_service: GuardService | None = None,
         guard_limiter: TokenBucketLimiter | None = None,
+        service_registry: Any = _UNSET,
     ):
         super().__init__(address, Handler)
         self.timeout_seconds = timeout_seconds
@@ -660,6 +724,12 @@ class InvestigationServer(ThreadingHTTPServer):
         self.guard_limiter = guard_limiter or TokenBucketLimiter(
             config.GUARD_RATE_LIMIT_PER_MINUTE, config.GUARD_RATE_LIMIT_BURST
         )
+        # Per-service credential registry. When no argument is supplied it is
+        # loaded from configuration; an explicit ``None`` disables service
+        # authentication (the loopback development default). A configured store
+        # that cannot be read raises here, so the server refuses to start rather
+        # than run without the authentication it was told to enforce.
+        self.service_registry = _load_service_registry() if service_registry is _UNSET else service_registry
 
     def process_request(self, request: Any, client_address: Any) -> None:
         """Admit a connection or refuse it *before* a worker thread is created.
@@ -744,7 +814,27 @@ def _reject_overloaded(request: Any) -> None:
 
 def serve(host: str = "127.0.0.1", port: int = 8000, timeout_seconds: float = 15.0, max_attempts: int = 3) -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    server = InvestigationServer((host, port), timeout_seconds=timeout_seconds, max_attempts=max_attempts)
+
+    # Fail closed *before* a socket is opened: a public binding with authentication
+    # disabled must refuse to start rather than expose protected endpoints.
+    from .securityconfig import ConfigurationError, validate_from_config
+
+    try:
+        profile = validate_from_config(host)
+    except ConfigurationError as exc:
+        log.error("refusing to start: %s", exc)
+        raise SystemExit(2) from exc
+    log.info("deployment profile: %s", profile.describe())
+
+    try:
+        server = InvestigationServer(
+            (host, port), timeout_seconds=timeout_seconds, max_attempts=max_attempts
+        )
+    except (RuntimeError, ValueError) as exc:
+        # A configured security control (e.g. a credential store) that cannot be
+        # loaded must stop the process, never silently degrade to "no auth".
+        log.error("refusing to start: %s", exc)
+        raise SystemExit(2) from exc
 
     # A process that is PID 1 (as it is inside a container) gets no default action
     # for SIGTERM, so without a handler a ``docker stop`` would hang until the

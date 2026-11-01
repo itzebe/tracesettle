@@ -316,6 +316,78 @@ def _amounts_are_exact_decimals() -> InvariantResult:
     )
 
 
+def _service_identity_cannot_be_forged() -> InvariantResult:
+    """A credential resolves to exactly one service; a mismatched declaration is refused."""
+    from ..serviceauth import ServiceRegistry
+    from .api import GuardAPI
+
+    registry = ServiceRegistry()
+    _, secret = registry.mint("treasury-agent")
+    api = GuardAPI(_fresh()[0])
+
+    authenticated = registry.authenticate(secret)
+    if not authenticated.ok or authenticated.service_id != "treasury-agent":
+        return InvariantResult(
+            "service_identity_cannot_be_forged", False, "a valid credential did not resolve to its service"
+        )
+    # Same valid credential, but the request claims another service.
+    forged = api.dispatch(
+        "POST",
+        "/api/guard/evaluate",
+        {},
+        {"transaction": _payload(service_id="other-service")},
+        authenticated_service_id=authenticated.service_id,
+    )
+    if forged.status != 403:
+        return InvariantResult(
+            "service_identity_cannot_be_forged",
+            False,
+            f"a forged service_id was not refused (status {forged.status})",
+        )
+    # The honest declaration still works with the same credential.
+    honest = api.dispatch(
+        "POST",
+        "/api/guard/evaluate",
+        {},
+        {"transaction": _payload()},
+        authenticated_service_id=authenticated.service_id,
+    )
+    if honest.status != 200:
+        return InvariantResult(
+            "service_identity_cannot_be_forged",
+            False,
+            "a correctly-declared identity was refused",
+        )
+    return InvariantResult(
+        "service_identity_cannot_be_forged",
+        True,
+        "a credential authenticates one identity; a mismatched service_id is refused (403)",
+    )
+
+
+def _service_credentials_are_hashed_at_rest() -> InvariantResult:
+    """The stored form of a credential never contains the plaintext secret."""
+    from ..serviceauth import ServiceRegistry
+
+    registry = ServiceRegistry()
+    _, secret = registry.mint("treasury-agent")
+    stored = repr(registry.to_store())
+    if secret in stored:
+        return InvariantResult(
+            "service_credentials_are_hashed_at_rest", False, "the plaintext secret appears in the store"
+        )
+    public = repr([c.to_dict() for c in registry.credentials()])
+    if secret in public:
+        return InvariantResult(
+            "service_credentials_are_hashed_at_rest", False, "the plaintext secret appears in the public view"
+        )
+    return InvariantResult(
+        "service_credentials_are_hashed_at_rest",
+        True,
+        "only a one-way sha256 hash is stored; the plaintext secret never appears",
+    )
+
+
 INVARIANTS: dict[str, Callable[[], InvariantResult]] = {
     "non_allow_never_authorizes": _non_allow_never_authorizes,
     "refusal_never_reaches_the_executor": _refusal_never_reaches_the_executor,
@@ -327,6 +399,8 @@ INVARIANTS: dict[str, Callable[[], InvariantResult]] = {
     "no_key_material_in_output": _no_key_material_in_output,
     "unregistered_identity_never_executes": _unregistered_identity_never_executes,
     "amounts_are_exact_decimals": _amounts_are_exact_decimals,
+    "service_identity_cannot_be_forged": _service_identity_cannot_be_forged,
+    "service_credentials_are_hashed_at_rest": _service_credentials_are_hashed_at_rest,
 }
 
 #: Human-readable statement of each guarantee, for the console and the docs.
@@ -341,6 +415,8 @@ INVARIANT_DESCRIPTIONS: dict[str, str] = {
     "no_key_material_in_output": "No response body or metric carries the authorization signing key.",
     "unregistered_identity_never_executes": "An unregistered service identity is blocked and never reaches the executor.",
     "amounts_are_exact_decimals": "Amounts are compared as exact decimals, never as binary floats.",
+    "service_identity_cannot_be_forged": "A service credential authenticates exactly one identity; a request declaring another service is refused.",
+    "service_credentials_are_hashed_at_rest": "Service credentials are stored only as one-way hashes; the plaintext secret never appears in a store or a public view.",
 }
 
 

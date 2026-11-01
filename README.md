@@ -148,10 +148,10 @@ a bare interpreter.
 **1. Run the tests.**
 
 ```sh
-python -m pytest tests/ --collect-only -q   # 577 tests collected
-python -m pytest tests/ -q                  # 577 passed
+python -m pytest tests/ --collect-only -q   # 661 tests collected
+python -m pytest tests/ -q                  # 661 passed
 ```
-→ `577 passed`.
+→ `661 passed`.
 
 **2. Prove the enforcement boundary: a permitted request executes, a suspicious
 one cannot.**
@@ -272,11 +272,13 @@ To expose the interface beyond loopback, set an API key first so
 `POST /api/investigate` requires it:
 
 ```sh
-TRACESETTLE_API_KEY=… python3 -m tracesettle serve --host 0.0.0.0 --port 8000
+TRACESETTLE_API_KEY=… TRACESETTLE_GUARD_AUTH_KEY=$(python3 -c "import secrets;print(secrets.token_hex(32))") \
+  python3 -m tracesettle serve --host 0.0.0.0 --port 8000
 ```
 → requests without a matching `X-API-Key` header receive `401`; `GET /` and
-`GET /api/health` stay open. See **Interface hardening** below for the
-concurrency, rate-limit, and cache settings.
+`GET /api/health` stay open. Binding a public interface without both credentials
+now **refuses to start** (see **Fail-closed startup** below). See **Interface
+hardening** below for the concurrency, rate-limit, and cache settings.
 
 **9. Or run all three settlement cases at once.**
 
@@ -430,7 +432,9 @@ identical decisions.
 | `tracesettle/ui.py` | Standard-library web interface, guard routes, console. |
 | `tracesettle/ratelimit.py` | Token buckets for per-IP and per-host limits. |
 | `tracesettle/cache.py` | Bounded TTL cache with single-flight. |
-| `tracesettle/__main__.py` | CLI. |
+| `tracesettle/serviceauth.py` | Per-service credential registry (hashed secrets, constant-time). |
+| `tracesettle/securityconfig.py` | Fail-closed startup validation for the network interface. |
+| `tracesettle/__main__.py` | CLI (`investigate`, `serve`, `credentials`). |
 | `tracesettle/guard/model.py` | Transaction request, policy, decision, finding, authorization models. |
 | `tracesettle/guard/policy.py` | Default policy and JSON override loading. |
 | `tracesettle/guard/rules.py` | The seven deterministic controls. |
@@ -439,14 +443,15 @@ identical decisions.
 | `tracesettle/guard/audit.py` | Hash-chained, verifiable audit log. |
 | `tracesettle/guard/monitor.py` | Security counters and incident records. |
 | `tracesettle/guard/service.py` | Orchestration: controls → authorization → monitor → audit. |
-| `tracesettle/guard/invariants.py` | The ten structural guarantees, checked by execution. |
+| `tracesettle/guard/invariants.py` | The twelve structural guarantees, checked by execution. |
 | `tracesettle/guard/api.py` | Guard HTTP routing and JSON serialization. |
 | `tracesettle/guard/console.py` | The security operations console page. |
 | `docs/TRANSACTION_SECURITY.md` | The security layer in full, including what it does not do. |
 | `Dockerfile` / `.dockerignore` | Minimal non-root container image (healthcheck probes `/api/health`). |
+| `.github/workflows/ci.yml` | CI: tests, static analysis, Docker build + runtime, demo determinism. |
 | `demo/demonstrate.py` | Read-only walkthrough (live, or `--offline` replay of captures). |
 | `demo/replay_opener.py` | Offline transport that replays `evidence/raw/` through the real code. |
-| `tests/` | 577 tests. `evidence/raw/` fixtures are real captures; `tests/fixtures/synthetic/` are clearly labelled synthetic. |
+| `tests/` | 661 tests. `evidence/raw/` fixtures are real captures; `tests/fixtures/synthetic/` are clearly labelled synthetic. |
 | `PHASE1_FEASIBILITY.md` | Phase 1 feasibility and API verification. |
 | `submission/` | Hackathon artifacts: API payload shape, technical summary, demo post draft, publication checklist. |
 | `docs/official/` | NEAR documentation captured during Phase 1. |
@@ -530,12 +535,68 @@ variable and all documented in `docs/TRANSACTION_SECURITY.md`:
   so a spoofed `X-Forwarded-For` cannot bypass it; `429` carries `Retry-After`.
 - **Bounded in-memory state.** Audit records, monitor events, incidents, and the
   replay-nonce store all have explicit caps, so a flood cannot exhaust memory.
-- **Structural invariants, checked by execution.** Ten guarantees at
+- **Structural invariants, checked by execution.** Twelve guarantees at
   `GET /api/guard/invariants`, each mutation-tested so a checker that cannot fail
   is treated as a defect.
 - **Honest audit claim.** In-place modification of an audit record is detectable;
   a whole-log rewrite with recomputed digests is *not*, and the README says so
   rather than claiming tamper-proofness.
+
+### Per-service authentication
+
+The guard's policy layer evaluates a transaction for the service named in the
+request. Left there, one service could name another and inherit its policy. Each
+service can therefore be issued a credential, and a guard request must resolve to
+the identity its credential was issued for:
+
+- **The credential is the identity.** A caller presents its credential in the
+  `X-Service-Credential` header. The credential resolves to exactly one
+  `service_id`; a request whose declared `service_id` differs is refused with
+  `403`, so editing the field cannot adopt another identity. This is asserted by
+  the `service_identity_cannot_be_forged` invariant.
+- **Only hashes are stored.** The plaintext secret is shown once at mint time and
+  never stored; the store keeps a one-way `sha256:` hash. This is asserted by the
+  `service_credentials_are_hashed_at_rest` invariant. The store is written
+  `0600`.
+- **Constant-time comparison**, over every credential, so the check does not leak
+  which credential matched or how many exist. A refused request gets a generic
+  `401`; the credential is never logged or echoed.
+- **Expiry, revocation, and rotation.** A credential can expire or be revoked
+  (either is refused), and rotation issues a new secret and revokes the old one.
+- **Mint and manage from the CLI** — no secret is ever committed:
+
+  ```sh
+  python3 -m tracesettle credentials mint treasury-agent --store /etc/tracesettle/credentials.json
+  TRACESETTLE_SERVICE_CREDENTIALS=/etc/tracesettle/credentials.json \
+  TRACESETTLE_REQUIRE_SERVICE_AUTH=1 python3 -m tracesettle serve --host 0.0.0.0 --port 8000
+  ```
+  → `mint` prints the secret exactly once; `credentials list` and
+  `credentials revoke <id>` never print a secret. The store's read-modify-write is
+  serialised with an exclusive `<store>.lock`, so concurrent `mint`/`revoke`
+  commands cannot lose a change or restore a just-revoked credential. With
+  `TRACESETTLE_REQUIRE_SERVICE_AUTH=1` and no store, the server refuses to start.
+  Configure the store with `TRACESETTLE_SERVICE_CREDENTIALS` (a path) or
+  `TRACESETTLE_SERVICE_CREDENTIALS_JSON` (inline JSON, for platforms without a
+  mounted file). When no store is configured, the loopback development workflow
+  is unchanged.
+
+### Fail-closed startup
+
+Authentication is not optional on a public interface: the process refuses to
+start rather than expose protected endpoints without it.
+
+- **A public bind requires credentials, with no override.** Binding any
+  non-loopback host (for example `0.0.0.0`) without both `TRACESETTLE_API_KEY`
+  and `TRACESETTLE_GUARD_AUTH_KEY` exits with status `2` and a message naming the
+  missing variables. Only a value that provably parses as a loopback address is
+  treated as local, so an unknown or empty host fails closed. There is no
+  environment variable that relaxes this: a public bind without credentials
+  always refuses to start, so a deployment mistake cannot expose the endpoints.
+- **`TRACESETTLE_REQUIRE_SERVICE_AUTH` is enforced.** Setting it without a
+  credential store refuses to start on any binding.
+- **The container inherits this.** The image binds `0.0.0.0`, so it now requires
+  both credentials; the CI job proves it starts with them and refuses without
+  them.
 
 `POST /api/investigate` returns the structured report (`{"data": ...}`) by
 default. `?format=json`, `?format=markdown`, and `?format=full` (all three, as
@@ -544,27 +605,53 @@ earlier versions returned) select other representations.
 ## Deploy
 
 A minimal image is included. It runs as a non-root user and probes
-`/api/health`.
+`/api/health`. Because the image binds `0.0.0.0`, it now requires both
+credentials (see **Fail-closed startup**):
 
 ```sh
 docker build -t tracesettle .
-docker run --rm -p 8000:8000 -e TRACESETTLE_API_KEY=change-me tracesettle
+docker run --rm -p 8000:8000 \
+  -e TRACESETTLE_API_KEY=change-me \
+  -e TRACESETTLE_GUARD_AUTH_KEY=$(python3 -c "import secrets;print(secrets.token_hex(32))") \
+  tracesettle
 curl http://127.0.0.1:8000/api/health
 ```
+→ the same image with neither credential exits `2` with
+`refusing to start: ... requires authentication` instead of serving.
 
 `serve` reads its defaults from the environment, so the image needs no flags on
 a container platform: `TRACESETTLE_HOST` (default `127.0.0.1`; the image sets
-`0.0.0.0`) and `PORT` or `TRACESETTLE_PORT` (default `8000`). Always set
-`TRACESETTLE_API_KEY` before exposing the interface.
+`0.0.0.0`) and `PORT` or `TRACESETTLE_PORT` (default `8000`). Always set both
+`TRACESETTLE_API_KEY` and `TRACESETTLE_GUARD_AUTH_KEY` before exposing the
+interface.
+
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on every pull request and every push to `master`.
+It performs no deployment, publish, or release, and needs no repository secrets:
+
+- the full test suite (`python -m pytest tests/ -q`);
+- static analysis (`python -m pyflakes tracesettle/ tests/ demo/`);
+- byte-compilation of every module;
+- the offline demo run twice, asserted byte-identical (determinism);
+- a gate that fails if any non-standard-library import appears in the package;
+- a Docker build, a non-root runtime check (uid `10001`), a `/api/health`
+  probe, a graceful-shutdown check, and a check that the image **refuses to
+  start** without credentials.
+
+The workflow grants `contents: read` only, pins every third-party action to an
+immutable commit SHA (not a moving tag), and cancels superseded runs.
 
 ## Tests
 
 ```sh
-python3 -m pytest tests/ -q          # all 577
+python3 -m pytest tests/ -q          # all 661
 python3 -m pytest tests/test_guard_authorization.py -q
 python3 -m pytest tests/test_guard_invariants.py -q
 python3 -m pytest tests/test_guard_end_to_end.py -q
 python3 -m pytest tests/test_safety_invariants.py -q
+python3 -m pytest tests/test_serviceauth.py tests/test_serviceauth_http.py -q
+python3 -m pytest tests/test_securityconfig.py tests/test_failclosed_startup.py -q
 python3 -m pytest tests/test_ui.py -q
 ```
 

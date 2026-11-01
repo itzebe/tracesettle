@@ -1,0 +1,163 @@
+# TRACESETTLE continuous integration.
+#
+# Runs the full check set on every pull request and every push to master:
+# the test suite, static analysis, byte-compilation, a Docker build + runtime
+# smoke test (non-root, health endpoint), and the offline demo determinism check.
+#
+# Security posture of this workflow:
+#   * top-level `permissions` grants the read-only minimum (contents: read) and
+#     each job inherits it; no job is given write access;
+#   * third-party actions are pinned to immutable commit SHAs, not moving tags;
+#   * it performs no deployment, no publish, and no release.
+#
+# It needs no repository secrets: the offline demo and the test suite run without
+# network access to upstream services.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+# Least privilege: read the repository, nothing else. No job writes.
+permissions:
+  contents: read
+
+# Cancel superseded runs on the same ref to save CI minutes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: Tests and static analysis
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Python
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.13"
+
+      - name: Install development dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+
+      - name: Test suite
+        run: python -m pytest tests/ -q
+
+      - name: Static analysis (pyflakes)
+        run: python -m pyflakes tracesettle/ tests/ demo/
+
+      - name: Byte-compile every module
+        run: python -m compileall -q tracesettle/ tests/ demo/
+
+      - name: Offline demo determinism
+        run: |
+          set -eu
+          python demo/demonstrate.py --offline > /tmp/demo-1.txt
+          python demo/demonstrate.py --offline > /tmp/demo-2.txt
+          if ! cmp -s /tmp/demo-1.txt /tmp/demo-2.txt; then
+            echo "offline demo output is not deterministic"
+            diff -u /tmp/demo-1.txt /tmp/demo-2.txt || true
+            exit 1
+          fi
+          echo "offline demo is byte-identical across runs"
+
+      - name: Confirm no runtime third-party imports
+        run: |
+          set -eu
+          python - <<'PY'
+          import ast
+          import pathlib
+          import sys
+
+          # The runtime is standard-library only. This gate fails the build if a
+          # non-stdlib import appears in the package.
+          stdlib = set(sys.stdlib_module_names)
+          offenders = []
+          for path in pathlib.Path("tracesettle").rglob("*.py"):
+              tree = ast.parse(path.read_text(), filename=str(path))
+              for node in ast.walk(tree):
+                  if isinstance(node, ast.Import):
+                      names = [a.name.split(".")[0] for a in node.names]
+                  elif isinstance(node, ast.ImportFrom):
+                      names = [node.module.split(".")[0]] if node.module and node.level == 0 else []
+                  else:
+                      continue
+                  for name in names:
+                      if name and name not in stdlib and name != "tracesettle":
+                          offenders.append(f"{path}: {name}")
+          if offenders:
+              print("non-stdlib runtime imports found:")
+              print("\n".join(offenders))
+              raise SystemExit(1)
+          print("runtime imports are standard-library only")
+          PY
+
+  docker:
+    name: Docker build and runtime
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Build the image
+        run: docker build -t tracesettle:ci .
+
+      - name: Container runs non-root and answers the health check
+        run: |
+          set -eu
+          # The image binds 0.0.0.0, so fail-closed startup requires both
+          # credentials. These are throwaway CI values, never real secrets.
+          GUARD_KEY=$(python -c "import secrets;print(secrets.token_hex(32))")
+          docker run -d --name tracesettle-ci -p 8000:8000 \
+            -e TRACESETTLE_API_KEY=ci-throwaway-key \
+            -e TRACESETTLE_GUARD_AUTH_KEY="$GUARD_KEY" \
+            tracesettle:ci
+          # The image has a HEALTHCHECK; wait for it to report healthy.
+          for i in $(seq 1 30); do
+            state=$(docker inspect --format '{{.State.Health.Status}}' tracesettle-ci || echo unknown)
+            if [ "$state" = "healthy" ]; then break; fi
+            sleep 1
+          done
+          state=$(docker inspect --format '{{.State.Health.Status}}' tracesettle-ci)
+          uid=$(docker exec tracesettle-ci id -u)
+          echo "health=$state uid=$uid"
+          docker logs tracesettle-ci
+          test "$state" = "healthy"
+          test "$uid" = "10001"
+
+      - name: Container refuses to start without credentials
+        run: |
+          set -eu
+          # Fail-closed proof: the same image with no credentials on its default
+          # public bind must exit rather than serve.
+          docker run --name tracesettle-ci-nocreds tracesettle:ci > /tmp/nocreds.log 2>&1 || true
+          code=$(docker inspect --format '{{.State.ExitCode}}' tracesettle-ci-nocreds)
+          echo "exit=$code"
+          cat /tmp/nocreds.log
+          test "$code" = "2"
+          grep -q "refusing to start" /tmp/nocreds.log
+          docker rm -f tracesettle-ci-nocreds >/dev/null
+
+      - name: Graceful shutdown
+        run: |
+          set -eu
+          start=$(date +%s)
+          docker stop -t 10 tracesettle-ci
+          code=$(docker inspect --format '{{.State.ExitCode}}' tracesettle-ci)
+          elapsed=$(( $(date +%s) - start ))
+          echo "exit=$code elapsed=${elapsed}s"
+          test "$code" = "0"
+          test "$elapsed" -lt 10
+
+      - name: Clean up
+        if: always()
+        run: docker rm -f tracesettle-ci || true
