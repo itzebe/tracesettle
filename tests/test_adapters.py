@@ -867,3 +867,274 @@ def test_build_status_url_does_not_alter_the_live_request(opener: FakeOpener):
     request = opener.calls[0]
     assert "depositAddress=" in request
     assert REAL_DEPOSIT_ADDRESS in urllib.parse.unquote(request)
+
+
+# --- Archive RPC fallbacks --------------------------------------------------
+#
+# Free public nodes prune history: the primary returns a null receipt (EVM) or
+# UNKNOWN_TRANSACTION (NEAR) for an older transaction even though it exists. The
+# adapter must try configured archive fallbacks, validate a fallback answer by
+# exactly the same checks as the primary, and never mis-correlate a wrong hash.
+
+
+def test_chainrpc_endpoints_orders_and_dedupes():
+    rpc = config.ChainRpc(
+        chain="eth",
+        display_name="Ethereum",
+        url="https://primary",
+        kind="evm",
+        explorer_tx_url="https://explorer/tx/",
+        chain_id=1,
+        fallback_urls=("https://fallback-a", "https://primary", "https://fallback-b"),
+    )
+    assert rpc.endpoints() == ("https://primary", "https://fallback-a", "https://fallback-b")
+
+
+def test_evm_fallback_answers_when_primary_prunes_history(opener: FakeOpener):
+    """Primary returns a null receipt; the archive fallback returns the real one."""
+    opener.json("POST", "publicnode.com", {"jsonrpc": "2.0", "id": 1, "result": None})
+    opener.json("POST", "drpc.org", load_raw("evm_receipt_destination.json"))
+    report, data = evm_rpc.fetch_receipt(REAL_DESTINATION_TX, "eth", client_for(opener))
+    assert report.status is SourceStatus.OK
+    assert data is not None and data.included
+    assert "drpc.org" in (report.endpoint or "")
+    assert "fallback endpoint" in report.message
+
+
+def test_evm_fallback_answer_is_validated_by_the_same_transfer_check(opener: FakeOpener):
+    """A fallback receipt for the right tx but the wrong recipient is not confirmed."""
+    payload = load_raw("evm_receipt_destination.json")
+    opener.json("POST", "publicnode.com", {"jsonrpc": "2.0", "id": 1, "result": None})
+    opener.json("POST", "drpc.org", payload)
+    expected = evm_rpc.ExpectedTransfer(recipient="0x" + "99" * 20)
+    report, data = evm_rpc.fetch_receipt(REAL_DESTINATION_TX, "eth", client_for(opener), expected)
+    assert report.status is SourceStatus.OK
+    match_items = [i for i in report.evidence if i.event_type.value == "DESTINATION_TRANSFER_OBSERVED"]
+    assert match_items, "the transfer check still runs on a fallback receipt"
+    assert all(
+        i.verification is not Verification.CONFIRMED for i in match_items
+    ), "a wrong-recipient fallback must not yield a confirmed transfer"
+
+
+def test_evm_fallback_wrong_hash_is_rejected_not_miscorrelated(opener: FakeOpener):
+    payload = load_raw("evm_receipt_destination.json")
+    payload["result"]["transactionHash"] = "0x" + "11" * 32
+    opener.json("POST", "publicnode.com", {"jsonrpc": "2.0", "id": 1, "result": None})
+    opener.json("POST", "drpc.org", payload)
+    report, data = evm_rpc.fetch_receipt(REAL_DESTINATION_TX, "eth", client_for(opener))
+    assert report.status is SourceStatus.MALFORMED
+    assert data is None
+
+
+def test_evm_all_endpoints_missing_stays_not_found(opener: FakeOpener):
+    opener.json("POST", "publicnode.com", {"jsonrpc": "2.0", "id": 1, "result": None})
+    opener.json("POST", "drpc.org", {"jsonrpc": "2.0", "id": 1, "result": None})
+    opener.json("POST", "blastapi.io", {"jsonrpc": "2.0", "id": 1, "result": None})
+    report, data = evm_rpc.fetch_receipt(REAL_DESTINATION_TX, "eth", client_for(opener))
+    assert report.status is SourceStatus.NOT_FOUND
+    assert data is None
+
+
+def test_evm_primary_unavailable_does_not_fan_out(opener: FakeOpener):
+    """An unhealthy primary short-circuits; no fallback is attempted."""
+    opener.timeout("POST", "publicnode.com")
+    report, data = evm_rpc.fetch_receipt(REAL_DESTINATION_TX, "eth", client_for(opener))
+    assert report.status is SourceStatus.TIMEOUT
+    assert data is None
+    assert len(opener.calls) == 1, "an outage must not fan out to every fallback"
+
+
+def test_near_fallback_answers_when_primary_prunes_history(opener: FakeOpener):
+    opener.json(
+        "POST", "fastnear.com", {"jsonrpc": "2.0", "error": {"message": "Unknown transaction"}}
+    )
+    opener.json("POST", "archival-rpc", load_raw("near_rpc_tx.json"))
+    report, data = near_rpc.fetch_tx(REAL_NEAR_TX, client_for(opener))
+    assert report.status is SourceStatus.OK
+    assert data is not None and REAL_INTENT_HASH in data.found_intent_hashes
+    assert "archival-rpc" in (report.endpoint or "")
+    assert "fallback endpoint" in report.message
+
+
+def test_near_all_endpoints_missing_stays_not_found(opener: FakeOpener):
+    opener.json(
+        "POST", "fastnear.com", {"jsonrpc": "2.0", "error": {"message": "Unknown transaction"}}
+    )
+    opener.json(
+        "POST", "archival-rpc", {"jsonrpc": "2.0", "error": {"message": "Unknown transaction"}}
+    )
+    report, data = near_rpc.fetch_tx(REAL_NEAR_TX, client_for(opener))
+    assert report.status is SourceStatus.NOT_FOUND
+    assert data is None
+
+
+def test_near_primary_unavailable_does_not_fan_out(opener: FakeOpener):
+    opener.timeout("POST", "fastnear.com")
+    report, data = near_rpc.fetch_tx(REAL_NEAR_TX, client_for(opener))
+    assert report.status is SourceStatus.TIMEOUT
+    assert data is None
+    assert len(opener.calls) == 1, "an outage must not fan out to every fallback"
+
+
+# --- NEAR RPC: transaction-hash identity integrity --------------------------
+
+
+def test_near_rpc_matching_hash_is_accepted(opener: FakeOpener):
+    """The happy path: the record echoes the requested hash and is accepted."""
+    payload = load_raw("near_rpc_tx.json")
+    assert payload["result"]["transaction"]["hash"] == REAL_NEAR_TX
+    opener.json("POST", "/", payload)
+    report, data = near_rpc.fetch_tx(REAL_NEAR_TX, client_for(opener))
+    assert report.status is SourceStatus.OK
+    assert data is not None and data.tx_hash == REAL_NEAR_TX
+    assert REAL_INTENT_HASH in data.found_intent_hashes
+
+
+def test_near_rpc_hash_mismatch_is_rejected_not_miscorrelated(opener: FakeOpener):
+    """A record for a different transaction is a contradiction, never accepted."""
+    payload = load_raw("near_rpc_tx.json")
+    payload["result"]["transaction"]["hash"] = "SomeOtherTransactionHash111111111111111111"
+    opener.json("POST", "/", payload)
+    report, data = near_rpc.fetch_tx(REAL_NEAR_TX, client_for(opener))
+    assert report.status is SourceStatus.MALFORMED
+    assert data is None
+    assert "differs from the requested hash" in report.message
+    # No evidence is emitted, so nothing can confirm the settlement stage.
+    assert report.evidence == ()
+
+
+def test_near_rpc_missing_hash_is_rejected(opener: FakeOpener):
+    """A record that omits the hash cannot be tied to the request."""
+    payload = load_raw("near_rpc_tx.json")
+    del payload["result"]["transaction"]["hash"]
+    opener.json("POST", "/", payload)
+    report, data = near_rpc.fetch_tx(REAL_NEAR_TX, client_for(opener))
+    assert report.status is SourceStatus.MALFORMED
+    assert data is None
+
+
+def test_near_rpc_null_hash_is_rejected(opener: FakeOpener):
+    payload = load_raw("near_rpc_tx.json")
+    payload["result"]["transaction"]["hash"] = None
+    opener.json("POST", "/", payload)
+    report, data = near_rpc.fetch_tx(REAL_NEAR_TX, client_for(opener))
+    assert report.status is SourceStatus.MALFORMED
+    assert data is None
+
+
+def test_near_rpc_non_string_hash_is_rejected(opener: FakeOpener):
+    payload = load_raw("near_rpc_tx.json")
+    payload["result"]["transaction"]["hash"] = 12345
+    opener.json("POST", "/", payload)
+    report, data = near_rpc.fetch_tx(REAL_NEAR_TX, client_for(opener))
+    assert report.status is SourceStatus.MALFORMED
+    assert data is None
+
+
+def test_near_rpc_empty_hash_is_rejected(opener: FakeOpener):
+    payload = load_raw("near_rpc_tx.json")
+    payload["result"]["transaction"]["hash"] = ""
+    opener.json("POST", "/", payload)
+    report, data = near_rpc.fetch_tx(REAL_NEAR_TX, client_for(opener))
+    assert report.status is SourceStatus.MALFORMED
+    assert data is None
+
+
+def test_near_rpc_missing_transaction_object_is_rejected(opener: FakeOpener):
+    """No transaction object at all: the hash cannot be echoed, so reject."""
+    payload = load_raw("near_rpc_tx.json")
+    del payload["result"]["transaction"]
+    opener.json("POST", "/", payload)
+    report, data = near_rpc.fetch_tx(REAL_NEAR_TX, client_for(opener))
+    assert report.status is SourceStatus.MALFORMED
+    assert data is None
+
+
+def test_near_fallback_hash_mismatch_is_rejected(opener: FakeOpener):
+    """A mismatched hash from a fallback endpoint is rejected, not miscorrelated."""
+    payload = load_raw("near_rpc_tx.json")
+    payload["result"]["transaction"]["hash"] = "SomeOtherTransactionHash111111111111111111"
+    opener.json(
+        "POST", "fastnear.com", {"jsonrpc": "2.0", "error": {"message": "Unknown transaction"}}
+    )
+    opener.json("POST", "archival-rpc", payload)
+    report, data = near_rpc.fetch_tx(REAL_NEAR_TX, client_for(opener))
+    assert report.status is SourceStatus.MALFORMED
+    assert data is None
+
+
+def test_near_hash_case_is_not_normalized(opener: FakeOpener):
+    """NEAR base58 hashes are case-sensitive; a case-folded hash must not match."""
+    payload = load_raw("near_rpc_tx.json")
+    payload["result"]["transaction"]["hash"] = REAL_NEAR_TX.swapcase()
+    opener.json("POST", "/", payload)
+    report, data = near_rpc.fetch_tx(REAL_NEAR_TX, client_for(opener))
+    assert report.status is SourceStatus.MALFORMED
+    assert data is None
+
+
+# --- EVM RPC: transaction-hash identity integrity ---------------------------
+
+
+def test_evm_matching_hash_is_accepted(opener: FakeOpener):
+    opener.json("POST", "/", load_raw("evm_receipt_destination.json"))
+    report, data = evm_rpc.fetch_receipt(REAL_DESTINATION_TX, "eth", client_for(opener))
+    assert report.status is SourceStatus.OK
+    assert data is not None and data.tx_hash == REAL_DESTINATION_TX
+
+
+def test_evm_hash_case_insensitive_match_is_accepted(opener: FakeOpener):
+    """EVM hex hashes are case-insensitive, so a case-folded echo still matches."""
+    payload = load_raw("evm_receipt_destination.json")
+    payload["result"]["transactionHash"] = payload["result"]["transactionHash"].upper().replace("0X", "0x")
+    opener.json("POST", "/", payload)
+    report, data = evm_rpc.fetch_receipt(REAL_DESTINATION_TX, "eth", client_for(opener))
+    assert report.status is SourceStatus.OK
+    assert data is not None
+
+
+def test_evm_missing_transaction_hash_is_rejected(opener: FakeOpener):
+    payload = load_raw("evm_receipt_destination.json")
+    del payload["result"]["transactionHash"]
+    opener.json("POST", "/", payload)
+    report, data = evm_rpc.fetch_receipt(REAL_DESTINATION_TX, "eth", client_for(opener))
+    assert report.status is SourceStatus.MALFORMED
+    assert data is None
+
+
+def test_evm_null_transaction_hash_is_rejected(opener: FakeOpener):
+    payload = load_raw("evm_receipt_destination.json")
+    payload["result"]["transactionHash"] = None
+    opener.json("POST", "/", payload)
+    report, data = evm_rpc.fetch_receipt(REAL_DESTINATION_TX, "eth", client_for(opener))
+    assert report.status is SourceStatus.MALFORMED
+    assert data is None
+
+
+def test_evm_non_string_transaction_hash_is_rejected(opener: FakeOpener):
+    payload = load_raw("evm_receipt_destination.json")
+    payload["result"]["transactionHash"] = 42
+    opener.json("POST", "/", payload)
+    report, data = evm_rpc.fetch_receipt(REAL_DESTINATION_TX, "eth", client_for(opener))
+    assert report.status is SourceStatus.MALFORMED
+    assert data is None
+
+
+def test_evm_empty_transaction_hash_is_rejected(opener: FakeOpener):
+    payload = load_raw("evm_receipt_destination.json")
+    payload["result"]["transactionHash"] = ""
+    opener.json("POST", "/", payload)
+    report, data = evm_rpc.fetch_receipt(REAL_DESTINATION_TX, "eth", client_for(opener))
+    assert report.status is SourceStatus.MALFORMED
+    assert data is None
+
+
+def test_evm_fallback_missing_hash_is_rejected(opener: FakeOpener):
+    """A fallback receipt that omits the hash is rejected, not accepted."""
+    payload = load_raw("evm_receipt_destination.json")
+    del payload["result"]["transactionHash"]
+    opener.json("POST", "publicnode.com", {"jsonrpc": "2.0", "id": 1, "result": None})
+    opener.json("POST", "drpc.org", payload)
+    report, data = evm_rpc.fetch_receipt(REAL_DESTINATION_TX, "eth", client_for(opener))
+    assert report.status is SourceStatus.MALFORMED
+    assert data is None

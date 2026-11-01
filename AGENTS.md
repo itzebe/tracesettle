@@ -552,7 +552,9 @@ sits *in front of* a signer.
   `guard/authorization.load_key` from `TRACESETTLE_GUARD_AUTH_KEY`; it is never in
   `config.py`, never logged, never returned. An ephemeral key is generated when
   unset and reported as `ephemeral: true`.
-- **Tests:** `python3 -m pytest tests/ -q` (540 passed, 185 new). New files:
+- **Tests:** `python3 -m pytest tests/ -q` (577 passed on this branch after merging
+  master, which brought the archive-RPC and deployment work; 185 new guard tests).
+  New files:
   `test_guard_controls.py`, `test_guard_authorization.py`, `test_guard_invariants.py`,
   `test_guard_audit_monitor.py`, `test_guard_api.py`, `test_guard_ui.py`,
   `test_guard_end_to_end.py`, plus `tests/guard_helpers.py`. No guard test makes a
@@ -569,3 +571,67 @@ sits *in front of* a signer.
   by design, so a model cannot talk its way past the boundary.
 - **Not done, and requiring explicit human confirmation:** making the repository
   public, posting the demo on X, sending the submission, and merging the PR.
+## Archive RPC fallbacks + container deployment (remediation)
+
+Live data drift: free public RPCs prune history, so the reference case stopped
+verifying. The primary `publicnode.com` endpoint returns a **null receipt** for
+the ETH→USDC origin (`0xfca11a…`, older than its ~2-day window) and
+`free.rpc.fastnear.com` answers `UNKNOWN_TRANSACTION` for the historical NEAR
+settlement. Both fixes below are additive; `reconcile.py` and the evidence model
+are untouched, so no verification rule was weakened.
+
+- **EVM archive fallbacks.** `ChainRpc` gained `fallback_urls` and an
+  `endpoints()` helper (primary first, de-duplicated). `EVM_RPC_MAP` now lists
+  archive-capable endpoints per chain (`eth.drpc.org` and
+  `eth-mainnet.public.blastapi.io` for `eth`; `…drpc.org` for the rest).
+  `evm_rpc.fetch_receipt` walks the endpoints in order.
+- **NEAR archive fallback.** `NEAR_RPC_FALLBACK_URLS` (comma-separated,
+  `TRACESETTLE_NEAR_RPC_FALLBACK_URL`, default `archival-rpc.mainnet.near.org`)
+  is attached to `NEAR_RPC`. `near_rpc.fetch_tx` walks endpoints *and* signers.
+- **Fallback answers are validated identically.** A fallback record passes the
+  same identity/recipient/transfer checks as the primary. A wrong EVM hash is
+  `MALFORMED` and is **not** retried elsewhere (never mis-correlated); a
+  wrong-recipient fallback receipt yields a non-`CONFIRMED` transfer check.
+- **Honest uncertainty is preserved.** Only a definitive `NOT_FOUND` tries the
+  next endpoint; an unreachable endpoint (`TIMEOUT`/`RATE_LIMITED`/…) short-
+  circuits — with the source down we cannot tell "absent" from "unknown", and
+  fanning out on an outage only adds load. A miss on *every* endpoint stays
+  `NOT_FOUND`; an outage stays `UNAVAILABLE`. Neither is ever `FAILED`.
+- **Live result.** With the fallbacks, the reference case
+  (`0xB741c00f6D63b6dEd0cCADA1a82bCBADc38A572B`) reproduces `SETTLED_VERIFIED`
+  with all four stages `CONFIRMED`; the EVM origin is fetched from `eth.drpc.org`
+  and the NEAR settlement from `archival-rpc.mainnet.near.org`.
+- **NEAR archive caveat (unchanged).** The free archive is deprecated and
+  rate-limits hard (HTTP 429). Under a burst the NEAR stage degrades to
+  `UNAVAILABLE`/`REPORTED` (outcome `DELIVERY_UNVERIFIED`), never to a false
+  confirmation. Set `TRACESETTLE_NEAR_RPC_FALLBACK_URL` to a paid archive node
+  for reliable historical lookups.
+- **Container deployment.** Added a minimal non-root `Dockerfile` (uid 10001,
+  `HEALTHCHECK` probes `/api/health`, `EXPOSE 8000`) and `.dockerignore`. Runtime
+  stays zero-dependency, so the image needs no `pip install`. `serve` now reads
+  `TRACESETTLE_HOST` and `PORT`/`TRACESETTLE_PORT` from the environment, so the
+  image runs unchanged on Render/Fly/Railway/Cloud Run. Verified: image builds,
+  runs non-root, reports `healthy`, and a live `POST /api/investigate` through
+  the container returns `SETTLED_VERIFIED`.
+- **Tests:** 355 → **372 passed**. New `tests/test_cli.py` (8: serve defaults and
+  env-driven host/port/fallback) and 9 archive-fallback tests in
+  `tests/test_adapters.py`. pyflakes clean; compileall OK; offline demo
+  byte-identical to baseline `2b0213f4…`.
+- **Provenance note.** This work reproduces the *content* of a local remediation
+  commit (`639e032`) that was created in an earlier sandbox and never pushed; the
+  commit object itself is unrecoverable (not on any remote, fork, or local
+  object store). It is re-implemented here on top of `a145a89` and independently
+  re-verified live.
+
+## Integration with master after PR #3 (2026-11-01)
+
+PR #2 was developed against `a145a89`. After PR #3 merged to master
+(`e309fb79`), master was merged *into* the feature branch (merge commit,
+parents `d0e3b144` + `e309fb79`) rather than rebasing, so both published
+histories are preserved. Conflicts were confined to `AGENTS.md`, `README.md`,
+and `tracesettle/config.py` (both sides appended to the same regions); each was
+resolved as a union, keeping the guard settings *and* the serve/archive-fallback
+settings. `ui.py` auto-merged: it carries the guard routes and the SIGTERM
+handler. Full suite on the merged branch: **577 passed**. The 577 = 355 (master
+base) + 185 (guard) + 37 (archive RPC + deployment), i.e. the PR #3 delta (392)
+plus the guard delta (185) over the 355-test base.

@@ -112,11 +112,17 @@ def verified_settlement_opener() -> ReplayOpener:
     opener.json("POST", "ethereum-rpc", "evm_receipt_origin.json", once=True)
     opener.json("POST", "ethereum-rpc", "evm_receipt_destination.json")
     opener.json("POST", "solver-relay", "solver_relay_get_status_SETTLED.json")
-    # The NEAR RPC is called twice with different transaction hashes; the first
-    # captured response is the intents tx (carries the intent logs), the second is
-    # the bridge leg.
-    opener.json("POST", "rpc.fastnear", "near_rpc_tx.json", once=True)
-    opener.json("POST", "rpc.fastnear", "near_rpc_tx_omft.json")
+    # The NEAR RPC is called once per reported near-tx hash. Match each capture to
+    # the hash in the request body: the status lists the bridge mint tx first, so
+    # serving by call order would answer the wrong request with the wrong record.
+    opener.json(
+        "POST", "rpc.fastnear", "near_rpc_tx_omft.json",
+        body_contains="FbrSoTHbQdwD6HxabhaozvQQVBA4kF2Qn2c3W2otp284",
+    )
+    opener.json(
+        "POST", "rpc.fastnear", "near_rpc_tx.json",
+        body_contains="5E3GdbhwUYj9RFXhkk3rMyPwom4xvMYjtCFj7i2uypFb",
+    )
     return opener
 
 
@@ -137,9 +143,16 @@ def refunded_swap_opener() -> ReplayOpener:
     opener = ReplayOpener()
     opener.json("GET", "/v0/status", "oneclick_status_btc_REFUNDED.json")
     opener.json("POST", "solver-relay", "solver_relay_get_status_BTC_REFUNDED.json")
-    # NEAR RPC is called once per reported near tx hash, in reported order.
-    opener.json("POST", "rpc.fastnear", "near_rpc_tx_btc_deposit.json", once=True)
-    opener.json("POST", "rpc.fastnear", "near_rpc_tx_btc_settlement.json", once=True)
+    # NEAR RPC is called once per reported near-tx hash; match by the hash in the
+    # request body so the right capture answers the right request.
+    opener.json(
+        "POST", "rpc.fastnear", "near_rpc_tx_btc_deposit.json",
+        body_contains="5G5fbpGz6EJryTD245spudvhQqpx4FC3UcmYRBCjgL7T",
+    )
+    opener.json(
+        "POST", "rpc.fastnear", "near_rpc_tx_btc_settlement.json",
+        body_contains="83tjFcjTXfVxRVnBTeYyWmcww7CUWwEpcVmkGeHAjxL1",
+    )
     # Origin-chain transactions: the refund tx and the deposit tx, both validated
     # from raw bytes (identity + script checks). The ``/hex`` routes are registered
     # first because ``/tx/{id}`` is a prefix of ``/tx/{id}/hex`` and routes match in
