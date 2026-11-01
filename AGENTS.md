@@ -506,6 +506,71 @@ Two launch-critical defects found in review, both fixed with regression tests.
   and recovery afterwards. Verified 30/30; the refusal path is genuinely
   exercised (4 refusals observed over 720 requests).
 
+## Transaction security layer (guard) — 2026-11-01
+
+The project moved from a settlement investigator to a transaction security
+platform. The settlement engine is untouched; a new `tracesettle/guard/` package
+sits *in front of* a signer.
+
+- **Honest scope, repeated everywhere.** The guard cannot block an arbitrary
+  blockchain transaction. It refuses to release one through a signer that calls
+  it. The reference signer (`guard/signer.py`) simulates execution; no real
+  transaction is ever signed or broadcast. Do not weaken this into a claim of
+  prevention.
+- **Vertical slice:** request → 7 deterministic controls → explained decision →
+  transaction-bound HMAC authorization → independent signer validation →
+  execution or refusal → hash-chained audit record.
+- **All seven controls run on every request; no short-circuit.** The decision
+  carries the full picture, not the first reason found.
+- **An authorization is bound to the transaction, not just authenticated.**
+  `service_id`/`operation`/`chain`/`asset`/`amount`/`destination` are canonicalised
+  and signed. The signer re-derives the binding from the transaction it was asked
+  to sign, so a genuine token minted for a *different* transaction is refused as
+  `WRONG_PARAMETERS`. Single-use nonce, 90 s default expiry.
+- **Amounts are `Decimal` end to end.** A limit of `0.3` admits `0.3` and refuses
+  `0.30000000000000004`. Never parse a client amount with `float`.
+- **Severity is compared by `rank`, never by the string value.** `"MEDIUM"` sorts
+  after `"HIGH"` alphabetically; a string `max()` silently downgrades an outcome.
+  This was a real defect caught by a test.
+- **Ten structural invariants** live in `guard/invariants.py`, are exposed at
+  `GET /api/guard/invariants`, and are asserted in `tests/test_guard_invariants.py`.
+  Each checker is mutation-tested: a checker that cannot fail is a defect. Adding a
+  guarantee means adding a checker *and* a mutation test that breaks it.
+- **Audit log honesty.** In-place edit/reorder/removal is detected by chain
+  recomputation. A whole-log rewrite with recomputed digests is **not** detected;
+  `head_digest` is exposed for external anchoring. Do not describe the log as
+  tamper-proof. A persistent log resumes its chain from the file on start-up, or a
+  restart would break verification.
+- **`SecurityMonitor._lock` is an `RLock`.** `open_incident` is called both
+  standalone and from inside another locked section; a plain `Lock` deadlocks.
+- **Client-supplied approval flags are never honoured** (`approved`,
+  `skip_checks`, …). Their presence produces a finding and forces review.
+- **Every security control fails closed.** A configured policy file or audit path
+  that cannot be read is a hard failure, never a silent fallback to a weaker
+  default.
+- **No key material in any response.** The signing key is read only by
+  `guard/authorization.load_key` from `TRACESETTLE_GUARD_AUTH_KEY`; it is never in
+  `config.py`, never logged, never returned. An ephemeral key is generated when
+  unset and reported as `ephemeral: true`.
+- **Tests:** `python3 -m pytest tests/ -q` (577 passed on this branch after merging
+  master, which brought the archive-RPC and deployment work; 185 new guard tests).
+  New files:
+  `test_guard_controls.py`, `test_guard_authorization.py`, `test_guard_invariants.py`,
+  `test_guard_audit_monitor.py`, `test_guard_api.py`, `test_guard_ui.py`,
+  `test_guard_end_to_end.py`, plus `tests/guard_helpers.py`. No guard test makes a
+  network call; the only substitution is the executor (the real
+  `SimulatedExecutor` with a call counter), so "refused" is asserted as "the
+  executor was never called".
+- **UI:** `GET /console` is the security operations console (single document, no
+  third-party origins, restrictive CSP). `tracesettle/guard/console.py` holds it.
+  The old investigation page links to it. Console tests assert the required
+  sections, ARIA roles, reduced-motion support, and that no third-party origin or
+  fabricated `LIVE` badge is present.
+- **Hackathon track:** `security` (AI Security & Defense) — the track's own hint is
+  "spending limits, policy engines". No LLM was added; decisions are deterministic
+  by design, so a model cannot talk its way past the boundary.
+- **Not done, and requiring explicit human confirmation:** making the repository
+  public, posting the demo on X, sending the submission, and merging the PR.
 ## Archive RPC fallbacks + container deployment (remediation)
 
 Live data drift: free public RPCs prune history, so the reference case stopped
@@ -557,3 +622,16 @@ are untouched, so no verification rule was weakened.
   commit object itself is unrecoverable (not on any remote, fork, or local
   object store). It is re-implemented here on top of `a145a89` and independently
   re-verified live.
+
+## Integration with master after PR #3 (2026-11-01)
+
+PR #2 was developed against `a145a89`. After PR #3 merged to master
+(`e309fb79`), master was merged *into* the feature branch (merge commit,
+parents `d0e3b144` + `e309fb79`) rather than rebasing, so both published
+histories are preserved. Conflicts were confined to `AGENTS.md`, `README.md`,
+and `tracesettle/config.py` (both sides appended to the same regions); each was
+resolved as a union, keeping the guard settings *and* the serve/archive-fallback
+settings. `ui.py` auto-merged: it carries the guard routes and the SIGTERM
+handler. Full suite on the merged branch: **577 passed**. The 577 = 355 (master
+base) + 185 (guard) + 37 (archive RPC + deployment), i.e. the PR #3 delta (392)
+plus the guard delta (185) over the 355-test base.

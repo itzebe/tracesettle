@@ -3,7 +3,9 @@
     python -m tracesettle investigate <identifier> [--json|--markdown]
     python -m tracesettle serve [--host 127.0.0.1] [--port 8000]
 
-Read-only. No command signs, submits, or moves anything.
+Read-only for settlements. The guard layer evaluates transaction requests before
+execution and issues a transaction-bound authorization; it never signs, submits,
+or moves anything.
 """
 
 from __future__ import annotations

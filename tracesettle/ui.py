@@ -30,6 +30,9 @@ from urllib.parse import parse_qs, urlparse
 
 from . import DISCLAIMER, __version__, config
 from .cache import TtlCache
+from .guard.api import GuardAPI
+from .guard.service import GuardService
+from .guard.console import CONSOLE_HTML
 from .httpclient import HttpClient
 from .investigation import build_result, investigate
 from .model import IdentifierType
@@ -134,7 +137,8 @@ _INDEX_HTML = """<!DOCTYPE html>
   </div>
   <div id="output" aria-live="polite"></div>
 </main>
-<footer>TRACESETTLE never signs, submits, or moves anything. Evidence is attributed to its source.</footer>
+<footer>TRACESETTLE never signs, submits, or moves anything. Evidence is attributed to its source.
+  &middot; <a href="console">Security Operations Console</a></footer>
 <script>
 const out = document.getElementById('output');
 const form = document.getElementById('form');
@@ -388,6 +392,53 @@ class Handler(BaseHTTPRequestHandler):
         provided = self.headers.get("X-API-Key") or ""
         return hmac.compare_digest(provided.encode("utf-8"), expected.encode("utf-8"))
 
+    def _guard_allowed(self) -> bool:
+        """Per-client rate limit and API-key check shared by every guard route.
+
+        Returns True when the request may proceed. On refusal it has already sent
+        the response and the caller must return immediately.
+        """
+        client_ip = self.client_address[0] if self.client_address else "unknown"
+        limiter = self.server.guard_limiter  # type: ignore[attr-defined]
+        if not limiter.allow(client_ip):
+            retry_after = limiter.retry_after_seconds(client_ip)
+            self._json(
+                429,
+                {"error": "rate limit exceeded; retry later"},
+                {"Retry-After": str(retry_after)},
+            )
+            return False
+        if not self._authorized():
+            self._json(401, {"error": "unauthorized"}, {"WWW-Authenticate": "X-API-Key"})
+            return False
+        return True
+
+    def _handle_guard_post(self, parsed: Any, path: str) -> None:
+        """Serve a guard write endpoint: rate limit, authenticate, then dispatch."""
+        if not self._guard_allowed():
+            return
+        params = {k: v[0] for k, v in parse_qs(parsed.query).items()}
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            self._json(400, {"error": "invalid Content-Length"})
+            return
+        if length <= 0 or length > config.GUARD_MAX_BODY_BYTES:
+            self._json(413, {"error": "request body missing or too large"})
+            return
+        try:
+            raw = self.rfile.read(length)
+        except (TimeoutError, OSError):
+            self._json(408, {"error": "request body read timed out"})
+            return
+        try:
+            body = json.loads(raw.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            self._json(400, {"error": "request body must be valid JSON"})
+            return
+        response = self.server.guard_api.dispatch("POST", path, params, body)  # type: ignore[attr-defined]
+        self._json(response.status, response.payload, response.headers)
+
     # -- routes -------------------------------------------------------------
 
     def do_GET(self) -> None:  # noqa: N802
@@ -397,8 +448,23 @@ class Handler(BaseHTTPRequestHandler):
                 "__DISCLAIMER__", DISCLAIMER
             )
             self._send(200, html.encode("utf-8"), "text/html; charset=utf-8")
+        elif path in ("/console", "/console/"):
+            html = CONSOLE_HTML.replace("__VERSION__", __version__).replace(
+                "__DISCLAIMER__", DISCLAIMER
+            )
+            self._send(200, html.encode("utf-8"), "text/html; charset=utf-8")
         elif path == "/api/health":
             self._json(200, {"status": "ok", "tool": "TRACESETTLE", "version": __version__, "read_only": True})
+        elif path.startswith("/api/guard/"):
+            # Guard reads expose operational state, not user data, but they are
+            # still gated by the same API key as the investigate endpoint when
+            # one is configured, and carry their own per-client rate limit.
+            if not self._guard_allowed():
+                return
+            parsed = urlparse(self.path)
+            params = {k: v[0] for k, v in parse_qs(parsed.query).items()}
+            response = self.server.guard_api.dispatch("GET", path, params, None)  # type: ignore[attr-defined]
+            self._json(response.status, response.payload, response.headers)
         else:
             self._json(404, {"error": "not found"})
 
@@ -408,6 +474,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         path = parsed.path
+        if path.startswith("/api/guard/"):
+            self._handle_guard_post(parsed, path)
+            return
         if path != "/api/investigate":
             self._json(404, {"error": "not found"})
             return
@@ -525,6 +594,26 @@ class Handler(BaseHTTPRequestHandler):
         return build_report(inv, result, created_at)
 
 
+def _build_guard_service() -> GuardService:
+    """Build the guard from configuration.
+
+    A configured policy file or audit-log path that cannot be read is a hard
+    failure: a security control must not silently fall back to a weaker default.
+    """
+    from .guard.audit import AuditLog
+    from .guard.policy import DEFAULT_POLICY, load_policy
+
+    if config.GUARD_POLICY_PATH:
+        policy = load_policy(config.GUARD_POLICY_PATH)
+    else:
+        policy = DEFAULT_POLICY
+    audit = AuditLog(
+        path=config.GUARD_AUDIT_LOG_PATH,
+        max_records=config.GUARD_AUDIT_MAX_RECORDS,
+    )
+    return GuardService(policy=policy, audit=audit)
+
+
 class InvestigationServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
@@ -541,6 +630,8 @@ class InvestigationServer(ThreadingHTTPServer):
         client_limiter: TokenBucketLimiter | None = None,
         host_limiter: TokenBucketLimiter | None = None,
         upstream_cache: TtlCache | None = None,
+        guard_service: GuardService | None = None,
+        guard_limiter: TokenBucketLimiter | None = None,
     ):
         super().__init__(address, Handler)
         self.timeout_seconds = timeout_seconds
@@ -563,6 +654,11 @@ class InvestigationServer(ThreadingHTTPServer):
         )
         self.upstream_cache = upstream_cache or TtlCache(
             config.UPSTREAM_CACHE_TTL_SECONDS, max_entries=config.UPSTREAM_CACHE_MAX_ENTRIES
+        )
+        self.guard_service = guard_service or _build_guard_service()
+        self.guard_api = GuardAPI(self.guard_service)
+        self.guard_limiter = guard_limiter or TokenBucketLimiter(
+            config.GUARD_RATE_LIMIT_PER_MINUTE, config.GUARD_RATE_LIMIT_BURST
         )
 
     def process_request(self, request: Any, client_address: Any) -> None:
