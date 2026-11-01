@@ -138,6 +138,82 @@ GUARD_RATE_LIMIT_BURST = int(os.environ.get("TRACESETTLE_GUARD_RATE_LIMIT_BURST"
 GUARD_MAX_BODY_BYTES = int(os.environ.get("TRACESETTLE_GUARD_MAX_BODY_BYTES", "8192"))
 
 # ---------------------------------------------------------------------------
+# Per-service authentication
+# ---------------------------------------------------------------------------
+#
+# The guard trusts a *declared* service_id. To stop one service impersonating
+# another, each service can be issued a credential (see ``tracesettle.serviceauth``).
+# Credentials are read from a JSON store; the plaintext secret is never stored,
+# only its SHA-256 hash. Nothing here is ever logged.
+
+#: Path to a JSON credential store (``{"version":1,"credentials":[...]}``).
+#: Each entry has ``credential_id``, ``service_id``, ``secret_hash`` (sha256:…),
+#: and optional ``expires_at``/``revoked``.
+SERVICE_CREDENTIALS_PATH = os.environ.get("TRACESETTLE_SERVICE_CREDENTIALS") or None
+
+#: Inline JSON credential store, for platforms without a mounted file. Takes
+#: precedence over the path when both are set.
+SERVICE_CREDENTIALS_JSON = os.environ.get("TRACESETTLE_SERVICE_CREDENTIALS_JSON") or None
+
+#: When set, every guard request must present a valid service credential. When
+#: unset, credential authentication applies only if a store is configured. A
+#: public binding with this set and no store is refused at startup.
+REQUIRE_SERVICE_AUTH = os.environ.get("TRACESETTLE_REQUIRE_SERVICE_AUTH", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+
+
+def service_auth_configured() -> bool:
+    """Whether a service credential store is configured at all."""
+    return bool(SERVICE_CREDENTIALS_PATH or SERVICE_CREDENTIALS_JSON)
+
+
+def load_service_registry():
+    """Build a :class:`ServiceRegistry` from configuration, or ``None``.
+
+    A configured store that cannot be read or parsed is a hard error: a security
+    control must never silently fall back to "no authentication".
+    """
+    if not service_auth_configured():
+        return None
+    from .serviceauth import ServiceRegistry
+
+    if SERVICE_CREDENTIALS_JSON:
+        return ServiceRegistry.load(SERVICE_CREDENTIALS_JSON)
+    try:
+        with open(SERVICE_CREDENTIALS_PATH, encoding="utf-8") as handle:  # type: ignore[arg-type]
+            text = handle.read()
+    except OSError as exc:
+        raise RuntimeError(
+            f"cannot read TRACESETTLE_SERVICE_CREDENTIALS ({SERVICE_CREDENTIALS_PATH!r}): {exc}"
+        ) from exc
+    return ServiceRegistry.load(text)
+
+
+# ---------------------------------------------------------------------------
+# Fail-closed startup
+# ---------------------------------------------------------------------------
+#
+# A public binding with authentication disabled must refuse to start. The check
+# itself lives in ``tracesettle.securityconfig``; these are its inputs.
+
+#: True when the guard's authorization signing key is configured. The value is
+#: read by ``guard.authorization.load_key``; only its presence is inspected here.
+GUARD_AUTH_KEY_CONFIGURED = bool(os.environ.get("TRACESETTLE_GUARD_AUTH_KEY"))
+
+#: The explicit, loudly-logged opt-out for a public bind behind an authenticating
+#: proxy. Never the default.
+ALLOW_INSECURE_PUBLIC = os.environ.get("TRACESETTLE_ALLOW_INSECURE_PUBLIC", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+
+# ---------------------------------------------------------------------------
 # Serve defaults (env-driven so a container image needs no CLI flags)
 # ---------------------------------------------------------------------------
 #

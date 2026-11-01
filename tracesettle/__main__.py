@@ -42,6 +42,100 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     return 0
 
 
+def _load_registry(store_path: str | None):
+    """Load a credential store, or start an empty one.
+
+    The stored form contains only one-way hashes, so loading it never reveals a
+    secret. A malformed store is a hard error: a security control must not be
+    silently discarded.
+    """
+    import os
+
+    from .serviceauth import ServiceRegistry
+
+    if store_path and os.path.exists(store_path):
+        with open(store_path, encoding="utf-8") as handle:
+            return ServiceRegistry.load(handle.read())
+    return ServiceRegistry()
+
+
+def _write_registry(registry, store_path: str) -> None:
+    """Persist the store with owner-only permissions.
+
+    The store holds hashes, not secrets, but it is still access-controlled:
+    knowing which credentials exist is information an attacker should not have.
+    """
+    import json
+    import os
+    import tempfile
+
+    directory = os.path.dirname(os.path.abspath(store_path)) or "."
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".creds-", suffix=".json")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(registry.to_store(), handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, store_path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _cmd_credentials_mint(args: argparse.Namespace) -> int:
+    import json
+
+    registry = _load_registry(args.store)
+    credential, secret = registry.mint(args.service_id)
+    written = None
+    if args.store:
+        _write_registry(registry, args.store)
+        written = args.store
+    result = {
+        "service_id": credential.service_id,
+        "credential_id": credential.credential_id,
+        "secret": secret,
+        "store_written": written,
+        "notice": (
+            "The secret is shown once and is not recoverable. Store it in the "
+            "service's own secret manager and present it in the "
+            "X-Service-Credential header. Only its hash is persisted."
+        ),
+    }
+    print(json.dumps(result, indent=2))
+    return 0
+
+
+def _cmd_credentials_list(args: argparse.Namespace) -> int:
+    import json
+
+    registry = _load_registry(args.store)
+    print(
+        json.dumps(
+            {
+                "credentials": [c.to_dict() for c in registry.credentials()],
+                "active_service_ids": list(registry.active_service_ids()),
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
+def _cmd_credentials_revoke(args: argparse.Namespace) -> int:
+    import json
+
+    registry = _load_registry(args.store)
+    revoked = registry.revoke(args.credential_id)
+    if args.store and revoked:
+        _write_registry(registry, args.store)
+    print(json.dumps({"credential_id": args.credential_id, "revoked": revoked}, indent=2))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="tracesettle",
@@ -63,6 +157,33 @@ def build_parser() -> argparse.ArgumentParser:
     srv.add_argument("--timeout", type=float, default=15.0)
     srv.add_argument("--attempts", type=int, default=3)
     srv.set_defaults(func=_cmd_serve)
+
+    creds = sub.add_parser(
+        "credentials",
+        help="manage per-service credentials for the guard (hashes only, never secrets)",
+    )
+    creds_sub = creds.add_subparsers(dest="credentials_command", required=True)
+
+    def _add_store(parser: argparse.ArgumentParser) -> None:
+        parser.add_argument(
+            "--store",
+            default=config.SERVICE_CREDENTIALS_PATH,
+            help="path to the credential store JSON (default: TRACESETTLE_SERVICE_CREDENTIALS)",
+        )
+
+    mint = creds_sub.add_parser("mint", help="issue a credential for a service (prints the secret once)")
+    mint.add_argument("service_id", help="the service identity this credential authenticates")
+    _add_store(mint)
+    mint.set_defaults(func=_cmd_credentials_mint)
+
+    listing = creds_sub.add_parser("list", help="list credentials (never prints a secret)")
+    _add_store(listing)
+    listing.set_defaults(func=_cmd_credentials_list)
+
+    revoke = creds_sub.add_parser("revoke", help="revoke a credential by id")
+    revoke.add_argument("credential_id", help="the credential id to revoke")
+    _add_store(revoke)
+    revoke.set_defaults(func=_cmd_credentials_revoke)
 
     return parser
 

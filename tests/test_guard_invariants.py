@@ -148,3 +148,36 @@ def test_non_allow_invariant_notices_a_stray_authorization():
         assert result.holds is False
     finally:
         inv.GuardService.evaluate_payload = original
+
+
+def test_service_identity_invariant_notices_a_forged_identity():
+    """If the API accepted a mismatched service_id, the invariant must fail."""
+    from tracesettle.guard import invariants as inv
+    from tracesettle.guard.api import GuardAPI
+
+    original = GuardAPI._identity_matches
+
+    def permissive(cls, body, authenticated_service_id):  # noqa: ANN001
+        # The mutation: accept every declared identity.
+        return True
+
+    GuardAPI._identity_matches = classmethod(permissive)
+    try:
+        result = inv.INVARIANTS["service_identity_cannot_be_forged"]()
+        assert result.holds is False
+    finally:
+        GuardAPI._identity_matches = original
+
+
+def test_service_credentials_hashed_invariant_notices_a_plaintext_store():
+    """If the store kept the plaintext secret, the invariant must fail."""
+    from tracesettle.guard import invariants as inv
+    from tracesettle import serviceauth
+
+    original = serviceauth.hash_secret
+    serviceauth.hash_secret = lambda secret: secret  # the mutation: no hashing
+    try:
+        result = inv.INVARIANTS["service_credentials_are_hashed_at_rest"]()
+        assert result.holds is False
+    finally:
+        serviceauth.hash_secret = original

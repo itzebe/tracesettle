@@ -4,6 +4,9 @@
 !.env.example
 *.pem
 *.key
+# Service credential stores (hashes only, but still never commit)
+*.creds.json
+credentials.json
 
 # Python
 __pycache__/
