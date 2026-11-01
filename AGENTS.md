@@ -657,8 +657,9 @@ functionality. Runtime stays standard-library only; no verification was weakened
   `TRACESETTLE_API_KEY` and `TRACESETTLE_GUARD_AUTH_KEY` exits `2` naming the
   missing variables; only a value that provably parses as loopback is local, so
   an unknown/empty host fails closed. `TRACESETTLE_REQUIRE_SERVICE_AUTH` without a
-  store refuses on any binding. `TRACESETTLE_ALLOW_INSECURE_PUBLIC=1` is the one
-  loudly-logged opt-out and does not defeat the service-auth requirement.
+  store refuses on any binding. There is **no override**: a public bind without
+  the required credentials always refuses, so no environment variable can expose
+  the endpoints.
 - **Automated CI security gates (`.github/workflows/ci.yml`).** On every PR and
   push to `master`: pytest, pyflakes, compileall, offline-demo determinism
   (byte-identical across two runs), a non-stdlib-runtime-import gate, and a Docker

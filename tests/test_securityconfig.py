@@ -22,7 +22,6 @@ def _validate(host, **overrides):
         guard_auth_key_configured=True,
         service_auth_enabled=False,
         require_service_auth=False,
-        allow_insecure_public=False,
     )
     base.update(overrides)
     return validate_startup(host=host, **base)
@@ -58,8 +57,8 @@ def test_loopback_binding_needs_no_credentials():
     assert "local development" in profile.describe()
 
 
-def test_loopback_binding_ignores_insecure_override_flag():
-    profile = _validate("localhost", allow_insecure_public=True)
+def test_loopback_binding_needs_nothing_even_without_credentials():
+    profile = _validate("localhost", api_key=None, guard_auth_key_configured=False)
     assert profile.public_binding is False
 
 
@@ -99,14 +98,35 @@ def test_wildcard_and_specific_public_hosts_are_refused_alike():
             _validate(host, api_key=None, guard_auth_key_configured=False)
 
 
-# --- explicit override -----------------------------------------------------
+# --- no override exists ----------------------------------------------------
 
 
-def test_insecure_public_override_allows_start_but_is_flagged():
-    profile = _validate("0.0.0.0", api_key=None, guard_auth_key_configured=False, allow_insecure_public=True)
-    assert profile.public_binding is True
-    assert profile.insecure_public_override is True
-    assert "INSECURE_PUBLIC_OVERRIDE" in profile.describe()
+def test_no_override_exists_for_a_public_bind():
+    """A public bind without credentials must always raise, with no opt-out.
+
+    Regression: an earlier revision accepted ``TRACESETTLE_ALLOW_INSECURE_PUBLIC=1``
+    and then served protected endpoints (including the ability to mint a real
+    authorization) with no authentication at all. That bypass is removed; the
+    validator no longer takes any "allow insecure" parameter.
+    """
+    import inspect
+
+    params = inspect.signature(validate_startup).parameters
+    assert "allow_insecure_public" not in params
+    with pytest.raises(ConfigurationError):
+        _validate("0.0.0.0", api_key=None, guard_auth_key_configured=False)
+
+
+def test_wildcard_host_is_refused_regardless_of_any_env(monkeypatch):
+    """Even with the legacy override variable set, the refusal stands."""
+    from tracesettle import config
+    from tracesettle.securityconfig import validate_from_config
+
+    monkeypatch.setenv("TRACESETTLE_ALLOW_INSECURE_PUBLIC", "1")
+    monkeypatch.setattr(config, "API_KEY", None, raising=False)
+    monkeypatch.setattr(config, "GUARD_AUTH_KEY_CONFIGURED", False, raising=False)
+    with pytest.raises(ConfigurationError):
+        validate_from_config("0.0.0.0")
 
 
 # --- require-service-auth --------------------------------------------------

@@ -123,12 +123,21 @@ def test_require_service_auth_without_a_store_refuses_to_start():
     assert "TRACESETTLE_REQUIRE_SERVICE_AUTH" in output
 
 
-def test_insecure_public_override_allows_start():
+def test_no_override_allows_a_public_start_without_credentials():
+    """The legacy override variable must NOT permit an unauthenticated public start.
+
+    Regression: ``TRACESETTLE_ALLOW_INSECURE_PUBLIC=1`` previously let the server
+    bind 0.0.0.0 with no credentials and serve the guard endpoints — including
+    minting real transaction authorizations — to any network caller. It is now
+    inert; the process refuses to start.
+    """
     port = _free_port()
     env = _clean_env(_HOST="0.0.0.0", TRACESETTLE_ALLOW_INSECURE_PUBLIC="1")
     code, output, running, listening = _run_serve(env, port)
-    assert running, f"override did not allow start; output:\n{output}"
-    assert listening
+    assert not running, f"override still allowed a public start; output:\n{output}"
+    assert not listening
+    assert code == 2
+    assert "refusing to start" in output
 
 
 def test_unreadable_credential_store_refuses_to_start():

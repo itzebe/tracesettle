@@ -13,9 +13,10 @@ Rules:
   credentials are present. An unknown or empty host is treated as public
   (fail closed): only a value that provably parses as a loopback address is
   considered local.
-* ``TRACESETTLE_ALLOW_INSECURE_PUBLIC=1`` is the single, explicit, loudly-logged
-  opt-out for a public bind behind an authenticating proxy. It is never the
-  default and it is never silent.
+* There is **no override**. A public bind without the required credentials is
+  always refused; no environment variable can relax this, so the property holds
+  under any deployment mistake. A deployment behind a terminating proxy must
+  still set the credentials.
 
 No secret value is ever read, logged, or returned here; only whether a value is
 present.
@@ -24,10 +25,7 @@ present.
 from __future__ import annotations
 
 import ipaddress
-import logging
 from dataclasses import dataclass
-
-log = logging.getLogger("tracesettle.security")
 
 #: Host names that always mean the local machine.
 _LOOPBACK_NAMES = frozenset({"localhost"})
@@ -66,7 +64,6 @@ class DeploymentProfile:
     guard_auth_key_configured: bool
     service_auth_enabled: bool
     require_service_auth: bool
-    insecure_public_override: bool
 
     def describe(self) -> str:
         """A one-line, secret-free description of the posture."""
@@ -77,8 +74,6 @@ class DeploymentProfile:
             f"guard_auth_key={'set' if self.guard_auth_key_configured else 'unset'}",
             f"service_auth={'enabled' if self.service_auth_enabled else 'disabled'}",
         ]
-        if self.insecure_public_override:
-            bits.append("INSECURE_PUBLIC_OVERRIDE")
         return "public binding: " + ", ".join(bits)
 
 
@@ -89,12 +84,14 @@ def validate_startup(
     guard_auth_key_configured: bool,
     service_auth_enabled: bool,
     require_service_auth: bool,
-    allow_insecure_public: bool,
 ) -> DeploymentProfile:
     """Decide whether the process may start, and return the resolved profile.
 
     Raises :class:`ConfigurationError` when the configuration is insecure. The
     message names the environment variable to set and never contains a value.
+
+    There is no override: a public bind without the required credentials always
+    raises, so the fail-closed property cannot be relaxed by configuration.
     """
     public_binding = not is_loopback_host(host)
     profile = DeploymentProfile(
@@ -103,7 +100,6 @@ def validate_startup(
         guard_auth_key_configured=guard_auth_key_configured,
         service_auth_enabled=service_auth_enabled,
         require_service_auth=require_service_auth,
-        insecure_public_override=allow_insecure_public and public_binding,
     )
 
     # An explicit requirement is honoured on any binding: asking for per-service
@@ -119,15 +115,6 @@ def validate_startup(
     if not public_binding:
         return profile
 
-    if allow_insecure_public:
-        log.warning(
-            "TRACESETTLE_ALLOW_INSECURE_PUBLIC is set: binding %r publicly without the "
-            "full credential set. Protected endpoints may be reachable without "
-            "authentication. This is an explicit override and is not recommended.",
-            host,
-        )
-        return profile
-
     missing: list[str] = []
     if not api_key:
         missing.append("TRACESETTLE_API_KEY")
@@ -137,8 +124,7 @@ def validate_startup(
         raise ConfigurationError(
             "binding a public interface (host=%r) requires authentication, but these "
             "are unset: %s. Bind 127.0.0.1 for local development, or set the variables "
-            "above. To override explicitly (not recommended), set "
-            "TRACESETTLE_ALLOW_INSECURE_PUBLIC=1." % (host, ", ".join(missing))
+            "above. There is no override for this check." % (host, ", ".join(missing))
         )
     return profile
 
@@ -153,5 +139,4 @@ def validate_from_config(host: str | None) -> DeploymentProfile:
         guard_auth_key_configured=config.GUARD_AUTH_KEY_CONFIGURED,
         service_auth_enabled=config.service_auth_configured(),
         require_service_auth=config.REQUIRE_SERVICE_AUTH,
-        allow_insecure_public=config.ALLOW_INSECURE_PUBLIC,
     )

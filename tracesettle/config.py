@@ -204,15 +204,6 @@ def load_service_registry():
 #: read by ``guard.authorization.load_key``; only its presence is inspected here.
 GUARD_AUTH_KEY_CONFIGURED = bool(os.environ.get("TRACESETTLE_GUARD_AUTH_KEY"))
 
-#: The explicit, loudly-logged opt-out for a public bind behind an authenticating
-#: proxy. Never the default.
-ALLOW_INSECURE_PUBLIC = os.environ.get("TRACESETTLE_ALLOW_INSECURE_PUBLIC", "").strip().lower() in {
-    "1",
-    "true",
-    "yes",
-    "on",
-}
-
 # ---------------------------------------------------------------------------
 # Serve defaults (env-driven so a container image needs no CLI flags)
 # ---------------------------------------------------------------------------

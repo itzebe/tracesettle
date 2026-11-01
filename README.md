@@ -583,17 +583,15 @@ the identity its credential was issued for:
 Authentication is not optional on a public interface: the process refuses to
 start rather than expose protected endpoints without it.
 
-- **A public bind requires credentials.** Binding any non-loopback host (for
-  example `0.0.0.0`) without both `TRACESETTLE_API_KEY` and
-  `TRACESETTLE_GUARD_AUTH_KEY` exits with status `2` and a message naming the
+- **A public bind requires credentials, with no override.** Binding any
+  non-loopback host (for example `0.0.0.0`) without both `TRACESETTLE_API_KEY`
+  and `TRACESETTLE_GUARD_AUTH_KEY` exits with status `2` and a message naming the
   missing variables. Only a value that provably parses as a loopback address is
-  treated as local, so an unknown or empty host fails closed.
+  treated as local, so an unknown or empty host fails closed. There is no
+  environment variable that relaxes this: a public bind without credentials
+  always refuses to start, so a deployment mistake cannot expose the endpoints.
 - **`TRACESETTLE_REQUIRE_SERVICE_AUTH` is enforced.** Setting it without a
   credential store refuses to start on any binding.
-- **An explicit, logged override.** `TRACESETTLE_ALLOW_INSECURE_PUBLIC=1` is the
-  single opt-out, for a public bind behind an authenticating proxy. It is never
-  the default and it logs a warning. It does not defeat the
-  `TRACESETTLE_REQUIRE_SERVICE_AUTH` check.
 - **The container inherits this.** The image binds `0.0.0.0`, so it now requires
   both credentials; the CI job proves it starts with them and refuses without
   them.

@@ -247,8 +247,8 @@ it would expose protected endpoints without authentication:
   so an unknown or empty host fails closed.
 - `TRACESETTLE_REQUIRE_SERVICE_AUTH` without a credential store refuses to start
   on any binding.
-- `TRACESETTLE_ALLOW_INSECURE_PUBLIC=1` is the single, loudly-logged opt-out for
-  a public bind behind an authenticating proxy; it is never the default.
+- There is no override: a public bind without the required credentials always
+  refuses to start, so no environment variable can expose the endpoints.
 
 ## 10. Running it
 
@@ -275,7 +275,6 @@ transactions themselves are not real, and the console says so on the page.
 | `TRACESETTLE_SERVICE_CREDENTIALS` | unset | path to a per-service credential store |
 | `TRACESETTLE_SERVICE_CREDENTIALS_JSON` | unset | inline credential store (precedence over the path) |
 | `TRACESETTLE_REQUIRE_SERVICE_AUTH` | unset | require a service credential on every service-facing request |
-| `TRACESETTLE_ALLOW_INSECURE_PUBLIC` | unset | explicit opt-out for a public bind; never the default |
 
 A policy file overrides only the fields it names; everything else keeps the
 default, so a partial file is a valid override.
