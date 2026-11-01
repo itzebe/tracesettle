@@ -84,10 +84,10 @@ a bare interpreter.
 **1. Run the tests.**
 
 ```sh
-python -m pytest tests/ --collect-only -q   # 304 tests collected
-python -m pytest tests/ -q                  # 304 passed
+python -m pytest tests/ --collect-only -q   # 372 tests collected
+python -m pytest tests/ -q                  # 372 passed
 ```
-→ `304 passed`.
+→ `372 passed`.
 
 **2. Investigate a real, known-good swap from the command line.**
 
@@ -208,6 +208,17 @@ Other limits, stated in every report:
 
 - 1Click status is a service statement, reported and not independently verified.
 - Only chains with a configured public RPC can be independently verified.
+- **Free public RPCs prune history.** The default endpoints keep roughly a
+  two-day window, so an older transaction returns a null receipt (EVM) or
+  `UNKNOWN_TRANSACTION` (NEAR) even though it exists. Each chain therefore
+  carries archive-capable fallbacks (`eth.drpc.org`, `…drpc.org` per chain, and
+  `eth-mainnet.public.blastapi.io`; NEAR uses `archival-rpc.mainnet.near.org`).
+  A fallback answer is validated by exactly the same checks as the primary, so a
+  fallback never weakens verification. When every endpoint misses, the stage stays
+  `NOT_FOUND`; when an endpoint is unreachable, it stays `UNAVAILABLE` — never
+  `FAILED`. Set `TRACESETTLE_NEAR_RPC_FALLBACK_URL` to a paid archive node for a
+  reliable historical NEAR lookup; the free archive is deprecated and rate-limits
+  hard (HTTP 429), in which case the stage is `UNAVAILABLE`, not confirmed.
 - A missing record or a 404 is not evidence that a transaction failed.
 - A reported failure is not proof funds were lost.
 - A reported refund of zero is not proof no refund can occur.
@@ -270,7 +281,7 @@ No LLM decides whether a transaction is confirmed.
 | `tracesettle/base58.py` | Shared Base58/Base58Check decoding (used by classification and Bitcoin script decoding). |
 | `tracesettle/model.py` | Evidence model: stages, states, outcomes, safety invariants. |
 | `tracesettle/assets.py` | `nep141:` asset id parsing to chain/contract. |
-| `tracesettle/config.py` | Public chain RPC map and explorer URL builders. |
+| `tracesettle/config.py` | Public chain RPC map (with archive fallbacks) and explorer URL builders. |
 | `tracesettle/httpclient.py` | Timeouts, bounded retries, error classification. |
 | `tracesettle/adapters/` | One adapter per data source (1Click, solver relay, NEAR, EVM, Bitcoin). |
 | `tracesettle/reconcile.py` | Deterministic reconciliation engine. |
@@ -280,9 +291,10 @@ No LLM decides whether a transaction is confirmed.
 | `tracesettle/ratelimit.py` | Token buckets for per-IP and per-host limits. |
 | `tracesettle/cache.py` | Bounded TTL cache with single-flight. |
 | `tracesettle/__main__.py` | CLI. |
+| `Dockerfile` / `.dockerignore` | Minimal non-root container image (healthcheck probes `/api/health`). |
 | `demo/demonstrate.py` | Read-only walkthrough (live, or `--offline` replay of captures). |
 | `demo/replay_opener.py` | Offline transport that replays `evidence/raw/` through the real code. |
-| `tests/` | 304 tests. `evidence/raw/` fixtures are real captures; `tests/fixtures/synthetic/` are clearly labelled synthetic. |
+| `tests/` | 372 tests. `evidence/raw/` fixtures are real captures; `tests/fixtures/synthetic/` are clearly labelled synthetic. |
 | `PHASE1_FEASIBILITY.md` | Phase 1 feasibility and API verification. |
 | `submission/` | Hackathon artifacts: API payload shape, technical summary, demo post draft, publication checklist. |
 | `docs/official/` | NEAR documentation captured during Phase 1. |
@@ -346,10 +358,26 @@ limit configurable by environment variable:
 default. `?format=json`, `?format=markdown`, and `?format=full` (all three, as
 earlier versions returned) select other representations.
 
+## Deploy
+
+A minimal image is included. It runs as a non-root user and probes
+`/api/health`.
+
+```sh
+docker build -t tracesettle .
+docker run --rm -p 8000:8000 -e TRACESETTLE_API_KEY=change-me tracesettle
+curl http://127.0.0.1:8000/api/health
+```
+
+`serve` reads its defaults from the environment, so the image needs no flags on
+a container platform: `TRACESETTLE_HOST` (default `127.0.0.1`; the image sets
+`0.0.0.0`) and `PORT` or `TRACESETTLE_PORT` (default `8000`). Always set
+`TRACESETTLE_API_KEY` before exposing the interface.
+
 ## Tests
 
 ```sh
-python3 -m pytest tests/ -q          # all 304
+python3 -m pytest tests/ -q          # all 372
 python3 -m pytest tests/test_safety_invariants.py -q
 python3 -m pytest tests/test_ui.py -q
 ```

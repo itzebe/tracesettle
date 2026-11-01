@@ -26,6 +26,24 @@ BRIDGE_RPC_URL = os.environ.get(
 
 NEAR_RPC_URL = os.environ.get("TRACESETTLE_NEAR_RPC_URL", "https://free.rpc.fastnear.com")
 
+#: Fallback NEAR RPC endpoints, tried in order after ``NEAR_RPC_URL`` when the
+#: primary node does not know a transaction.
+#:
+#: Free NEAR providers are **non-archival**: they answer ``UNKNOWN_TRANSACTION``
+#: for any historical transaction outside their pruning window, even though the
+#: transaction exists. ``archival-rpc.mainnet.near.org`` is the only free archive
+#: endpoint, is marked deprecated, and rate-limits hard (HTTP 429). A historical
+#: lookup is therefore best-effort; for production set
+#: ``TRACESETTLE_NEAR_RPC_FALLBACK_URL`` to a paid archive node.
+NEAR_RPC_FALLBACK_URLS: tuple[str, ...] = tuple(
+    url.strip()
+    for url in os.environ.get(
+        "TRACESETTLE_NEAR_RPC_FALLBACK_URL",
+        "https://archival-rpc.mainnet.near.org",
+    ).split(",")
+    if url.strip()
+)
+
 EXPLORER_TX_BASE = "https://explorer.near-intents.org/transactions"
 
 # ---------------------------------------------------------------------------
@@ -95,6 +113,19 @@ UPSTREAM_CACHE_MAX_ENTRIES = int(os.environ.get("TRACESETTLE_CACHE_MAX_ENTRIES",
 
 
 # ---------------------------------------------------------------------------
+# Serve defaults (env-driven so a container image needs no CLI flags)
+# ---------------------------------------------------------------------------
+#
+# The default host stays loopback: binding a public interface is an explicit
+# decision, made either with ``--host`` or by setting TRACESETTLE_HOST. The port
+# honours ``PORT`` (the convention used by Render/Fly/Railway/Cloud Run) and
+# falls back to ``TRACESETTLE_PORT`` then 8000.
+
+SERVE_HOST = os.environ.get("TRACESETTLE_HOST", "127.0.0.1")
+SERVE_PORT = int(os.environ.get("TRACESETTLE_PORT") or os.environ.get("PORT") or "8000")
+
+
+# ---------------------------------------------------------------------------
 # Chain / RPC map
 # ---------------------------------------------------------------------------
 
@@ -141,7 +172,11 @@ CHAIN_DISPLAY_NAMES: dict[str, str] = {
 
 @dataclass(frozen=True)
 class ChainRpc:
-    """A public JSON-RPC endpoint for one chain."""
+    """A public JSON-RPC endpoint for one chain.
+
+    ``url`` is the primary endpoint. ``fallback_urls`` are tried in order when
+    the primary does not know a transaction (free public nodes prune history).
+    """
 
     chain: str
     display_name: str
@@ -149,9 +184,23 @@ class ChainRpc:
     kind: str  # "evm" | "near"
     explorer_tx_url: str
     chain_id: int | None = None  # EVM chain id, verified via eth_chainId
+    fallback_urls: tuple[str, ...] = ()
+
+    def endpoints(self) -> tuple[str, ...]:
+        """Primary endpoint first, then fallbacks, de-duplicated and ordered."""
+        ordered = (self.url, *self.fallback_urls)
+        seen: set[str] = set()
+        unique: list[str] = []
+        for url in ordered:
+            if url and url not in seen:
+                seen.add(url)
+                unique.append(url)
+        return tuple(unique)
 
 
-def _evm(chain: str, url: str, explorer: str, chain_id: int) -> ChainRpc:
+def _evm(
+    chain: str, url: str, explorer: str, chain_id: int, fallbacks: tuple[str, ...] = ()
+) -> ChainRpc:
     return ChainRpc(
         chain=chain,
         display_name=CHAIN_DISPLAY_NAMES.get(chain, chain),
@@ -159,21 +208,81 @@ def _evm(chain: str, url: str, explorer: str, chain_id: int) -> ChainRpc:
         kind="evm",
         explorer_tx_url=explorer,
         chain_id=chain_id,
+        fallback_urls=fallbacks,
     )
 
 
 #: Only chains with a *verified* public RPC are listed. Anything else must be
 #: reported as UNAVAILABLE — never as FAILED.
+#:
+#: Free ``publicnode.com`` endpoints prune history (the primary window is about
+#: two days), so an older receipt returns a null result even though the
+#: transaction exists. Each chain therefore carries archive-capable fallbacks;
+#: a fallback answer is validated by exactly the same checks as the primary.
 EVM_RPC_MAP: dict[str, ChainRpc] = {
-    "eth": _evm("eth", "https://ethereum-rpc.publicnode.com", "https://etherscan.io/tx/", 1),
-    "arb": _evm("arb", "https://arbitrum-one-rpc.publicnode.com", "https://arbiscan.io/tx/", 42161),
-    "base": _evm("base", "https://base-rpc.publicnode.com", "https://basescan.org/tx/", 8453),
-    "op": _evm("op", "https://optimism-rpc.publicnode.com", "https://optimistic.etherscan.io/tx/", 10),
-    "pol": _evm("pol", "https://polygon-bor-rpc.publicnode.com", "https://polygonscan.com/tx/", 137),
-    "bsc": _evm("bsc", "https://bsc-rpc.publicnode.com", "https://bscscan.com/tx/", 56),
-    "avax": _evm("avax", "https://avalanche-c-chain-rpc.publicnode.com", "https://snowtrace.io/tx/", 43114),
-    "gnosis": _evm("gnosis", "https://gnosis-rpc.publicnode.com", "https://gnosisscan.io/tx/", 100),
-    "scroll": _evm("scroll", "https://scroll-rpc.publicnode.com", "https://scrollscan.com/tx/", 534352),
+    "eth": _evm(
+        "eth",
+        "https://ethereum-rpc.publicnode.com",
+        "https://etherscan.io/tx/",
+        1,
+        ("https://eth.drpc.org", "https://eth-mainnet.public.blastapi.io"),
+    ),
+    "arb": _evm(
+        "arb",
+        "https://arbitrum-one-rpc.publicnode.com",
+        "https://arbiscan.io/tx/",
+        42161,
+        ("https://arbitrum.drpc.org",),
+    ),
+    "base": _evm(
+        "base",
+        "https://base-rpc.publicnode.com",
+        "https://basescan.org/tx/",
+        8453,
+        ("https://base.drpc.org",),
+    ),
+    "op": _evm(
+        "op",
+        "https://optimism-rpc.publicnode.com",
+        "https://optimistic.etherscan.io/tx/",
+        10,
+        ("https://optimism.drpc.org",),
+    ),
+    "pol": _evm(
+        "pol",
+        "https://polygon-bor-rpc.publicnode.com",
+        "https://polygonscan.com/tx/",
+        137,
+        ("https://polygon.drpc.org",),
+    ),
+    "bsc": _evm(
+        "bsc",
+        "https://bsc-rpc.publicnode.com",
+        "https://bscscan.com/tx/",
+        56,
+        ("https://bsc.drpc.org",),
+    ),
+    "avax": _evm(
+        "avax",
+        "https://avalanche-c-chain-rpc.publicnode.com",
+        "https://snowtrace.io/tx/",
+        43114,
+        ("https://avalanche.drpc.org",),
+    ),
+    "gnosis": _evm(
+        "gnosis",
+        "https://gnosis-rpc.publicnode.com",
+        "https://gnosisscan.io/tx/",
+        100,
+        ("https://gnosis.drpc.org",),
+    ),
+    "scroll": _evm(
+        "scroll",
+        "https://scroll-rpc.publicnode.com",
+        "https://scrollscan.com/tx/",
+        534352,
+        ("https://scroll.drpc.org",),
+    ),
 }
 
 NEAR_RPC = ChainRpc(
@@ -182,6 +291,7 @@ NEAR_RPC = ChainRpc(
     url=NEAR_RPC_URL,
     kind="near",
     explorer_tx_url="https://nearblocks.io/txns/",
+    fallback_urls=NEAR_RPC_FALLBACK_URLS,
 )
 
 #: Bitcoin is not an EVM chain and has no JSON-RPC receipt method, so it is kept

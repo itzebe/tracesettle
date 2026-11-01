@@ -505,3 +505,55 @@ Two launch-critical defects found in review, both fixed with regression tests.
   response to be `200`/`503`, at least one `200` (so the pass is not vacuous),
   and recovery afterwards. Verified 30/30; the refusal path is genuinely
   exercised (4 refusals observed over 720 requests).
+
+## Archive RPC fallbacks + container deployment (remediation)
+
+Live data drift: free public RPCs prune history, so the reference case stopped
+verifying. The primary `publicnode.com` endpoint returns a **null receipt** for
+the ETH→USDC origin (`0xfca11a…`, older than its ~2-day window) and
+`free.rpc.fastnear.com` answers `UNKNOWN_TRANSACTION` for the historical NEAR
+settlement. Both fixes below are additive; `reconcile.py` and the evidence model
+are untouched, so no verification rule was weakened.
+
+- **EVM archive fallbacks.** `ChainRpc` gained `fallback_urls` and an
+  `endpoints()` helper (primary first, de-duplicated). `EVM_RPC_MAP` now lists
+  archive-capable endpoints per chain (`eth.drpc.org` and
+  `eth-mainnet.public.blastapi.io` for `eth`; `…drpc.org` for the rest).
+  `evm_rpc.fetch_receipt` walks the endpoints in order.
+- **NEAR archive fallback.** `NEAR_RPC_FALLBACK_URLS` (comma-separated,
+  `TRACESETTLE_NEAR_RPC_FALLBACK_URL`, default `archival-rpc.mainnet.near.org`)
+  is attached to `NEAR_RPC`. `near_rpc.fetch_tx` walks endpoints *and* signers.
+- **Fallback answers are validated identically.** A fallback record passes the
+  same identity/recipient/transfer checks as the primary. A wrong EVM hash is
+  `MALFORMED` and is **not** retried elsewhere (never mis-correlated); a
+  wrong-recipient fallback receipt yields a non-`CONFIRMED` transfer check.
+- **Honest uncertainty is preserved.** Only a definitive `NOT_FOUND` tries the
+  next endpoint; an unreachable endpoint (`TIMEOUT`/`RATE_LIMITED`/…) short-
+  circuits — with the source down we cannot tell "absent" from "unknown", and
+  fanning out on an outage only adds load. A miss on *every* endpoint stays
+  `NOT_FOUND`; an outage stays `UNAVAILABLE`. Neither is ever `FAILED`.
+- **Live result.** With the fallbacks, the reference case
+  (`0xB741c00f6D63b6dEd0cCADA1a82bCBADc38A572B`) reproduces `SETTLED_VERIFIED`
+  with all four stages `CONFIRMED`; the EVM origin is fetched from `eth.drpc.org`
+  and the NEAR settlement from `archival-rpc.mainnet.near.org`.
+- **NEAR archive caveat (unchanged).** The free archive is deprecated and
+  rate-limits hard (HTTP 429). Under a burst the NEAR stage degrades to
+  `UNAVAILABLE`/`REPORTED` (outcome `DELIVERY_UNVERIFIED`), never to a false
+  confirmation. Set `TRACESETTLE_NEAR_RPC_FALLBACK_URL` to a paid archive node
+  for reliable historical lookups.
+- **Container deployment.** Added a minimal non-root `Dockerfile` (uid 10001,
+  `HEALTHCHECK` probes `/api/health`, `EXPOSE 8000`) and `.dockerignore`. Runtime
+  stays zero-dependency, so the image needs no `pip install`. `serve` now reads
+  `TRACESETTLE_HOST` and `PORT`/`TRACESETTLE_PORT` from the environment, so the
+  image runs unchanged on Render/Fly/Railway/Cloud Run. Verified: image builds,
+  runs non-root, reports `healthy`, and a live `POST /api/investigate` through
+  the container returns `SETTLED_VERIFIED`.
+- **Tests:** 355 → **372 passed**. New `tests/test_cli.py` (8: serve defaults and
+  env-driven host/port/fallback) and 9 archive-fallback tests in
+  `tests/test_adapters.py`. pyflakes clean; compileall OK; offline demo
+  byte-identical to baseline `2b0213f4…`.
+- **Provenance note.** This work reproduces the *content* of a local remediation
+  commit (`639e032`) that was created in an earlier sandbox and never pushed; the
+  commit object itself is unrecoverable (not on any remote, fork, or local
+  object store). It is re-implemented here on top of `a145a89` and independently
+  re-verified live.
