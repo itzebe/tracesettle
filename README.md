@@ -533,9 +533,11 @@ variable and all documented in `docs/TRANSACTION_SECURITY.md`:
   `TRACESETTLE_GUARD_MAX_BODY_BYTES` (8 KiB) and rejected before being read.
 - **Per-client rate limiting on guard routes**, keyed on the socket peer address
   so a spoofed `X-Forwarded-For` cannot bypass it; `429` carries `Retry-After`.
-- **Bounded in-memory state.** Audit records, monitor events, incidents, and the
+- **Bounded state.** Audit records, monitor events, incidents, and the
   replay-nonce store all have explicit caps, so a flood cannot exhaust memory.
-- **Structural invariants, checked by execution.** Twelve guarantees at
+  When durable state is configured, spent nonces and the limit counters live in
+  SQLite instead, so they survive a restart (see **Durable state** below).
+- **Structural invariants, checked by execution.** Fifteen guarantees at
   `GET /api/guard/invariants`, each mutation-tested so a checker that cannot fail
   is treated as a defect.
 - **Honest audit claim.** In-place modification of an audit record is detectable;
@@ -580,6 +582,38 @@ the identity its credential was issued for:
   mounted file). When no store is configured, the loopback development workflow
   is unchanged.
 
+### Durable state
+
+A spent authorization nonce and a service's velocity/volume counters decide
+whether the next transaction is allowed. Kept only in process memory, they are
+lost on a restart: a spent nonce becomes valid again and a limit resets to zero.
+Setting `TRACESETTLE_GUARD_STATE_DB` moves that state into a SQLite file
+(standard library only), so it survives a restart:
+
+```sh
+TRACESETTLE_GUARD_STATE_DB=/var/lib/tracesettle/guard.db \
+TRACESETTLE_GUARD_AUTH_KEY=$(python3 -c "import secrets;print(secrets.token_hex(32))") \
+TRACESETTLE_API_KEY=change-me \
+python3 -m tracesettle serve --host 0.0.0.0 --port 8000
+```
+→ a token signed once is refused as `REPLAYED` after a restart, and a spending
+limit is still enforced after a restart. Unset, the guard keeps its in-memory
+stores and the loopback development workflow is unchanged; the console and
+`GET /api/guard/metrics` report the backend (`sqlite` or `in-memory`) so an
+operator can see whether the run is durable.
+
+- **Fail closed.** A store error yields `HOLD` with no authorization, never
+  `ALLOW`. A database that cannot be opened stops start-up rather than running
+  with a silently degraded control. A failed write latches the store degraded, so
+  a limit that could not be persisted is never silently unenforced.
+- **Atomic.** The counter read, the decision, and the counter write happen in one
+  transaction, so two concurrent requests cannot both pass a limit; the nonce is
+  a primary key, so exactly one use can win.
+- **Single instance.** A SQLite file is durable state for one application
+  instance, not multi-instance shared state. For several replicas, implement the
+  narrow `GuardStateStore` interface against a shared database. Design and scope
+  are in `docs/DURABLE_STATE.md`.
+
 ### Fail-closed startup
 
 Authentication is not optional on a public interface: the process refuses to
@@ -611,13 +645,18 @@ credentials (see **Fail-closed startup**):
 ```sh
 docker build -t tracesettle .
 docker run --rm -p 8000:8000 \
+  -v tracesettle-state:/data \
+  -e TRACESETTLE_GUARD_STATE_DB=/data/guard.db \
   -e TRACESETTLE_API_KEY=change-me \
   -e TRACESETTLE_GUARD_AUTH_KEY=$(python3 -c "import secrets;print(secrets.token_hex(32))") \
   tracesettle
 curl http://127.0.0.1:8000/api/health
 ```
 → the same image with neither credential exits `2` with
-`refusing to start: ... requires authentication` instead of serving.
+`refusing to start: ... requires authentication` instead of serving. The named
+volume makes the durable state survive container replacement; drop it (and the
+`TRACESETTLE_GUARD_STATE_DB` variable) to run with in-memory state. The container
+user is uid `10001`, so the mounted volume must be writable by it.
 
 `serve` reads its defaults from the environment, so the image needs no flags on
 a container platform: `TRACESETTLE_HOST` (default `127.0.0.1`; the image sets

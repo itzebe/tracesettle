@@ -11,6 +11,14 @@ credentials.json
 *.creds.json.lock
 credentials.json.lock
 
+# Durable guard-state database (spent nonces, counters). Never a build artefact.
+guard-state.db
+guard-state.db-wal
+guard-state.db-shm
+*.state.db
+*.state.db-wal
+*.state.db-shm
+
 # Python
 __pycache__/
 *.py[cod]

@@ -31,13 +31,14 @@ from .authorization import (
 from .model import (
     ASSERTED_APPROVAL_FIELDS,
     AmountError,
-
     ControlOutcome,
+    ControlResult,
     Decision,
     EvaluationContext,
     FindingSeverity,
     GuardDecision,
     RequestFingerprint,
+    RiskFinding,
     SignResult,
     TransactionRequest,
     canonical_fields,
@@ -48,6 +49,15 @@ from .monitor import SecurityMonitor
 from .policy import DEFAULT_POLICY, PolicyConfig
 from .rules import evaluate_controls
 from .signer import ReferenceSigner, SignRequest
+from .state import (
+    EVENT_AUTHORIZATION_ISSUED,
+    EVENT_DECISION,
+    EVENT_SIGNER,
+    OUTCOME_BLOCK,
+    OUTCOME_EXECUTED,
+    GuardStateStore,
+    StateStoreError,
+)
 
 _SERVICE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
 _OPERATION_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,31}$")
@@ -199,10 +209,15 @@ class GuardService:
         monitor: SecurityMonitor | None = None,
         audit: AuditLog | None = None,
         signer: ReferenceSigner | None = None,
+        state_store: GuardStateStore | None = None,
     ) -> None:
         self.policy = policy or DEFAULT_POLICY
         self.audit = audit or AuditLog()
         self.monitor = monitor or SecurityMonitor()
+        #: When set, the counters that decide velocity, volume, and rejection
+        #: limits are read from and written to durable storage, so a restart does
+        #: not reset a limit. When None the guard keeps its in-memory behaviour.
+        self.state_store = state_store
         self.authority = authority or AuthorizationAuthority(
             replay_store=InMemoryReplayStore(),
             ttl_seconds=self.policy.authorization_ttl_seconds,
@@ -214,6 +229,8 @@ class GuardService:
 
     def _context(self, request: TransactionRequest) -> EvaluationContext:
         window = self.policy.window_seconds
+        if self.state_store is not None:
+            return self._durable_context(request, window)
         return EvaluationContext(
             recent_request_count=self._service_request_count(request.service_id, window),
             recent_blocked_count=self.monitor.recent_blocked_count(
@@ -223,6 +240,47 @@ class GuardService:
                 request.service_id, window_seconds=window
             ),
             window_volume=self._volume.totals(window_seconds=window),
+            now=_utc_now(),
+        )
+
+    def _durable_context(self, request: TransactionRequest, window: int) -> EvaluationContext:
+        """Build the context from durable counters.
+
+        Raises :class:`StateStoreError` on a database problem; :meth:`evaluate`
+        turns that into a fail-closed HOLD rather than evaluating against an
+        empty (and therefore permissive) context.
+        """
+        cutoff = (datetime.now(timezone.utc) - timedelta(seconds=window)).timestamp()
+        events = self.state_store.events_since(since=cutoff)  # type: ignore[union-attr]
+        request_count = 0
+        blocked_count = 0
+        rejected_count = 0
+        volume: dict[str, Decimal] = {}
+        for event in events:
+            if event.kind == EVENT_DECISION:
+                if event.service_id != request.service_id:
+                    continue
+                request_count += 1
+                if event.outcome == OUTCOME_BLOCK:
+                    blocked_count += 1
+            elif event.kind == EVENT_AUTHORIZATION_ISSUED:
+                if event.service_id != request.service_id:
+                    continue
+                asset = (event.asset or "").strip().upper()
+                if asset and event.amount is not None:
+                    key = f"{request.service_id}:{asset}"
+                    volume[key] = volume.get(key, Decimal(0)) + event.amount
+            elif event.kind == EVENT_SIGNER:
+                if event.outcome == OUTCOME_EXECUTED:
+                    continue
+                if event.service_id != request.service_id:
+                    continue
+                rejected_count += 1
+        return EvaluationContext(
+            recent_request_count=request_count,
+            recent_blocked_count=blocked_count,
+            recent_rejected_authorizations=rejected_count,
+            window_volume=volume,
             now=_utc_now(),
         )
 
@@ -238,7 +296,31 @@ class GuardService:
         return count
 
     def evaluate(self, request: TransactionRequest) -> GuardDecision:
-        """Run the controls, decide, and (on ALLOW) issue an authorization."""
+        """Run the controls, decide, and (on ALLOW) issue an authorization.
+
+        When a durable store is configured, the entire read-decide-record cycle
+        runs in one database transaction (``BEGIN IMMEDIATE``). That is what stops
+        two concurrent evaluations from both reading an empty window and both
+        authorizing past the limit. A store error anywhere in the cycle rolls the
+        transaction back and yields a fail-closed HOLD, so no authorization is
+        issued against state that could not be read.
+        """
+        if self.state_store is None:
+            return self._finalize(request, self._evaluate_locked(request))
+        try:
+            with self.state_store.decision_cycle():
+                result = self._evaluate_locked(request)
+        except StateStoreError as exc:
+            return self._fail_closed(request, exc)
+        return self._finalize(request, result)
+
+    def _evaluate_locked(self, request: TransactionRequest) -> GuardDecision:
+        """The body of a decision: read counters, run controls, claim, issue.
+
+        Pure with respect to the process-local monitor and audit log; those are
+        written by :meth:`_finalize` only after the durable transaction commits,
+        so a rolled-back decision is never recorded as if it had happened.
+        """
         ctx = self._context(request)
         controls = evaluate_controls(request, self.policy, ctx)
         findings = tuple(f for control in controls for f in control.findings)
@@ -246,6 +328,23 @@ class GuardService:
         risk_level = _worst_severity(findings)
         decision_id = f"dec_{secrets.token_hex(10)}"
         created_at = _utc_now()
+
+        # Idempotency: an ALLOW with a client idempotency key is claimed durably
+        # before the authorization is issued, so a retried request cannot obtain a
+        # second token or be accounted twice. A key already claimed is a duplicate.
+        if decision is Decision.ALLOW and request.idempotency_key and self.state_store is not None:
+            key = f"{request.service_id}:{request.idempotency_key}"
+            if not self.state_store.remember_decision(key, decision_id):
+                return _build_hold_decision(
+                    request,
+                    code="DUPLICATE_REQUEST",
+                    title="Duplicate request (idempotency key already used)",
+                    detail=(
+                        f"Idempotency key '{request.idempotency_key}' was already decided for "
+                        f"'{request.service_id}'; no second authorization is issued."
+                    ),
+                    severity=FindingSeverity.MEDIUM,
+                )
 
         authorization = None
         if decision is Decision.ALLOW:
@@ -290,24 +389,31 @@ class GuardService:
             simulated=request.simulated,
         )
 
-        if authorization is not None:
-            self.monitor.record_authorization_issued(request.service_id, authorization.authorization_id)
-            self._volume.add(request.service_id, request.asset.strip().upper(), request.amount)
+        if self.state_store is not None:
+            self._record_durable_decision(request, decision, authorization)
+        return result
 
+    def _finalize(self, request: TransactionRequest, result: GuardDecision) -> GuardDecision:
+        """Record a decided result in the process-local monitor and the audit log."""
+        if result.authorization is not None:
+            self.monitor.record_authorization_issued(
+                request.service_id, result.authorization.authorization_id
+            )
+            self._volume.add(request.service_id, request.asset.strip().upper(), request.amount)
         self.monitor.record_decision(result)
         self.audit.append(
             event_type="DECISION",
             actor=request.service_id,
-            outcome=decision.value,
-            detail=summary,
+            outcome=result.decision.value,
+            detail=result.summary,
             request_id=request.request_id,
-            decision_id=decision_id,
-            authorization_id=authorization.authorization_id if authorization else None,
+            decision_id=result.decision_id,
+            authorization_id=result.authorization.authorization_id if result.authorization else None,
             service_id=request.service_id,
             extra={
-                "risk_level": risk_level.value,
-                "finding_codes": [f.code for f in findings],
-                "controls": {c.code: c.outcome.value for c in controls},
+                "risk_level": result.risk_level.value,
+                "finding_codes": [f.code for f in result.findings],
+                "controls": {c.code: c.outcome.value for c in result.controls},
                 "simulated": request.simulated,
             },
         )
@@ -315,6 +421,62 @@ class GuardService:
 
     def evaluate_payload(self, payload: dict[str, Any], *, simulated: bool = False) -> GuardDecision:
         return self.evaluate(request_from_payload(payload, simulated=simulated))
+
+    # -- durable counters ---------------------------------------------------
+
+    def _record_durable_decision(self, request, decision, authorization) -> None:
+        """Append the durable counter events for one decision.
+
+        The volume event is written only when an authorization was issued, so a
+        duplicate or failed evaluation can never be accounted twice. The
+        idempotency claim (if any) was made earlier in :meth:`_evaluate_locked`.
+
+        A :class:`StateStoreError` is deliberately **not** caught here: this runs
+        inside the decision transaction, so raising rolls the whole decision back
+        and :meth:`evaluate` turns it into a fail-closed HOLD. A decision whose
+        counters could not be persisted must not become an authorization.
+        """
+        self.state_store.record_event(  # type: ignore[union-attr]
+            kind=EVENT_DECISION,
+            service_id=request.service_id,
+            outcome=decision.value,
+        )
+        if authorization is not None:
+            self.state_store.record_event(  # type: ignore[union-attr]
+                kind=EVENT_AUTHORIZATION_ISSUED,
+                service_id=request.service_id,
+                asset=request.asset.strip().upper(),
+                amount=request.amount,
+            )
+
+    def _fail_closed(self, request: TransactionRequest, exc: StateStoreError) -> GuardDecision:
+        """Return a HOLD decision when the durable state store cannot be read.
+
+        This is the fail-closed path: without the counters we cannot prove the
+        request is within its limits, so we never ALLOW. No authorization is
+        issued, so a signer that consults TraceSettle refuses.
+        """
+        detail = (
+            "The durable authorization state store could not be read, so velocity, "
+            "volume, and rejection limits cannot be enforced. The request is held."
+        )
+        result = _build_hold_decision(
+            request,
+            code="STATE_STORE_UNAVAILABLE",
+            title="Durable state store unavailable",
+            detail=detail,
+            severity=FindingSeverity.HIGH,
+        )
+        self.monitor.open_incident(
+            code="STATE_STORE_UNAVAILABLE",
+            severity=FindingSeverity.HIGH,
+            title="Durable state store unavailable",
+            detail=str(exc),
+            service_id=request.service_id,
+            request_id=request.request_id,
+            decision_id=result.decision_id,
+        )
+        return self._finalize(request, result)
 
     # -- signing ------------------------------------------------------------
 
@@ -358,6 +520,22 @@ class GuardService:
             detail=result.detail,
             request_id=result.request_id,
         )
+        if self.state_store is not None:
+            try:
+                self.state_store.record_event(
+                    kind=EVENT_SIGNER,
+                    service_id=result.service_id or "unknown",
+                    outcome=result.outcome.value,
+                )
+            except StateStoreError:
+                self.monitor.open_incident(
+                    code="STATE_STORE_UNAVAILABLE",
+                    severity=FindingSeverity.HIGH,
+                    title="Durable state store write failed",
+                    detail="A signer counter event could not be persisted; the next evaluation will fail closed.",
+                    service_id=result.service_id,
+                    request_id=result.request_id,
+                )
         self.audit.append(
             event_type="SIGNING",
             actor=result.service_id or "unknown",
@@ -386,6 +564,15 @@ class GuardService:
             "key_id": self.authority.key_id,
             "ephemeral_key": self.authority.ephemeral,
             "ttl_seconds": self.authority.ttl_seconds,
+        }
+        metrics["state"] = {
+            "backend": "sqlite" if self.state_store is not None else "in-memory",
+            "durable": self.state_store is not None,
+            "note": (
+                "durable single-instance state"
+                if self.state_store is not None
+                else "process-local: spent nonces and counters reset on restart"
+            ),
         }
         metrics["audit"] = {
             "length": len(self.audit),
@@ -418,6 +605,65 @@ class GuardService:
     @property
     def signer(self) -> ReferenceSigner:
         return self._signer
+
+
+def _build_hold_decision(
+    request: TransactionRequest,
+    *,
+    code: str,
+    title: str,
+    detail: str,
+    severity: FindingSeverity,
+) -> GuardDecision:
+    """Build a HOLD decision with no authorization, for the guard's refuse paths.
+
+    Used where the guard cannot (or must not) authorize: an unreadable state
+    store, a duplicate request, or any future control that can only refuse. The
+    decision is recorded by the caller, not here, so it travels through the same
+    finalize path as a normal decision.
+    """
+    decision_id = f"dec_{secrets.token_hex(10)}"
+    finding = RiskFinding(
+        code=code,
+        severity=severity,
+        title=title,
+        detail=detail,
+        policy="durable state",
+        observed={},
+    )
+    control = ControlResult(
+        code="STATE_STORE",
+        title=title,
+        outcome=ControlOutcome.HOLD,
+        detail=detail,
+        policy="durable state",
+        findings=(finding,),
+    )
+    return GuardDecision(
+        decision_id=decision_id,
+        created_at=_utc_now(),
+        request=request,
+        decision=Decision.HOLD,
+        fingerprint=fingerprint_of(
+            canonical_fields(
+                service_id=request.service_id,
+                operation=request.operation,
+                chain=request.chain,
+                asset=request.asset,
+                amount=request.amount,
+                destination=request.destination,
+            )
+        ),
+        risk_level=severity,
+        summary=f"Held: {request.amount_raw} {request.asset} to {request.destination} for "
+        f"'{request.service_id}' could not be authorized.",
+        explanation=detail,
+        controls=(control,),
+        findings=(finding,),
+        applicable_policies=("durable state",),
+        authorization=None,
+        simulated=request.simulated,
+    )
 
 
 def _worst_decision(controls) -> Decision:

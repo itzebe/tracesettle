@@ -42,6 +42,7 @@ from .model import (
     canonical_fields,
     fingerprint_of,
 )
+from .state import StateStoreError
 
 AUTHORIZATION_VERSION = "ts-auth-v1"
 MIN_KEY_BYTES = 32
@@ -291,8 +292,8 @@ class AuthorizationAuthority:
         key: bytes | None = None,
         key_id: str | None = None,
         ephemeral: bool | None = None,
-        replay_store: InMemoryReplayStore | None = None,
-        revocations: RevocationStore | None = None,
+        replay_store: "ReplayStore | None" = None,
+        revocations: "RevocationStore | None" = None,
         ttl_seconds: int = DEFAULT_TTL_SECONDS,
         clock: "callable[[], datetime] | None" = None,
     ) -> None:
@@ -451,13 +452,6 @@ class AuthorizationAuthority:
                 service_id=token.service_id,
                 authorization_id=token.authorization_id,
             )
-        if self._revocations.is_revoked(token.authorization_id):
-            return AuthVerification(
-                AuthState.REVOKED,
-                "the authorization has been revoked",
-                service_id=token.service_id,
-                authorization_id=token.authorization_id,
-            )
         if not token.nonce:
             return AuthVerification(
                 AuthState.MALFORMED,
@@ -465,16 +459,30 @@ class AuthorizationAuthority:
                 service_id=token.service_id,
                 authorization_id=token.authorization_id,
             )
-        if consume:
-            until = expires.timestamp()
-            if not self._replay.consume(token.nonce, until):
-                return AuthVerification(
-                    AuthState.REPLAYED,
-                    "this authorization has already been used (nonce replay)",
-                    service_id=token.service_id,
-                    authorization_id=token.authorization_id,
-                )
-        elif self._replay.is_consumed(token.nonce):
+        try:
+            revoked = self._revocations.is_revoked(token.authorization_id)
+            if not revoked:
+                if consume:
+                    consumed_ok = self._replay.consume(token.nonce, expires.timestamp())
+                else:
+                    consumed_ok = not self._replay.is_consumed(token.nonce)
+        except StateStoreError:
+            # A durable-state failure must fail closed: we cannot prove the nonce
+            # is unspent, so we refuse rather than assume it is unused.
+            return AuthVerification(
+                AuthState.STATE_STORE_UNAVAILABLE,
+                "the authorization state store is unavailable; refusing to validate",
+                service_id=token.service_id,
+                authorization_id=token.authorization_id,
+            )
+        if revoked:
+            return AuthVerification(
+                AuthState.REVOKED,
+                "the authorization has been revoked",
+                service_id=token.service_id,
+                authorization_id=token.authorization_id,
+            )
+        if not consumed_ok:
             return AuthVerification(
                 AuthState.REPLAYED,
                 "this authorization has already been used (nonce replay)",
@@ -496,7 +504,7 @@ class AuthorizationAuthority:
         self._revocations.revoke(authorization_id, time.time() + ttl + 30)
 
     @property
-    def replay_store(self) -> InMemoryReplayStore:
+    def replay_store(self) -> Any:
         return self._replay
 
 

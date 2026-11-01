@@ -18,8 +18,9 @@ WORKDIR /app
 COPY tracesettle/ ./tracesettle/
 COPY README.md ./
 
-# Create an unprivileged user and drop to it. The tool never writes to the
-# filesystem, so the whole tree stays read-only to the process.
+# Create an unprivileged user and drop to it. With durable guard state unset the
+# tool writes nothing to the filesystem; to enable durable state, mount a volume
+# writable by this uid and point TRACESETTLE_GUARD_STATE_DB at it.
 RUN useradd --create-home --uid 10001 tracesettle \
     && chown -R tracesettle:tracesettle /app
 USER tracesettle

@@ -137,6 +137,9 @@ class AuthState(str, enum.Enum):
     REPLAYED = "REPLAYED"
     REVOKED = "REVOKED"
     NON_AUTHORIZING_DECISION = "NON_AUTHORIZING_DECISION"
+    #: The durable state store could not be read, so single-use/replay could not
+    #: be proven. A refusal, never an acceptance.
+    STATE_STORE_UNAVAILABLE = "STATE_STORE_UNAVAILABLE"
 
     @property
     def valid(self) -> bool:
