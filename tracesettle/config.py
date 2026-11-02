@@ -145,6 +145,34 @@ GUARD_STATE_RETENTION_SECONDS = float(
     os.environ.get("TRACESETTLE_GUARD_STATE_RETENTION_SECONDS", "86400")
 )
 
+#: Which durable backend to use: ``auto`` (default), ``memory``, ``sqlite``, or
+#: ``postgresql``. ``auto`` selects PostgreSQL when a DSN is configured, else SQLite
+#: when a path is configured, else the in-memory stores (the loopback default).
+#: There is no silent fallback: ``sqlite``/``postgresql`` with missing configuration
+#: stop start-up rather than degrading.
+GUARD_STATE_BACKEND = (os.environ.get("TRACESETTLE_GUARD_STATE_BACKEND") or "auto").strip().lower()
+
+#: PostgreSQL connection string for shared multi-instance guard state. This is a
+#: SECRET (it may carry a password); it is never logged, printed, or returned. Set
+#: it only when using the PostgreSQL backend.
+GUARD_STATE_PG_DSN = os.environ.get("TRACESETTLE_GUARD_STATE_PG_DSN") or None
+GUARD_STATE_PG_CONNECT_TIMEOUT_S = int(
+    os.environ.get("TRACESETTLE_GUARD_STATE_PG_CONNECT_TIMEOUT_S", "10")
+)
+GUARD_STATE_PG_STATEMENT_TIMEOUT_MS = int(
+    os.environ.get("TRACESETTLE_GUARD_STATE_PG_STATEMENT_TIMEOUT_MS", "5000")
+)
+
+#: Production guard: require the PostgreSQL backend. When set, start-up refuses to
+#: run with an in-memory or SQLite backend, so a deployment cannot silently lose
+#: shared authorization state. There is no override.
+GUARD_REQUIRE_POSTGRES = (os.environ.get("TRACESETTLE_GUARD_REQUIRE_POSTGRES") or "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+
 #: Per-client-IP budget for the guard endpoints. Tighter than the investigation
 #: endpoint: these endpoints make no outbound calls, so a high rate is abusive.
 GUARD_RATE_LIMIT_PER_MINUTE = int(os.environ.get("TRACESETTLE_GUARD_RATE_LIMIT_PER_MINUTE", "120"))

@@ -767,3 +767,101 @@ Adversarial review of PR #5 found one real defect; it is fixed on the same branc
 - **Docs:** `docs/DURABLE_STATE.md` §5 documents schema v2, the index rationale,
   and the retention rule; §8 adds the retention variable; README gains a
   **Bounded** bullet and the current count (699).
+
+## PostgreSQL shared guard state (multi-instance durable authorization)
+
+Adds an opt-in, shared durable-state backend so several TRACESETTLE instances
+enforce one set of nonces, revocations, counters, and idempotency records. The
+default (SQLite/in-memory) path and the settlement engine are unchanged.
+
+- **New module `tracesettle/guard/state_pg.py`** — `PostgresGuardStateStore` +
+  `open_postgres_state_store`. `psycopg` is imported **lazily** (inside the
+  factory and constructor), so the package still imports nothing third-party at
+  module load and the default image stays dependency-free. Selecting the
+  PostgreSQL backend without the driver is a hard startup error, never a silent
+  downgrade. Schema version 2, same table/index shape as SQLite
+  (`BIGSERIAL`/`DOUBLE PRECISION`, `amount` as TEXT).
+- **Atomicity, not a retry loop.** SQLite uses `BEGIN IMMEDIATE`; PostgreSQL has
+  no equivalent, so `decision_cycle()` takes a transaction-scoped advisory lock
+  (`pg_advisory_xact_lock(_DECISION_LOCK_KEY)`) with a bounded `SET LOCAL
+  lock_timeout`. A second instance waits, then reads the winner's committed
+  counters — deterministic, no re-run. Exceeding the wait is a fail-closed
+  `StateStoreConflict`. Retryable SQLSTATEs `{40001, 40P01, 55P03}`.
+- **Fail closed, and honest about failure.** A broken store raises
+  `StateStoreError` → the guard returns `HOLD` with no authorization, and **never
+  falls back to in-memory** (a silent fallback reintroduces the replay the shared
+  store exists to prevent). A *dropped connection* is not a broken store: the next
+  call reconnects (`_prepare`), so a transient blip does not take an instance out
+  of service; a non-connection write failure still latches `_degraded` until
+  restart. `_read_cursor` and `_raise_for` translate driver errors so no
+  `psycopg` exception escapes the module; the DSN is never logged or put in an
+  exception message.
+- **Backend selection is explicit.** `open_state_store(path, *, backend="auto",
+  pg_dsn=None, ...)` — `auto` (DSN→PG, path→SQLite, else memory), `sqlite`,
+  `postgresql`, `memory`. `TRACESETTLE_GUARD_REQUIRE_POSTGRES=1` makes any
+  non-PostgreSQL selection a startup error (no override). Config knobs in
+  `config.py`: `GUARD_STATE_BACKEND`, `GUARD_STATE_PG_DSN`,
+  `GUARD_STATE_PG_CONNECT_TIMEOUT_S`, `GUARD_STATE_PG_STATEMENT_TIMEOUT_MS`,
+  `GUARD_REQUIRE_POSTGRES`. `ui._build_guard_service` threads them through;
+  `guard/service.py` reports `state.backend` via `getattr(store, "backend", ...)`.
+- **New invariant (16 total):** `postgres_shared_state_refuses_cross_instance_replay`.
+  It is exercised for real only when `TRACESETTLE_GUARD_STATE_PG_DSN` is set;
+  otherwise it reports `holds=True` but says plainly it was **not exercised**
+  (never claims a guarantee it did not verify), and it deletes the nonce it
+  consumes so an operator pinging `/api/guard/invariants` leaves no residue.
+- **Tests:** `tests/test_guard_postgres.py` (21, real server; skip without
+  `TRACESETTLE_TEST_PG_DSN`) and `tests/test_guard_state_backend.py` (12).
+  `tests/pg_helpers.py` holds the DSN/availability helpers. Fixtures live in the
+  test module (not imported from `pg_helpers`) because pyflakes flags
+  fixture-as-name imports as redefinitions.
+- **CI:** new `postgres` job with a `postgres:16` service runs the distributed
+  tests then the full suite. The AST import gate was relaxed to allow a
+  non-stdlib import **only** inside a function body and **only** from
+  `{psycopg}`; a module-level third-party import still fails the build.
+  `requirements-dev.txt` pins `psycopg[binary]==3.3.6` (dev/CI only).
+- **Docker:** `--build-arg TRACESETTLE_WITH_POSTGRES=1` adds the driver; the
+  default image is unchanged (verified: driver absent, still uid 10001 + healthy).
+- **Counts:** 739 tests (716 pass + 23 skip without a server; 739 pass with one);
+  pyflakes clean; compileall OK; offline demo byte-identical; default image
+  healthy non-root, refuses to start without credentials (exit 2), graceful
+  shutdown exit 0. Live two-container proof: token signed by instance A →
+  `EXECUTED`, same token on instance B → `REPLAYED`; DB stopped → `HOLD` with no
+  authorization; DB restarted → `ALLOW` (recovery).
+- **Local dev DB:** `docker run -d --name ts-pg -p 15432:5432 -e
+  POSTGRES_USER=ts -e POSTGRES_PASSWORD=devpass -e POSTGRES_DB=tsstate
+  postgres:16-alpine`; `TRACESETTLE_TEST_PG_DSN="host=127.0.0.1 port=15432
+  dbname=tsstate user=ts password=devpass"`.
+- **Not changed (verified correct):** the SQLite/in-memory decision parity, the
+  safety invariants, and the settlement engine.
+- **Independent adversarial security review (pre-merge), 2026-11-01.** Reviewed
+  PR #6 for practical bypasses (nonce replay, limit evasion, idempotency races,
+  revocation, cross-service substitution, migration races, every failure path).
+  **Two real defects found and fixed, each with a mutation-checked regression test:**
+  - **Mid-decision reconnect (state_pg.py).** `_prepare` reconnected whenever the
+    connection was closed, *including inside a `decision_cycle`*. A drop after the
+    idempotency claim re-ran the remaining writes on a new transaction without the
+    advisory lock and still returned `ALLOW`; the claim was lost, so the same key
+    was authorized twice. Fix: a connection lost mid-decision is not reconnected —
+    the decision fails closed (`HOLD`) and the store is not degraded; ordinary
+    (non-decision) calls still reconnect. The exception classification in
+    `decision_cycle` now treats a mid-decision `OperationalError`/`InterfaceError`
+    as non-retryable (fail-closed `StateStoreError`), not a retryable conflict.
+    Tests: `test_connection_drop_mid_decision_fails_closed_without_partial_state`,
+    `test_a_mid_decision_drop_does_not_leave_the_store_usable_for_partial_writes`.
+  - **Cross-service refusal attribution (signer.py + api.py).** A signer refusal
+    was counted against `token.service_id`, attacker-controlled on a forged token.
+    An authenticated attacker could name a victim service and, after
+    `max_rejected_authorizations` refusals, drive the victim into `HOLD`. Fix:
+    attribute to the verified requester (`request.expected_service_id or
+    transaction.service_id`), and bind `expected_service_id` in the guard API to
+    the authenticated caller, never a body field. Tests:
+    `test_refusal_is_attributed_to_the_requester_not_the_forged_token`,
+    `test_a_forged_token_cannot_drive_another_service_into_a_hold`,
+    `test_sign_refusal_is_attributed_to_the_authenticated_caller`.
+  - Everything else refused: concurrent single-token sign on 8 connections executed
+    once; 20-thread and 8-process races never exceeded the shared window; replayed
+    nonce/token, substituted parameters, wrong service, expired token all refused;
+    lock-timeout and statement-timeout failed closed without latching degraded.
+    Counts: **739 pass with PG / 716 pass + 23 skip without**; pyflakes clean;
+    compileall OK; 16/16 invariants hold; offline demo byte-identical; Docker
+    non-root (uid 10001) healthy, guard evaluate→sign→replay verified live.

@@ -25,6 +25,7 @@ from .model import AuthState, Decision, SignOutcome, canonical_fields
 from .policy import DEFAULT_POLICY
 from .service import GuardService
 from .signer import ReferenceSigner, SignRequest, SimulatedExecutor
+from .state import StateStoreError
 
 #: A fixed key so the checks are deterministic. Test material only.
 _INVARIANT_KEY = bytes(range(32))
@@ -531,6 +532,99 @@ def _state_store_failure_fails_closed() -> InvariantResult:
     )
 
 
+def _postgres_shared_state_refuses_cross_instance_replay() -> InvariantResult:
+    """With the PostgreSQL backend, a second instance refuses a spent nonce.
+
+    Honest about scope: this is only *checkable* when a PostgreSQL server is
+    configured (``TRACESETTLE_GUARD_STATE_PG_DSN``). With no server the check
+    reports ``holds=True`` but says plainly that it was not exercised, rather than
+    claiming a guarantee it did not verify. The shared-state property itself is
+    proven for real in ``tests/test_guard_postgres.py`` against a live server.
+    """
+    import os
+
+    dsn = os.environ.get("TRACESETTLE_GUARD_STATE_PG_DSN")
+    if not dsn:
+        return InvariantResult(
+            "postgres_shared_state_refuses_cross_instance_replay",
+            True,
+            "not exercised: no PostgreSQL server configured "
+            "(set TRACESETTLE_GUARD_STATE_PG_DSN to check it live)",
+        )
+    try:
+        from .state import DurableReplayStore
+        from .state_pg import PostgresGuardStateStore
+    except Exception as exc:  # noqa: BLE001
+        return InvariantResult(
+            "postgres_shared_state_refuses_cross_instance_replay",
+            False,
+            f"the PostgreSQL backend could not be imported: {type(exc).__name__}",
+        )
+    store_a = store_b = None
+    nonce: str | None = None
+    try:
+        store_a = PostgresGuardStateStore(dsn)
+        store_b = PostgresGuardStateStore(dsn)
+        authority_a = AuthorizationAuthority(
+            key=_INVARIANT_KEY,
+            key_id="invariant-key",
+            ephemeral=False,
+            replay_store=DurableReplayStore(store_a),
+        )
+        authority_b = AuthorizationAuthority(
+            key=_INVARIANT_KEY,
+            key_id="invariant-key",
+            ephemeral=False,
+            replay_store=DurableReplayStore(store_b),
+        )
+        service = GuardService(policy=DEFAULT_POLICY, authority=authority_a)
+        request = service.evaluate_payload(_payload()).request
+        token = service.evaluate(request).authorization
+        nonce = token.nonce
+        first = ReferenceSigner(authority_a).sign(
+            SignRequest(transaction=request, authorization=token)
+        )
+        if first.outcome is not SignOutcome.EXECUTED:
+            return InvariantResult(
+                "postgres_shared_state_refuses_cross_instance_replay",
+                False,
+                "the first signing attempt did not execute",
+            )
+        second = ReferenceSigner(authority_b).sign(
+            SignRequest(transaction=request, authorization=token)
+        )
+        if second.state is not AuthState.REPLAYED:
+            return InvariantResult(
+                "postgres_shared_state_refuses_cross_instance_replay",
+                False,
+                f"a second instance yielded {second.state.value}, not REPLAYED",
+            )
+    except StateStoreError as exc:
+        return InvariantResult(
+            "postgres_shared_state_refuses_cross_instance_replay",
+            False,
+            f"the PostgreSQL store could not be used: {type(exc).__name__}",
+        )
+    finally:
+        # The check must not leave residue in a shared database: drop the nonce it
+        # consumed, so an operator pinging this endpoint does not accumulate state.
+        if store_a is not None and nonce is not None:
+            try:
+                with store_a._connection.cursor() as cur:  # noqa: SLF001
+                    cur.execute("DELETE FROM consumed_nonces WHERE nonce = %s", (nonce,))
+            except Exception:  # noqa: BLE001
+                pass
+        if store_a is not None:
+            store_a.close()
+        if store_b is not None:
+            store_b.close()
+    return InvariantResult(
+        "postgres_shared_state_refuses_cross_instance_replay",
+        True,
+        "a nonce spent by one instance is refused as REPLAYED by another",
+    )
+
+
 INVARIANTS: dict[str, Callable[[], InvariantResult]] = {
     "non_allow_never_authorizes": _non_allow_never_authorizes,
     "refusal_never_reaches_the_executor": _refusal_never_reaches_the_executor,
@@ -547,6 +641,9 @@ INVARIANTS: dict[str, Callable[[], InvariantResult]] = {
     "durable_nonce_is_single_use_across_restart": _durable_nonce_is_single_use_across_restart,
     "durable_counters_survive_restart": _durable_counters_survive_restart,
     "state_store_failure_fails_closed": _state_store_failure_fails_closed,
+    "postgres_shared_state_refuses_cross_instance_replay": (
+        _postgres_shared_state_refuses_cross_instance_replay
+    ),
 }
 
 #: Human-readable statement of each guarantee, for the console and the docs.
@@ -566,6 +663,7 @@ INVARIANT_DESCRIPTIONS: dict[str, str] = {
     "durable_nonce_is_single_use_across_restart": "A nonce consumed before a process restart is refused as a replay after it.",
     "durable_counters_survive_restart": "Window-volume and velocity counters persist across a restart; a limit is not reset by a bounce.",
     "state_store_failure_fails_closed": "An unreadable durable state store yields HOLD with no authorization, never ALLOW.",
+    "postgres_shared_state_refuses_cross_instance_replay": "With the PostgreSQL backend, a nonce spent by one instance is refused as a replay by another.",
 }
 
 

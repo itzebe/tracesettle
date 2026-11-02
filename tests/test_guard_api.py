@@ -131,6 +131,60 @@ def test_sign_rejects_a_missing_transaction(api):
     assert api.dispatch("POST", "/api/guard/sign", {}, {"authorization": None}).status == 400
 
 
+def test_sign_binds_expected_service_to_the_authenticated_caller():
+    """A body-supplied expected_service_id cannot override the authenticated identity.
+
+    Without service auth (loopback) the body value is honoured; with an
+    authenticated caller the credential wins, so a caller cannot make the signer
+    validate (or attribute a refusal) against a service it is not.
+    """
+    api = GuardAPI(make_service())
+    evaluate = api.dispatch(
+        "POST", "/api/guard/evaluate", {}, {"transaction": LEGIT, "return_authorization": True}
+    )
+    token = evaluate.payload["authorization"]
+    # Authenticated as 'treasury-agent' (the token's service), but the body claims
+    # to expect a *different* service. The credential must win, so this is ALLOWed.
+    response = api.dispatch(
+        "POST",
+        "/api/guard/sign",
+        {},
+        {"transaction": LEGIT, "authorization": token, "expected_service_id": "someone-else"},
+        authenticated_service_id="treasury-agent",
+    )
+    assert response.payload["outcome"] == "EXECUTED"
+    assert response.payload["service_id"] == "treasury-agent"
+
+
+def test_sign_refusal_is_attributed_to_the_authenticated_caller():
+    """A refusal under an authenticated caller is counted against the caller."""
+    api = GuardAPI(make_service())
+    response = api.dispatch(
+        "POST",
+        "/api/guard/sign",
+        {},
+        {
+            "transaction": dict(LEGIT, service_id="attacker-service"),
+            "authorization": {
+                "version": "ts-auth-v1",
+                "authorization_id": "auth_forged",
+                "decision_id": "dec_forged",
+                "service_id": "treasury-agent",
+                "key_id": "test-key",
+                "nonce": "n",
+                "issued_at": "2026-01-01T00:00:00Z",
+                "expires_at": "2030-01-01T00:00:00Z",
+                "fingerprint": "x",
+                "parameters": {},
+                "signature": "00" * 32,
+            },
+        },
+        authenticated_service_id="attacker-service",
+    )
+    assert response.payload["outcome"] == "REFUSED"
+    assert response.payload["service_id"] == "attacker-service"
+
+
 def test_policy_endpoint_returns_the_policy(api):
     response = api.dispatch("GET", "/api/guard/policy", {}, None)
     assert response.status == 200

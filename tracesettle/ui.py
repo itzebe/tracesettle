@@ -670,7 +670,13 @@ def _build_guard_service() -> GuardService:
         max_records=config.GUARD_AUDIT_MAX_RECORDS,
     )
     state_store = open_state_store(
-        config.GUARD_STATE_DB, busy_timeout_ms=config.GUARD_STATE_BUSY_TIMEOUT_MS
+        config.GUARD_STATE_DB,
+        backend=config.GUARD_STATE_BACKEND,
+        busy_timeout_ms=config.GUARD_STATE_BUSY_TIMEOUT_MS,
+        pg_dsn=config.GUARD_STATE_PG_DSN,
+        pg_connect_timeout_s=config.GUARD_STATE_PG_CONNECT_TIMEOUT_S,
+        pg_statement_timeout_ms=config.GUARD_STATE_PG_STATEMENT_TIMEOUT_MS,
+        require_postgres=config.GUARD_REQUIRE_POSTGRES,
     )
     if state_store is None:
         return GuardService(policy=policy, audit=audit)

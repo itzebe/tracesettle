@@ -178,7 +178,7 @@ class GuardAPI:
         if path == "/api/guard/sign":
             if not self._identity_matches(body, authenticated_service_id):
                 return ApiResponse(403, {"error": "service identity does not match the credential"})
-            return self._sign(body)
+            return self._sign(body, authenticated_service_id)
         if path.startswith("/api/guard/incidents/") and path.endswith("/status"):
             incident_id = path[len("/api/guard/incidents/") : -len("/status")].strip("/")
             return self._incident_status(incident_id, body)
@@ -200,7 +200,7 @@ class GuardAPI:
         decision = self.service.evaluate_payload(transaction, simulated=simulated)
         return ApiResponse(200, decision.to_dict(include_authorization=return_authorization))
 
-    def _sign(self, body: Any) -> ApiResponse:
+    def _sign(self, body: Any, authenticated_service_id: str | None = None) -> ApiResponse:
         if not isinstance(body, dict):
             return _bad_request("request body must be a JSON object")
         raw_transaction = body.get("transaction")
@@ -213,11 +213,21 @@ class GuardAPI:
             )
         except RequestValidationError as exc:
             return _bad_request(str(exc))
+        # The expected service identity is the *authenticated* caller, never a
+        # body field: a caller must not be able to make the signer validate (and,
+        # on refusal, attribute the rejection) against a service it is not. When
+        # service authentication is disabled (loopback default) there is no
+        # authenticated identity, so the caller's declared identity stands.
+        expected_service_id = (
+            authenticated_service_id
+            if authenticated_service_id is not None
+            else body.get("expected_service_id")
+        )
         result = self.service.sign(
             SignRequest(
                 transaction=transaction,
                 authorization=body.get("authorization"),
-                expected_service_id=body.get("expected_service_id"),
+                expected_service_id=expected_service_id,
             )
         )
         return ApiResponse(200, result.to_dict())

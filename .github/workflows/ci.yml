@@ -77,28 +77,122 @@ jobs:
           import pathlib
           import sys
 
-          # The runtime is standard-library only. This gate fails the build if a
-          # non-stdlib import appears in the package.
+          # The runtime is standard-library only. A non-stdlib import at module
+          # level fails the build. A small allowlist of *optional* extras may be
+          # imported lazily inside a function body (so the default path never
+          # needs them); today that is only the PostgreSQL driver behind the
+          # opt-in shared-state backend.
           stdlib = set(sys.stdlib_module_names)
+          optional_extras = {"psycopg"}
           offenders = []
+
+          def check(path, node, inside_function):
+              if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                  inside_function = True
+              if isinstance(node, ast.Import):
+                  names = [a.name.split(".")[0] for a in node.names]
+              elif isinstance(node, ast.ImportFrom):
+                  names = [node.module.split(".")[0]] if node.module and node.level == 0 else []
+              else:
+                  names = []
+              for name in names:
+                  if not name or name == "tracesettle" or name in stdlib:
+                      continue
+                  if inside_function and name in optional_extras:
+                      continue
+                  where = " (module level)" if not inside_function else " (not an allowed extra)"
+                  offenders.append(f"{path}: {name}{where}")
+              for child in ast.iter_child_nodes(node):
+                  check(path, child, inside_function)
+
           for path in pathlib.Path("tracesettle").rglob("*.py"):
               tree = ast.parse(path.read_text(), filename=str(path))
-              for node in ast.walk(tree):
-                  if isinstance(node, ast.Import):
-                      names = [a.name.split(".")[0] for a in node.names]
-                  elif isinstance(node, ast.ImportFrom):
-                      names = [node.module.split(".")[0]] if node.module and node.level == 0 else []
-                  else:
-                      continue
-                  for name in names:
-                      if name and name not in stdlib and name != "tracesettle":
-                          offenders.append(f"{path}: {name}")
+              check(path, tree, False)
           if offenders:
-              print("non-stdlib runtime imports found:")
+              print("disallowed runtime imports found:")
               print("\n".join(offenders))
               raise SystemExit(1)
-          print("runtime imports are standard-library only")
+          print("runtime imports are standard-library only (optional extras are lazy)")
           PY
+
+  postgres:
+    name: PostgreSQL shared-state integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # A real PostgreSQL server, so the distributed guarantees are exercised for
+    # real: cross-instance replay refusal, the shared spend window, revocation,
+    # idempotency, migrations, and fail-closed behaviour on an outage.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: tracesettle
+          POSTGRES_PASSWORD: tracesettle
+          POSTGRES_DB: tracesettle_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U tracesettle"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      TRACESETTLE_TEST_PG_DSN: "postgresql://tracesettle:tracesettle@127.0.0.1:5432/tracesettle_test"
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Python
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.13"
+
+      - name: Install development dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+
+      - name: Wait for PostgreSQL
+        run: |
+          set -eu
+          for i in $(seq 1 30); do
+            if python -c "
+          import psycopg, os
+          psycopg.connect(os.environ['TRACESETTLE_TEST_PG_DSN']).close()
+          " 2>/dev/null; then
+              echo "PostgreSQL is ready"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "PostgreSQL did not become ready"
+          exit 1
+
+      - name: Shared-state integration tests (real PostgreSQL)
+        run: |
+          set -eu
+          # A DSN that is set but cannot be reached would let the module-level
+          # skipif turn every test into a skip, and a green run would then prove
+          # nothing. Require every PostgreSQL test to actually execute.
+          python -m pytest tests/test_guard_postgres.py -q --junitxml=/tmp/pg-guard.xml
+          python - <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          root = ET.parse("/tmp/pg-guard.xml").getroot()
+          suite = root.find("testsuite") if root.tag != "testsuite" else root
+          tests = int(suite.get("tests", "0"))
+          skipped = int(suite.get("skipped", "0"))
+          failures = int(suite.get("failures", "0")) + int(suite.get("errors", "0"))
+          if tests == 0 or failures:
+              sys.exit(f"PostgreSQL suite did not run cleanly: tests={tests} failures={failures}")
+          if skipped:
+              sys.exit(f"{skipped} PostgreSQL test(s) skipped although a DSN was configured")
+          print(f"{tests} PostgreSQL tests executed against a real server, 0 skipped")
+          PY
+
+      - name: Full suite with the PostgreSQL backend available
+        run: python -m pytest tests/ -q
 
   docker:
     name: Docker build and runtime

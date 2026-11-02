@@ -181,13 +181,20 @@ class ReferenceSigner:
             expected_service_id=request.expected_service_id,
         )
 
+        # Attribute the outcome to the *verified* requester, never to the
+        # service_id carried inside the token. That field is attacker-controlled
+        # on a forged token, and the refusal is counted against the named service
+        # (it feeds the rejected-authorization limit), so trusting it would let
+        # one service drive another into a HOLD.
+        requester_service_id = request.expected_service_id or request.transaction.service_id
+
         if not verification.valid:
             result = SignResult(
                 outcome=SignOutcome.REFUSED,
                 state=verification.state,
                 detail=verification.detail,
                 authorization_id=verification.authorization_id,
-                service_id=verification.service_id or request.transaction.service_id,
+                service_id=requester_service_id,
                 request_id=request.transaction.request_id,
                 simulated=False,
             )
@@ -200,7 +207,7 @@ class ReferenceSigner:
             state=AuthState.VALID,
             detail="authorization validated; the simulated executor recorded the transaction",
             authorization_id=verification.authorization_id,
-            service_id=verification.service_id or request.transaction.service_id,
+            service_id=requester_service_id,
             request_id=request.transaction.request_id,
             simulated=receipt.simulated,
             receipt=receipt.to_dict(),

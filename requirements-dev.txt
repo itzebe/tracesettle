@@ -24,6 +24,12 @@
 pytest==9.1.1
 pyflakes==4.0.3
 
+# Optional runtime extra, installed for development/CI only. The PostgreSQL
+# guard-state backend (tracesettle/guard/state_pg.py) imports this lazily; the
+# SQLite default and the settlement engine never need it. Pinned so the
+# PostgreSQL integration job is reproducible.
+psycopg[binary]==3.3.6
+
 # Transitive dependencies of pytest, pinned for a reproducible environment.
 # pyflakes has no dependencies.
 iniconfig==2.3.1

@@ -566,10 +566,16 @@ class GuardService:
             "ttl_seconds": self.authority.ttl_seconds,
         }
         metrics["state"] = {
-            "backend": "sqlite" if self.state_store is not None else "in-memory",
+            "backend": getattr(self.state_store, "backend", "in-memory")
+            if self.state_store is not None
+            else "in-memory",
             "durable": self.state_store is not None,
             "note": (
-                "durable single-instance state"
+                (
+                    "durable shared state across instances"
+                    if getattr(self.state_store, "backend", "") == "postgresql"
+                    else "durable single-instance state"
+                )
                 if self.state_store is not None
                 else "process-local: spent nonces and counters reset on restart"
             ),
