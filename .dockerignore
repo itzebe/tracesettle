@@ -6,6 +6,7 @@ __pycache__
 *.pyc
 *.pyo
 .env
+.env.*
 *.pem
 *.key
 tests
@@ -16,3 +17,4 @@ submission
 .openhands
 Dockerfile
 .dockerignore
+.vercel
