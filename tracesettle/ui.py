@@ -675,7 +675,9 @@ def _build_guard_service() -> GuardService:
     if state_store is None:
         return GuardService(policy=policy, audit=audit)
     authority = AuthorizationAuthority(
-        replay_store=DurableReplayStore(state_store),
+        replay_store=DurableReplayStore(
+            state_store, counter_retention_seconds=config.GUARD_STATE_RETENTION_SECONDS
+        ),
         revocations=DurableRevocationStore(state_store),
         ttl_seconds=policy.authorization_ttl_seconds,
     )

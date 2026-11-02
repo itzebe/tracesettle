@@ -14,6 +14,7 @@ from __future__ import annotations
 import multiprocessing
 import sqlite3
 import threading
+import time
 from decimal import Decimal
 
 import pytest
@@ -425,8 +426,10 @@ def test_a_failed_write_latches_degraded_and_fails_closed(tmp_path):
 
 
 def test_schema_version_is_recorded(tmp_path):
+    from tracesettle.guard.state import SCHEMA_VERSION
+
     store = GuardStateStore(tmp_path / "state.db")
-    assert store.schema_version() == 1
+    assert store.schema_version() == SCHEMA_VERSION
     store.close()
 
 
@@ -456,6 +459,106 @@ def test_a_newer_schema_version_is_refused(tmp_path):
     conn.close()
     with pytest.raises(StateStoreError):
         GuardStateStore(path)
+
+
+def test_migration_from_v1_adds_the_window_index(tmp_path):
+    """An existing v1 database is upgraded in place, keeping its data."""
+    path = tmp_path / "state.db"
+    store = GuardStateStore(path)
+    store.consume_nonce("keep-across-migration", 2_000_000_000.0)
+    store.close()
+    # Rewind the recorded version to 1 and drop the v2 index, as a pre-upgrade
+    # database would look.
+    conn = sqlite3.connect(path)
+    conn.execute("DROP INDEX IF EXISTS counter_events_at")
+    conn.execute("UPDATE schema_version SET version = 1")
+    conn.commit()
+    conn.close()
+
+    reopened = GuardStateStore(path)
+    assert reopened.schema_version() == 2
+    assert reopened.is_nonce_consumed("keep-across-migration")
+    indexes = {
+        row[0]
+        for row in reopened._connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='index'"
+        ).fetchall()
+    }
+    assert "counter_events_at" in indexes
+    reopened.close()
+
+
+# --- 8b. durable state stays bounded (regression: the tables used to grow) ---
+
+
+def test_window_read_uses_an_index_not_a_full_scan(tmp_path):
+    """The window query must be index-backed; a full scan degrades forever.
+
+    ``counter_events`` grows with every decision, so a ``WHERE at >= ?`` read with
+    no leading ``at`` index scans the whole table on every evaluation. This asserts
+    the plan uses the index rather than a table scan, which is the structural fix
+    (the timing is environment-dependent; the plan is not).
+    """
+    store = GuardStateStore(tmp_path / "state.db")
+    plan = store._connection.execute(
+        "EXPLAIN QUERY PLAN SELECT at FROM counter_events WHERE at >= ? ORDER BY at ASC",
+        (0.0,),
+    ).fetchall()
+    detail = " ".join(str(row[-1]) for row in plan).upper()
+    assert "COUNTER_EVENTS_AT" in detail, f"window read is not index-backed: {detail}"
+    assert "SCAN COUNTER_EVENTS" not in detail, f"window read is a full scan: {detail}"
+    store.close()
+
+
+def test_counter_events_are_pruned_so_the_table_stays_bounded(tmp_path):
+    """A prune must actually drop old events and keep recent ones.
+
+    The defect this guards: ``prune_events`` existed but was never called, so the
+    table grew without bound. Pruning is now driven from the signing path.
+    """
+    store = GuardStateStore(tmp_path / "state.db")
+    now = time.time()
+    for i in range(50):
+        store.record_event(kind="DECISION", service_id="svc", outcome="ALLOW", at=now - 100000 - i)
+    for i in range(5):
+        store.record_event(kind="DECISION", service_id="svc", outcome="ALLOW", at=now - i)
+
+    removed = store.prune_events(before=now - 3600)
+    assert removed == 50
+    remaining = store.events_since(since=0)
+    assert len(remaining) == 5
+    store.close()
+
+
+def test_signing_prunes_old_counter_events(tmp_path):
+    """The prune runs from the enforcement path, with no extra call to remember."""
+    store = GuardStateStore(tmp_path / "state.db")
+    # A store whose prune interval is zero, so the first consume prunes.
+    replay = DurableReplayStore(store, prune_interval_seconds=0.0, counter_retention_seconds=3600.0)
+    now = time.time()
+    for i in range(30):
+        store.record_event(kind="DECISION", service_id="svc", outcome="ALLOW", at=now - 100000 - i)
+    assert len(store.events_since(since=0)) == 30
+
+    # One consume is enough to trigger retention.
+    assert replay.consume("prune-trigger-nonce", 2_000_000_000.0) is True
+    remaining = store.events_since(since=0)
+    assert remaining == [], f"old events were not pruned: {len(remaining)} left"
+    store.close()
+
+
+def test_idempotency_keys_are_pruned_so_the_table_stays_bounded(tmp_path):
+    store = GuardStateStore(tmp_path / "state.db")
+    now = time.time()
+    for i in range(20):
+        store.remember_decision(f"old-{i}", f"dec_old_{i}", at=now - 100000 - i)
+    store.remember_decision("recent", "dec_recent", at=now)
+
+    removed = store.prune_idempotency(before=now - 3600)
+    assert removed == 20
+    assert store.decision_for("recent") == "dec_recent"
+    assert store.decision_for("old-0") is None
+    store.close()
 
 
 # --- 9. credential revocation remains effective ----------------------------

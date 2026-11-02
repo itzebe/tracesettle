@@ -148,10 +148,10 @@ a bare interpreter.
 **1. Run the tests.**
 
 ```sh
-python -m pytest tests/ --collect-only -q   # 661 tests collected
-python -m pytest tests/ -q                  # 661 passed
+python -m pytest tests/ --collect-only -q   # 699 tests collected
+python -m pytest tests/ -q                  # 699 passed
 ```
-→ `661 passed`.
+→ `699 passed`.
 
 **2. Prove the enforcement boundary: a permitted request executes, a suspicious
 one cannot.**
@@ -609,6 +609,10 @@ operator can see whether the run is durable.
 - **Atomic.** The counter read, the decision, and the counter write happen in one
   transaction, so two concurrent requests cannot both pass a limit; the nonce is
   a primary key, so exactly one use can win.
+- **Bounded.** The counter and idempotency tables are pruned on a retention
+  horizon (`TRACESETTLE_GUARD_STATE_RETENTION_SECONDS`, default 24h, far longer
+  than any window), and the window read is index-backed, so evaluation cost does
+  not grow with the number of past requests.
 - **Single instance.** A SQLite file is durable state for one application
   instance, not multi-instance shared state. For several replicas, implement the
   narrow `GuardStateStore` interface against a shared database. Design and scope

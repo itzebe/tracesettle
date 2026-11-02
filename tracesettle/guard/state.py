@@ -37,7 +37,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Iterator
 
 #: Bump when the schema changes and add a migration below.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 DEFAULT_BUSY_TIMEOUT_MS = 5000
 
@@ -130,6 +130,14 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
             at          REAL NOT NULL
         )
         """,
+    ),
+    # The window read is ``WHERE at >= ?``, so it needs a *leading* ``at`` index.
+    # The composite indexes above lead with ``service_id``/``kind`` and so cannot
+    # serve that predicate; without this the read is a full scan of a table that
+    # grows with every decision. ``counter_events_at`` is the fix.
+    2: (
+        "CREATE INDEX IF NOT EXISTS counter_events_at ON counter_events(at)",
+        "CREATE INDEX IF NOT EXISTS idempotency_at ON idempotency(at)",
     ),
 }
 
@@ -449,7 +457,13 @@ class GuardStateStore:
         ]
 
     def prune_events(self, *, before: float) -> int:
-        """Delete counter events older than ``before``. Returns the count."""
+        """Delete counter events older than ``before``. Returns the count.
+
+        Events this old cannot affect any window, so dropping them keeps the table
+        bounded and the window read fast. Deleting a row is a durable write, so it
+        is deliberately *not* wrapped in the decision transaction: it runs on its
+        own and cannot roll back a decision in progress.
+        """
         with self._lock:
             self._guard_usable()
             try:
@@ -458,6 +472,22 @@ class GuardStateStore:
             except sqlite3.Error as exc:
                 self._mark_degraded()
                 raise StateStoreError(f"pruning counter events failed: {exc}") from exc
+
+    def prune_idempotency(self, *, before: float) -> int:
+        """Delete idempotency keys older than ``before``. Returns the count.
+
+        A key only needs to outlive a plausible retry, so dropping old ones keeps
+        the table bounded without weakening duplicate detection for recent
+        requests.
+        """
+        with self._lock:
+            self._guard_usable()
+            try:
+                cursor = self._connection.execute("DELETE FROM idempotency WHERE at < ?", (before,))
+                return cursor.rowcount
+            except sqlite3.Error as exc:
+                self._mark_degraded()
+                raise StateStoreError(f"pruning idempotency keys failed: {exc}") from exc
 
     # -- idempotency --------------------------------------------------------
 
@@ -500,11 +530,29 @@ class DurableReplayStore:
     :class:`~tracesettle.guard.authorization.AuthorizationAuthority` accepts it
     unchanged. A database error raises :class:`StateStoreError`; the authority
     turns that into a refusal, never a silent "unused".
+
+    The store also owns retention for the durable tables. ``consume`` is the one
+    call made on every signing attempt, so it is the natural place to prune: it
+    is called from the enforcement path and cannot be forgotten by a caller.
     """
 
-    def __init__(self, store: GuardStateStore, *, prune_interval_seconds: float = 300.0) -> None:
+    def __init__(
+        self,
+        store: GuardStateStore,
+        *,
+        prune_interval_seconds: float = 300.0,
+        counter_retention_seconds: float = 86400.0,
+        idempotency_retention_seconds: float = 86400.0,
+    ) -> None:
         self._store = store
         self._prune_interval = prune_interval_seconds
+        #: Counter events older than this cannot affect any window (the window is
+        #: at most a few hours), so they are safe to drop. Without this the table
+        #: grows without bound and the window read slows down forever.
+        self._counter_retention = counter_retention_seconds
+        #: An idempotency key only needs to be remembered for as long as a retry
+        #: is plausible; a day is generous and keeps the table bounded too.
+        self._idempotency_retention = idempotency_retention_seconds
         self._last_prune = 0.0
 
     def consume(self, nonce: str, expires_at: float) -> bool:
@@ -520,6 +568,8 @@ class DurableReplayStore:
             return
         self._last_prune = now
         self._store.prune_nonces(now=now)
+        self._store.prune_events(before=now - self._counter_retention)
+        self._store.prune_idempotency(before=now - self._idempotency_retention)
 
 
 class DurableRevocationStore:

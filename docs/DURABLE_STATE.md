@@ -71,7 +71,7 @@ implement the same methods. The repository contains **no** PostgreSQL dependency
 and no existing abstraction, so introducing one now would be unnecessary
 infrastructure; the narrow interface is the correct preparation.
 
-## 5. Schema (version 1)
+## 5. Schema (version 2)
 
 ```
 schema_version(version INTEGER NOT NULL)             -- one row
@@ -95,6 +95,7 @@ counter_events(
     outcome    TEXT,               -- decision value, or sign outcome
     asset      TEXT,
     amount     TEXT)               -- exact decimal, as a string
+index counter_events_at(at)                       -- v2: serves the window read
 index counter_events_service_at(service_id, at)
 index counter_events_kind_at(kind, at)
 
@@ -102,10 +103,29 @@ idempotency(
     request_key TEXT PRIMARY KEY,
     decision_id TEXT NOT NULL,
     at          REAL NOT NULL)
+index idempotency_at(at)                          -- v2: serves retention pruning
 ```
 
 Money is stored as an exact decimal **string** (`Decimal` on read), never a
 binary float, matching the rest of the project.
+
+**Version 2 (retention).** The window read is `WHERE at >= ?`, which needs an
+index whose *leading* column is `at`; the v1 composite indexes lead with
+`service_id`/`kind` and so could not serve it. Without `counter_events_at` that
+read is a full scan of a table that grows with every decision, so evaluation
+cost grew without bound (measured ~1.6 ms/read at 50k rows and rising, versus
+~0.03 ms once the index exists). `idempotency_at` serves the same role for the
+idempotency table. A v1 database is upgraded in place on the next open, keeping
+its data.
+
+`counter_events` and `idempotency` are **bounded by retention**, not left to grow
+forever. Events older than `TRACESETTLE_GUARD_STATE_RETENTION_SECONDS` (default
+24h) cannot affect any velocity/volume window and are pruned; idempotency keys
+older than the same horizon are pruned. The prune is driven from
+`DurableReplayStore.consume` — the one call made on every signing attempt — so it
+runs on the enforcement path and cannot be forgotten by a caller. This mirrors the
+in-memory guard, which already bounds its equivalents (`deque(maxlen=...)`).
+
 
 ## 6. Pragmas and durability
 
@@ -151,6 +171,7 @@ binary float, matching the rest of the project.
 | --- | --- | --- |
 | `TRACESETTLE_GUARD_STATE_DB` | unset | path to the SQLite state database |
 | `TRACESETTLE_GUARD_STATE_BUSY_TIMEOUT_MS` | `5000` | writer lock wait |
+| `TRACESETTLE_GUARD_STATE_RETENTION_SECONDS` | `86400` | counter-event / idempotency retention |
 
 When unset, the guard keeps its in-memory stores: the loopback development
 workflow is unchanged, and the console reports the state backend honestly so an

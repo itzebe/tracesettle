@@ -734,3 +734,36 @@ gives that state a home on disk, without a new runtime dependency.
   `Server: TRACESETTLE`; with a mounted writable volume and
   `TRACESETTLE_GUARD_STATE_DB` set, a token signed once is **REFUSED/REPLAYED**
   after a `docker restart` and a fresh token still executes.
+
+### Independent review fix — durable state stays bounded (2026-11-01)
+
+Adversarial review of PR #5 found one real defect; it is fixed on the same branch.
+
+- **Defect: `counter_events` and `idempotency` grew without bound.** `prune_events`
+  existed but had **no callers**, so the counter table grew with every decision.
+  Worse, the window read (`WHERE at >= ?`) had no leading-`at` index — the v1
+  indexes lead with `service_id`/`kind`, so SQLite did a full scan plus a temp
+  b-tree. Measured **~1.6 ms/read at 50k rows and rising linearly**; the in-memory
+  guard already bounds its equivalents (`deque(maxlen=…)`), so this was a parity
+  and availability regression that could eventually stall the enforcement path.
+- **Fix.** Schema **v2** adds `counter_events_at(at)` and `idempotency_at(at)`
+  (migrated in place; a v1 database keeps its data). `DurableReplayStore` — the one
+  object called on every signing attempt — now prunes consumed nonces, old counter
+  events, and old idempotency keys on `prune_interval_seconds` (default 300s) with
+  retention `TRACESETTLE_GUARD_STATE_RETENTION_SECONDS` (default 24h, well above
+  any window). Pruning runs outside the decision transaction so it cannot roll a
+  decision back. Measured after the fix: **~0.03 ms/read**, index search, no
+  growth with table size.
+- **Tests:** 694 → **699 passed** (0 skipped). New in
+  `tests/test_guard_durable_state.py`: index-not-scan plan, prune drops old and
+  keeps recent events, the signing path triggers the prune, idempotency retention,
+  and a v1→v2 in-place migration that preserves data. `test_schema_version_is_recorded`
+  now tracks `SCHEMA_VERSION` instead of a hardcoded `1`.
+- **Not changed (verified correct, do not "fix"):** durable vs in-memory decision
+  parity on identical sequences; cross-process exactly-one-winner and cross-process
+  limit enforcement; SIGKILL crash recovery of a committed nonce; expiry and
+  revocation surviving a restart; a configured auth key is stable across restarts
+  (only an *unset* key mints an ephemeral one, and that is disclosed).
+- **Docs:** `docs/DURABLE_STATE.md` §5 documents schema v2, the index rationale,
+  and the retention rule; §8 adds the retention variable; README gains a
+  **Bounded** bullet and the current count (699).
