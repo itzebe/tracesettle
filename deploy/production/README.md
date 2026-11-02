@@ -25,6 +25,7 @@ external account has been created.
 | `AUDIT_ANCHORING.md` | Design/proposal for external anchoring — **not implemented**. |
 | `VERCEL_DEPLOYMENT.md` | Vercel Hobby deployment via the Container Runtime (`Dockerfile.vercel` + `vercel.json`). |
 | `PRODUCTION_ACCEPTANCE_CHECKLIST.md` | Verified checklist of what is done and what remains. |
+| `RELEASE_STATUS.md` | Point-in-time record of the release-verification mission (2026-11-02): merged PR #8, test counts, live checks, and the remaining owner actions. |
 
 There is deliberately **no separate production Dockerfile**: the existing
 `Dockerfile` already meets the requirements (non-root, healthcheck, graceful
