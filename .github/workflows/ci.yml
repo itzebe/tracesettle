@@ -169,7 +169,27 @@ jobs:
           exit 1
 
       - name: Shared-state integration tests (real PostgreSQL)
-        run: python -m pytest tests/test_guard_postgres.py -q
+        run: |
+          set -eu
+          # A DSN that is set but cannot be reached would let the module-level
+          # skipif turn every test into a skip, and a green run would then prove
+          # nothing. Require every PostgreSQL test to actually execute.
+          python -m pytest tests/test_guard_postgres.py -q --junitxml=/tmp/pg-guard.xml
+          python - <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          root = ET.parse("/tmp/pg-guard.xml").getroot()
+          suite = root.find("testsuite") if root.tag != "testsuite" else root
+          tests = int(suite.get("tests", "0"))
+          skipped = int(suite.get("skipped", "0"))
+          failures = int(suite.get("failures", "0")) + int(suite.get("errors", "0"))
+          if tests == 0 or failures:
+              sys.exit(f"PostgreSQL suite did not run cleanly: tests={tests} failures={failures}")
+          if skipped:
+              sys.exit(f"{skipped} PostgreSQL test(s) skipped although a DSN was configured")
+          print(f"{tests} PostgreSQL tests executed against a real server, 0 skipped")
+          PY
 
       - name: Full suite with the PostgreSQL backend available
         run: python -m pytest tests/ -q
