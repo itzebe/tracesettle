@@ -821,7 +821,7 @@ default (SQLite/in-memory) path and the settlement engine are unchanged.
   `requirements-dev.txt` pins `psycopg[binary]==3.3.6` (dev/CI only).
 - **Docker:** `--build-arg TRACESETTLE_WITH_POSTGRES=1` adds the driver; the
   default image is unchanged (verified: driver absent, still uid 10001 + healthy).
-- **Counts:** 733 tests (712 pass + 21 skip without a server; 733 pass with one);
+- **Counts:** 739 tests (716 pass + 23 skip without a server; 739 pass with one);
   pyflakes clean; compileall OK; offline demo byte-identical; default image
   healthy non-root, refuses to start without credentials (exit 2), graceful
   shutdown exit 0. Live two-container proof: token signed by instance A →
@@ -833,3 +833,35 @@ default (SQLite/in-memory) path and the settlement engine are unchanged.
   dbname=tsstate user=ts password=devpass"`.
 - **Not changed (verified correct):** the SQLite/in-memory decision parity, the
   safety invariants, and the settlement engine.
+- **Independent adversarial security review (pre-merge), 2026-11-01.** Reviewed
+  PR #6 for practical bypasses (nonce replay, limit evasion, idempotency races,
+  revocation, cross-service substitution, migration races, every failure path).
+  **Two real defects found and fixed, each with a mutation-checked regression test:**
+  - **Mid-decision reconnect (state_pg.py).** `_prepare` reconnected whenever the
+    connection was closed, *including inside a `decision_cycle`*. A drop after the
+    idempotency claim re-ran the remaining writes on a new transaction without the
+    advisory lock and still returned `ALLOW`; the claim was lost, so the same key
+    was authorized twice. Fix: a connection lost mid-decision is not reconnected —
+    the decision fails closed (`HOLD`) and the store is not degraded; ordinary
+    (non-decision) calls still reconnect. The exception classification in
+    `decision_cycle` now treats a mid-decision `OperationalError`/`InterfaceError`
+    as non-retryable (fail-closed `StateStoreError`), not a retryable conflict.
+    Tests: `test_connection_drop_mid_decision_fails_closed_without_partial_state`,
+    `test_a_mid_decision_drop_does_not_leave_the_store_usable_for_partial_writes`.
+  - **Cross-service refusal attribution (signer.py + api.py).** A signer refusal
+    was counted against `token.service_id`, attacker-controlled on a forged token.
+    An authenticated attacker could name a victim service and, after
+    `max_rejected_authorizations` refusals, drive the victim into `HOLD`. Fix:
+    attribute to the verified requester (`request.expected_service_id or
+    transaction.service_id`), and bind `expected_service_id` in the guard API to
+    the authenticated caller, never a body field. Tests:
+    `test_refusal_is_attributed_to_the_requester_not_the_forged_token`,
+    `test_a_forged_token_cannot_drive_another_service_into_a_hold`,
+    `test_sign_refusal_is_attributed_to_the_authenticated_caller`.
+  - Everything else refused: concurrent single-token sign on 8 connections executed
+    once; 20-thread and 8-process races never exceeded the shared window; replayed
+    nonce/token, substituted parameters, wrong service, expired token all refused;
+    lock-timeout and statement-timeout failed closed without latching degraded.
+    Counts: **739 pass with PG / 716 pass + 23 skip without**; pyflakes clean;
+    compileall OK; 16/16 invariants hold; offline demo byte-identical; Docker
+    non-root (uid 10001) healthy, guard evaluate→sign→replay verified live.

@@ -241,6 +241,55 @@ def test_rejected_authorizations_survive_restart(tmp_path):
     assert any(f.code == "REPEATED_AUTHORIZATION_REJECTIONS" for f in decision.findings)
 
 
+def test_a_forged_token_cannot_drive_another_service_into_a_hold(tmp_path):
+    """Cross-service DoS: a refusal must not be counted against the token's claimed service.
+
+    An authenticated attacker submits sign requests whose (forged) token names a
+    victim service. Before the fix the refusals were recorded against the claimed
+    service, so three of them pushed the victim over ``max_rejected_authorizations``
+    and the victim's own next transaction was HELD. The refusal is now attributed
+    to the requester, so the victim is unaffected.
+    """
+    store = GuardStateStore(tmp_path / "state.db")
+    policy = _small_window_policy(window_limit="1000000", max_rejected=2)
+    service = _durable_service(store, policy=policy)
+
+    forged = {
+        "version": "ts-auth-v1",
+        "authorization_id": "auth_forged",
+        "decision_id": "dec_forged",
+        "service_id": "treasury-agent",  # the victim
+        "key_id": KEY_ID,
+        "nonce": "forged-nonce",
+        "issued_at": "2026-01-01T00:00:00Z",
+        "expires_at": "2030-01-01T00:00:00Z",
+        "fingerprint": "x",
+        "parameters": {},
+        "signature": "00" * 32,
+    }
+    attacker = make_request(service_id="attacker-service")
+    for _ in range(5):
+        result = service.sign(
+            SignRequest(
+                transaction=attacker,
+                authorization=forged,
+                expected_service_id="attacker-service",
+            )
+        )
+        assert result.outcome.value == "REFUSED"
+        assert result.service_id == "attacker-service"
+
+    # The victim's own valid transaction must still be ALLOWed.
+    decision = service.evaluate_payload(
+        {"service_id": "treasury-agent", "operation": "WITHDRAWAL", "chain": "eth",
+         "asset": "USDC", "amount": "10", "destination": APPROVED_DESTINATION}
+    )
+    store.close()
+    assert decision.decision is Decision.ALLOW, (
+        f"a forged token drove the victim to {decision.decision.value}"
+    )
+
+
 # --- 5. concurrent requests cannot exceed limits ---------------------------
 
 

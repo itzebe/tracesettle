@@ -344,6 +344,46 @@ def test_signer_refuses_a_token_issued_for_another_service():
     assert executor.calls == 0
 
 
+def test_refusal_is_attributed_to_the_requester_not_the_forged_token():
+    """A forged token must not be able to name the service a refusal is counted against.
+
+    The rejected-authorization limit is counted per service, so if a refusal were
+    attributed to ``token.service_id`` an authenticated attacker could set that
+    field to a victim service and drive the victim into a HOLD. The refusal is
+    attributed to the verified requester instead.
+    """
+    service = make_service()
+    signer = ReferenceSigner(service.authority)
+    # A token whose claimed service_id is the victim, signed with a bad signature.
+    forged = {
+        "version": AUTHORIZATION_VERSION,
+        "authorization_id": "auth_forged",
+        "decision_id": "dec_forged",
+        "service_id": "treasury-agent",
+        "key_id": "test-key",
+        "nonce": "forged-nonce",
+        "issued_at": "2026-01-01T00:00:00Z",
+        "expires_at": "2030-01-01T00:00:00Z",
+        "fingerprint": "x",
+        "parameters": {},
+        "signature": "00" * 32,
+    }
+    attacker = make_request(service_id="attacker-service")
+    result = signer.sign(
+        SignRequest(
+            transaction=attacker,
+            authorization=forged,
+            expected_service_id="attacker-service",
+        )
+    )
+    assert result.outcome is SignOutcome.REFUSED
+    assert result.state is AuthState.BAD_SIGNATURE
+    assert result.service_id == "attacker-service", (
+        "a refusal must be attributed to the requester, not the forged token's "
+        f"claimed service (got {result.service_id!r})"
+    )
+
+
 def test_signer_refuses_an_expired_authorization():
     now = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
     authority = make_authority(ttl_seconds=30, clock=lambda: now)

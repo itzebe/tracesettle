@@ -245,6 +245,16 @@ broken store: the next call reconnects, so a transient network blip does not tak
 an instance out of service. A non-connection write failure still latches the
 store degraded until the process is restarted.
 
+**A connection lost mid-decision fails closed.** The one place a reconnect would
+be unsafe is *inside* a decision transaction: reconnecting would run the rest of
+the decision on a new transaction — and without the advisory lock — splitting one
+atomic decision across two transactions and committing a partial result (for
+example, losing the idempotency claim while the caller still sees `ALLOW`, so the
+same key could be authorized again). So a connection that drops after the
+decision has begun is not reconnected: the decision is abandoned and reported as a
+state-store failure (`HOLD`), and an ordinary later call still reconnects. This is
+covered by `test_connection_drop_mid_decision_fails_closed_without_partial_state`.
+
 **Concurrency is the point.** The distributed guarantees are proven against a real
 server in `tests/test_guard_postgres.py` (cross-instance replay refusal, a shared
 spend window across two store instances, revocation visible across instances, and
@@ -253,3 +263,43 @@ job with a `postgres:16` service. The security invariants gain one entry,
 `postgres_shared_state_refuses_cross_instance_replay`, which is exercised for real
 when a DSN is configured and reports honestly that it was not exercised
 otherwise.
+
+## 11. Independent adversarial security review (pre-merge)
+
+PR #6 was reviewed adversarially — not "the tests pass" but "find a way an
+attacker or a compromised instance bypasses a control". The review attempted
+nonce replay (single-instance, cross-instance, and concurrent on eight
+connections), limit evasion (20-way thread race and eight separate OS processes
+against one shared window), idempotency races, revocation visibility, cross-service
+parameter substitution, migration races, and the behaviour of every failure path
+(lock-timeout, statement-timeout, dropped connection, degraded latch, rollback).
+Two real defects were found and fixed; both have mutation-checked regression tests.
+
+1. **A connection lost mid-decision could split the decision across two
+   transactions.** `_prepare` reconnected whenever the connection was closed —
+   including inside a `decision_cycle`. A drop after the idempotency claim then
+   re-ran the remaining writes on a new transaction *without* the advisory lock,
+   and the decision still returned `ALLOW`: the claim was lost, so the same
+   idempotency key was authorized a second time. Fix: a connection lost inside a
+   decision is not reconnected; the decision fails closed (`HOLD`), while an
+   ordinary later call still reconnects.
+   Test: `test_connection_drop_mid_decision_fails_closed_without_partial_state`.
+
+2. **A forged token could attribute its refusals to another service.** A signer
+   refusal was counted against `token.service_id`, a field an attacker controls on
+   a forged token. An authenticated attacker could set it to a victim service and,
+   after `max_rejected_authorizations` refusals, drive the victim's own next
+   transaction into `HOLD` — a cross-service denial of service. Fix: a refusal is
+   attributed to the verified requester (`expected_service_id`), and the guard API
+   binds `expected_service_id` to the authenticated caller rather than a body
+   field. Tests: `test_refusal_is_attributed_to_the_requester_not_the_forged_token`,
+   `test_a_forged_token_cannot_drive_another_service_into_a_hold`,
+   `test_sign_refusal_is_attributed_to_the_authenticated_caller`.
+
+Every other attempted bypass was refused. In particular, concurrent signing of one
+token on eight separate connections executed exactly once; a 20-way and an
+eight-process race against a shared spend window admitted no more than the window
+allowed; a replayed nonce, a replayed token, a substituted parameter, a token for
+another service, and an expired token were all refused; and a lock-timeout or a
+statement-timeout failed closed without latching the store degraded. The 16
+structural invariants all hold, and the offline demo is byte-identical across runs.

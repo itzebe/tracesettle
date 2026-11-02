@@ -401,6 +401,84 @@ def test_reconnect_to_an_unreachable_database_fails_closed():
             store.events_since(since=0)
     finally:
         store.close()
+def test_connection_drop_mid_decision_fails_closed_without_partial_state(pg_dsn_value):
+    """A link lost *inside* a decision must fail closed, never split the transaction.
+
+    Regression for a real defect: ``_prepare`` used to reconnect whenever the
+    connection was closed, including mid-decision. A drop after the idempotency
+    claim then re-ran the remaining writes on a *new* transaction (without the
+    advisory lock) and the decision still returned ALLOW — the claim was lost, so
+    the same idempotency key was authorized a second time. The fix makes a
+    mid-decision drop fail closed.
+    """
+    from tracesettle.guard.state_pg import PostgresGuardStateStore
+
+    store = PostgresGuardStateStore(pg_dsn_value)
+    service = build_service(store, key=TEST_KEY)
+    original_remember = store.remember_decision
+
+    dropped = {"done": False}
+
+    def drop_after_claim(request_key, decision_id, **kwargs):  # noqa: ANN001
+        recorded = original_remember(request_key, decision_id, **kwargs)
+        if not dropped["done"]:
+            dropped["done"] = True
+            store._connection.close()  # simulate the link dropping mid-decision
+        return recorded
+
+    store.remember_decision = drop_after_claim  # type: ignore[assignment]
+    try:
+        decision = service.evaluate_payload(
+            {
+                "service_id": "treasury-agent",
+                "operation": "WITHDRAWAL",
+                "chain": "eth",
+                "asset": "USDC",
+                "amount": "100",
+                "destination": APPROVED_DESTINATION,
+                "idempotency_key": "mid-decision-drop",
+            }
+        )
+    finally:
+        store.remember_decision = original_remember  # type: ignore[assignment]
+        store.close()
+
+    assert decision.decision is Decision.HOLD, (
+        f"a mid-decision connection drop yielded {decision.decision.value}; it must "
+        "fail closed"
+    )
+    assert decision.authorization is None, "no authorization may be issued on a failed decision"
+
+    # The claim must not have leaked: a fresh instance sees the key as unused, so a
+    # legitimate retry is possible, and no counter event was committed either.
+    fresh = PostgresGuardStateStore(pg_dsn_value)
+    try:
+        assert fresh.decision_for("treasury-agent:mid-decision-drop") is None
+        assert fresh.events_since(since=0) == []
+    finally:
+        fresh.close()
+
+
+def test_a_mid_decision_drop_does_not_leave_the_store_usable_for_partial_writes(pg_dsn_value):
+    """After a mid-decision drop the connection is dead; the next call reconnects safely.
+
+    The point is that the *decision* fails closed while an ordinary later call
+    (outside any decision) still reconnects — the reconnect policy is unchanged
+    for non-decision work.
+    """
+    from tracesettle.guard.state_pg import PostgresGuardStateStore
+
+    store = PostgresGuardStateStore(pg_dsn_value)
+    try:
+        with pytest.raises(StateStoreError):
+            with store.decision_cycle():
+                store._connection.close()
+                store.remember_decision("svc:partial", "dec-x")
+        # Outside a decision the store still reconnects and works.
+        assert store.remember_decision("svc:after-drop", "dec-y") is True
+        assert not store.degraded
+    finally:
+        store.close()
 
 
 # --- 8. migrations preserve existing data -----------------------------------

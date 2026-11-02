@@ -189,6 +189,12 @@ class PostgresGuardStateStore:
         #: conflict. Once set, every read and write raises, so a counter that
         #: failed to persist cannot leave a limit silently unenforced.
         self._degraded = False
+        #: True while a decision transaction is open on this store. A dropped
+        #: connection must then fail closed rather than reconnect: reconnecting
+        #: would run the rest of the decision on a *new* transaction (and without
+        #: the advisory lock), splitting one atomic decision into two and
+        #: committing a partial result. See :meth:`_prepare`.
+        self._in_decision = False
         self._decision_lock_timeout_ms = max(0, int(decision_lock_timeout_ms))
         # The DSN is a secret: keep it, never log it. Only host/port may appear in
         # an error, and even that is optional.
@@ -276,14 +282,29 @@ class PostgresGuardStateStore:
     def _prepare(self) -> None:
         """Fail closed if the store is unusable, and reconnect if the link dropped.
 
-        A lost connection is *not* a reason to latch degraded: every operation is
-        either a read or an idempotent single-statement write, and an interrupted
-        transaction is rolled back by the server, so a fresh connection is safe to
-        use. Latching degraded here would take an instance out of service for a
-        transient network blip. A non-connection write failure still latches.
+        A lost connection is *not* a reason to latch degraded: every operation
+        outside a decision is either a read or an idempotent single-statement
+        write, and an interrupted transaction is rolled back by the server, so a
+        fresh connection is safe to use. Latching degraded here would take an
+        instance out of service for a transient network blip. A non-connection
+        write failure still latches.
+
+        The one exception is a connection lost *inside* a decision transaction.
+        Reconnecting then would silently run the rest of the decision on a new
+        transaction — and without the advisory lock — so the decision's writes
+        (the idempotency claim, the counter events) would be split across two
+        transactions and a partial result could be committed while the caller
+        still sees ``ALLOW``. So a drop mid-decision fails closed instead: the
+        decision is abandoned and the caller treats it as a state-store failure.
         """
         self._guard_usable()
         if self._connection is None or self._connection.closed:
+            if self._in_decision:
+                raise StateStoreError(
+                    "the database connection was lost inside a decision transaction; "
+                    "refusing to reconnect mid-decision so a partial decision cannot "
+                    "be committed"
+                )
             try:
                 self._connection = self._connect()
             except Exception as exc:
@@ -373,31 +394,45 @@ class PostgresGuardStateStore:
         """
         with self._lock:
             self._prepare()
+            previous_in_decision = self._in_decision
+            self._in_decision = True
             try:
-                with self._connection.transaction():
-                    with self._connection.cursor() as cur:
-                        # Serialise decisions across instances, with a bounded wait.
-                        cur.execute(f"SET LOCAL lock_timeout = {int(self._decision_lock_timeout_ms)}")
-                        cur.execute("SELECT pg_advisory_xact_lock(%s)", (_DECISION_LOCK_KEY,))
-                    yield
-            except StateStoreConflict:
-                raise
-            except Exception as exc:
-                # Only a real database error is translated. An exception raised by
-                # the caller's own decision body (an application error) is left to
-                # propagate unchanged: the transaction still rolls back, but the
-                # store is not degraded, exactly as the SQLite backend behaves.
-                if isinstance(exc, self._psycopg.Error):
-                    if getattr(exc, "sqlstate", None) in _RETRYABLE_SQLSTATES:
-                        # The advisory-lock wait timed out, or a serialization
-                        # failure slipped through: transient, retryable, and
-                        # fail-closed if the caller gives up.
-                        raise StateStoreConflict(
-                            "the decision could not acquire the shared decision lock in "
-                            "time; the request was not evaluated"
-                        ) from exc
-                    self._raise_for(exc, "running a decision transaction")
-                raise
+                try:
+                    with self._connection.transaction():
+                        with self._connection.cursor() as cur:
+                            # Serialise decisions across instances, with a bounded wait.
+                            cur.execute(f"SET LOCAL lock_timeout = {int(self._decision_lock_timeout_ms)}")
+                            cur.execute("SELECT pg_advisory_xact_lock(%s)", (_DECISION_LOCK_KEY,))
+                        yield
+                except StateStoreConflict:
+                    raise
+                except Exception as exc:
+                    # Only a real database error is translated. An exception raised by
+                    # the caller's own decision body (an application error) is left to
+                    # propagate unchanged: the transaction still rolls back, but the
+                    # store is not degraded, exactly as the SQLite backend behaves.
+                    if isinstance(exc, self._psycopg.Error):
+                        # A connection lost mid-decision is *not* retryable: the
+                        # transaction is gone, so re-running the body here would be
+                        # unsafe, and _prepare already refuses to reconnect. Treat it
+                        # as a plain fail-closed store error.
+                        connection_lost = isinstance(
+                            exc, (self._psycopg.OperationalError, self._psycopg.InterfaceError)
+                        )
+                        if (
+                            not connection_lost
+                            and getattr(exc, "sqlstate", None) in _RETRYABLE_SQLSTATES
+                        ):
+                            # The advisory-lock wait timed out: transient, retryable,
+                            # and fail-closed if the caller gives up.
+                            raise StateStoreConflict(
+                                "the decision could not acquire the shared decision lock in "
+                                "time; the request was not evaluated"
+                            ) from exc
+                        self._raise_for(exc, "running a decision transaction")
+                    raise
+            finally:
+                self._in_decision = previous_in_decision
 
     # -- replay: atomic nonce consumption ----------------------------------
 
