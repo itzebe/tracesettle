@@ -155,3 +155,31 @@ def test_public_binding_with_service_auth_and_keys_starts():
 def test_profile_description_contains_no_secret_value():
     profile = _validate("0.0.0.0", api_key="super-secret-key")
     assert "super-secret-key" not in profile.describe()
+
+
+# --- client policy selection is loopback-only ------------------------------
+
+
+def test_public_binding_with_client_policy_selection_is_refused(monkeypatch):
+    """Client-supplied policy selection must never be reachable publicly.
+
+    It lets a caller choose the policy it is evaluated against, which is the
+    enforcement decision itself. A public bind therefore refuses to start.
+    """
+    from tracesettle import config
+
+    monkeypatch.setattr(config, "NEAR_ALLOW_CLIENT_POLICY_SELECTION", True)
+    with pytest.raises(ConfigurationError) as excinfo:
+        _validate("0.0.0.0")
+    message = str(excinfo.value)
+    assert "TRACESETTLE_NEAR_ALLOW_CLIENT_POLICY_SELECTION" in message
+    # The message names the variable, never a value.
+    assert "0.0.0.0" in message
+
+
+def test_loopback_binding_with_client_policy_selection_starts(monkeypatch):
+    from tracesettle import config
+
+    monkeypatch.setattr(config, "NEAR_ALLOW_CLIENT_POLICY_SELECTION", True)
+    profile = _validate("127.0.0.1")
+    assert profile.public_binding is False

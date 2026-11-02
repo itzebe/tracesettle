@@ -62,9 +62,9 @@ ATTACKER_DESTINATION = "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
 #: A synthetic denied destination, matching the default policy's deny list.
 DENIED_DESTINATION = "0x000000000000000000000000000000000000dEaD"
 
-FIXTURE_DIR = (
-    pathlib.Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "near"
-)
+#: Shipped with the package, so the demo works in a container that copies only
+#: ``tracesettle/`` (the production image copies the package, not the tests).
+FIXTURE_DIR = pathlib.Path(__file__).resolve().parent / "fixtures"
 
 SIMULATION_NOTE = (
     "These scenarios are controlled simulations. The transaction parameters are synthetic, the "

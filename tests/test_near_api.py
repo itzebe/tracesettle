@@ -8,6 +8,7 @@ honoured. No network call is made.
 
 from __future__ import annotations
 
+import json
 import pathlib
 
 from tracesettle.guard.api import GuardAPI
@@ -22,7 +23,7 @@ from tracesettle.near.tee import (
 )
 from decimal import Decimal
 
-FIXTURE_DIR = pathlib.Path(__file__).resolve().parent / "fixtures" / "near"
+FIXTURE_DIR = pathlib.Path(__file__).resolve().parent.parent / "tracesettle" / "near" / "fixtures"
 
 APPROVED = "0x1111111111111111111111111111111111111111"
 ATTACKER = "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
@@ -168,7 +169,12 @@ def test_agent_evaluate_can_return_the_authorization_when_asked():
     assert response.payload["guard_decision"]["authorization"] is not None
 
 
-def test_agent_evaluate_uses_a_policy_fixture_when_supplied():
+def test_agent_evaluate_ignores_a_client_supplied_policy_fixture(monkeypatch):
+    """A caller must not be able to choose the policy it is judged against.
+
+    Honouring ``policy_fixture`` by default let a client replace the operator's
+    restrictive policy with a permissive one and turn a BLOCK into an ALLOW.
+    """
     fixture = str(FIXTURE_DIR / "policy_in_force.json")
     response = _api().dispatch(
         "POST",
@@ -177,7 +183,52 @@ def test_agent_evaluate_uses_a_policy_fixture_when_supplied():
         {"transaction": _tx(), "policy_fixture": fixture},
     )
     assert response.status == 200
+    policy = response.payload.get("policy")
+    assert policy is None or policy.get("local_fixture") is not True
+
+
+def test_a_client_policy_fixture_cannot_flip_a_block_to_allow(monkeypatch, tmp_path):
+    """The bypass this guards: permissive fixture overrides a restrictive policy."""
+    permissive = {
+        "agent_id": "treasury-agent",
+        "revision": 99,
+        "status": "APPLIED",
+        "provider_policy_synced": True,
+        "frozen": False,
+        "actions": ["withdraw"],
+        "destinations": {"mode": "any", "list": []},
+        "limits": {},
+    }
+    path = tmp_path / "permissive.json"
+    path.write_text(json.dumps(permissive))
+    # A destination the guard policy does NOT approve.
+    response = _api().dispatch(
+        "POST",
+        "/api/guard/near/agent-evaluate",
+        {},
+        {"transaction": _tx(destination=ATTACKER), "policy_fixture": str(path)},
+    )
+    assert response.payload["outcome"] != "ALLOW"
+    assert response.payload["permits_signing"] is False
+
+
+def test_operator_policy_fixture_is_honoured(monkeypatch, tmp_path):
+    """The operator's configured fixture still applies; only the client's is ignored."""
+    from tracesettle import config
+
+    fixture = FIXTURE_DIR / "policy_in_force.json"
+    monkeypatch.setattr(config, "NEAR_POLICY_FIXTURE", str(fixture))
+    response = _api().dispatch(
+        "POST", "/api/guard/near/agent-evaluate", {}, {"transaction": _tx()}
+    )
+    assert response.status == 200
     assert response.payload["policy"]["local_fixture"] is True
+
+
+def test_client_policy_selection_is_off_by_default(monkeypatch):
+    from tracesettle import config
+
+    assert config.NEAR_ALLOW_CLIENT_POLICY_SELECTION is False
 
 
 def test_agent_evaluate_never_honours_a_client_approval_flag():

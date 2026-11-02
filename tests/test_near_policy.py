@@ -25,7 +25,7 @@ from tracesettle.near.policy import (
     parse_policy,
 )
 
-FIXTURE_DIR = pathlib.Path(__file__).resolve().parent / "fixtures" / "near"
+FIXTURE_DIR = pathlib.Path(__file__).resolve().parent.parent / "tracesettle" / "near" / "fixtures"
 
 
 def load(name: str) -> dict:

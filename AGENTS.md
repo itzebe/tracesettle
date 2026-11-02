@@ -918,3 +918,55 @@ engine and its correlation rules are untouched.
   byte-identical, every scenario must match expectation).
 - **Not done, and requiring explicit human confirmation:** making the repository
   public, pushing, posting on X, and sending the submission.
+
+## Independent security audit of the NEAR integration (2026-11-02)
+
+Adversarial review of the NEAR agent-authorization integration. Two real defects
+were found; both are fixed with mutation-checked regression tests. The full
+suite went 851 → 861 passed, pyflakes clean, compileall OK, both demos
+byte-identical.
+
+- **CRITICAL — client-selectable enforcement policy (fixed).**
+  `POST /api/guard/near/agent-evaluate` honoured a caller-supplied
+  `policy_fixture` (and `agent_id`) *before* the operator's configuration. A
+  caller could therefore hand the server a permissive policy and replace the
+  operator's restrictive one: reproduced live, an operator-configured
+  restrictive policy returned `BLOCK`, and the same request plus a client
+  `policy_fixture` returned `ALLOW` / `permits_signing: true`. That is a total
+  authorization bypass — the attacker chooses the rules it is judged by.
+  **Fix:** policy resolution is now server-side only (operator fixture → Agent
+  API → guard policy). `policy_fixture`/`agent_id` are ignored unless
+  `TRACESETTLE_NEAR_ALLOW_CLIENT_POLICY_SELECTION` is explicitly on, and that
+  flag makes a **public binding refuse to start** (`securityconfig.validate_startup`,
+  no override), matching the existing fail-closed pattern. New invariant
+  `near_policy_selection_is_not_client_controlled` (21 total, 5 NEAR) plus
+  `tests/test_near_api.py` (client fixture ignored, permissive fixture cannot
+  flip BLOCK→ALLOW, operator fixture still honoured) and
+  `tests/test_near_invariants.py` (mutation). Mutation-checked: reverting the
+  guard fails the invariant and the API test.
+- **HIGH — fixtures outside the shipped image (fixed).** Runtime code read
+  fixtures from `tests/fixtures/near/`, but the Dockerfile copies only
+  `tracesettle/` + `README.md`, so every NEAR route raised `FileNotFoundError`
+  in the production image. Fixtures now live in `tracesettle/near/fixtures/` and
+  are loaded package-relative (`attacks.py`, `guard/api.py`, `guard/invariants.py`,
+  `demo/near_demo.py`). Regression test `tests/test_near_packaging.py` rebuilds
+  the image layout. Verified: a directory holding only `tracesettle/` +
+  `README.md` serves every NEAR route `200` with zero errors.
+- **Production outage — wrong database (diagnosed, operator action required).**
+  The production deployment returns HTTP 500 on every route. Root cause: the
+  configured PostgreSQL DSN points at a database whose `schema_version` table
+  says **5**, while the build understands **2**, so the guard refuses to start
+  (`refusing to run against it`, exit 2). No code in the repository or its
+  entire history ever defined a schema version above 2 (verified by scanning
+  every blob in every ref), so the DSN targets a database owned by another
+  application — the memory notes point at a shared Neon instance with the PACT
+  project. **This is not a code defect:** the fail-closed behaviour is correct,
+  and the remedy is to point `TRACESETTLE_GUARD_STATE_PG_DSN` at this project's
+  own database (or a fresh one), not to widen the accepted schema range.
+- **Verified sound (no change):** the five-outcome boundary and its
+  signer-side re-validation (defeats destination substitution after approval);
+  `parse_access_key` treating an unrecognised permission as unrestricted rather
+  than safe; single-use nonces, expiry, and parameter binding; service-identity
+  binding on the NEAR route; no key material in any response.
+- **Not done, requires explicit human confirmation:** making the repository
+  public, pushing, opening the PR, posting the demo, and sending the submission.

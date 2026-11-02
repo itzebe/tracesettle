@@ -228,6 +228,22 @@ service-facing routes. It never returns the authorization unless
 | `TRACESETTLE_NEAR_AGENT_API_KEY` | Agent API key. Never logged or returned. |
 | `TRACESETTLE_NEAR_POLICY_FIXTURE` | Path to a local policy fixture. |
 | `TRACESETTLE_NEAR_AGENT_ID` | Default agent id to read a policy for. |
+| `TRACESETTLE_NEAR_ALLOW_CLIENT_POLICY_SELECTION` | Off by default. When off, `policy_fixture` and `agent_id` in a request body are **ignored** and the operator's configuration governs. Loopback-only: a public binding refuses to start with it set. |
+
+### The evaluated policy is not client-selectable
+
+The policy a request is judged against is part of the enforcement decision, so
+the caller must not choose it. With `TRACESETTLE_NEAR_ALLOW_CLIENT_POLICY_SELECTION`
+unset (the default), `POST /api/guard/near/agent-evaluate` resolves the policy
+from the server only:
+
+1. `TRACESETTLE_NEAR_POLICY_FIXTURE` — the operator's pinned fixture.
+2. The configured Agent API (`TRACESETTLE_NEAR_AGENT_API_URL`).
+3. Nothing, so the guard's own policy governs.
+
+A request body may name `policy_fixture` or `agent_id` only when the flag is
+explicitly on. This is asserted by the invariant
+`near_policy_selection_is_not_client_controlled` and mutation-tested.
 
 The runtime stays standard-library only. The NEAR package adds no dependency.
 

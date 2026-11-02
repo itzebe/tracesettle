@@ -115,6 +115,20 @@ def validate_startup(
     if not public_binding:
         return profile
 
+    # Client-supplied policy selection is a local-only affordance: it lets a
+    # caller choose the policy it is judged against, which is exactly what the
+    # enforcement boundary must not allow. Refuse rather than warn, so a
+    # public deployment cannot be tricked into it by one environment variable.
+    from . import config
+
+    if config.NEAR_ALLOW_CLIENT_POLICY_SELECTION:
+        raise ConfigurationError(
+            "TRACESETTLE_NEAR_ALLOW_CLIENT_POLICY_SELECTION is set together with a public "
+            "binding (host=%r). Client-supplied policy selection lets a caller choose the "
+            "policy it is evaluated against, so it is loopback-only. Unset it, or bind "
+            "127.0.0.1." % (host,)
+        )
+
     missing: list[str] = []
     if not api_key:
         missing.append("TRACESETTLE_API_KEY")

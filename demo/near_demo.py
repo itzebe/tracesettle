@@ -34,7 +34,7 @@ from tracesettle.near.access_keys import parse_access_key  # noqa: E402
 from tracesettle.near.policy import PolicyAdapter, controls_applicable_to  # noqa: E402
 from tracesettle.near.policy import PolicyScope  # noqa: E402
 
-FIXTURE_DIR = pathlib.Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "near"
+FIXTURE_DIR = pathlib.Path(__file__).resolve().parents[1] / "tracesettle" / "near" / "fixtures"
 
 
 def _print_scenario(result) -> None:

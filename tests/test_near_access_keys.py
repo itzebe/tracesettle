@@ -21,7 +21,7 @@ from tracesettle.near.access_keys import (
     worst_risk,
 )
 
-FIXTURE_DIR = pathlib.Path(__file__).resolve().parent / "fixtures" / "near"
+FIXTURE_DIR = pathlib.Path(__file__).resolve().parent.parent / "tracesettle" / "near" / "fixtures"
 
 
 def load_keys() -> dict:

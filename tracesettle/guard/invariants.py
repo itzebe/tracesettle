@@ -653,7 +653,7 @@ def _near_policy_fixture(name: str):
 
     from ..near.policy import PolicyAdapter
 
-    root = _pathlib.Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "near"
+    root = _pathlib.Path(__file__).resolve().parents[1] / "near" / "fixtures"
     raw = json.loads((root / name).read_text())
     return PolicyAdapter.from_fixture(raw)
 
@@ -692,6 +692,82 @@ def _near_policy_must_be_in_force():
         "near_policy_must_be_in_force",
         True,
         f"a signed-but-not-applied policy yields {decision.outcome.value}, never ALLOW",
+    )
+
+
+def _near_policy_selection_is_not_client_controlled():
+    """A request must not be able to choose the policy it is judged against."""
+    from .. import config
+    from .api import GuardAPI
+
+    if config.NEAR_ALLOW_CLIENT_POLICY_SELECTION:
+        return InvariantResult(
+            "near_policy_selection_is_not_client_controlled",
+            True,
+            "client policy selection is explicitly enabled; not exercised "
+            "(loopback-only affordance, refused on a public binding)",
+        )
+
+    api = GuardAPI(GuardService(policy=DEFAULT_POLICY))
+    # A permissive fixture that would allow an unapproved destination.
+    permissive = {
+        "agent_id": "treasury-agent",
+        "revision": 99,
+        "status": "APPLIED",
+        "provider_policy_synced": True,
+        "frozen": False,
+        "actions": ["withdraw", "transfer", "swap"],
+        "destinations": {"mode": "any", "list": []},
+        "limits": {},
+    }
+    import json
+    import tempfile
+
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
+        json.dump(permissive, handle)
+        path = handle.name
+    try:
+        response = api.dispatch(
+            "POST",
+            "/api/guard/near/agent-evaluate",
+            {},
+            {
+                "transaction": {
+                    "service_id": "treasury-agent",
+                    "operation": "WITHDRAWAL",
+                    "chain": "base",
+                    "asset": "USDC",
+                    "amount": "1",
+                    "destination": _UNAPPROVED,
+                    "scope": "INTENTS",
+                    "policy_action": "withdraw",
+                },
+                "policy_fixture": path,
+            },
+        )
+    finally:
+        import os
+
+        os.unlink(path)
+
+    payload = response.payload
+    if payload.get("permits_signing") or payload.get("outcome") == "ALLOW":
+        return InvariantResult(
+            "near_policy_selection_is_not_client_controlled",
+            False,
+            "a client-supplied policy fixture changed the decision to ALLOW",
+        )
+    policy = payload.get("policy")
+    if isinstance(policy, dict) and policy.get("local_fixture") is True:
+        return InvariantResult(
+            "near_policy_selection_is_not_client_controlled",
+            False,
+            "the decision used a policy the client supplied",
+        )
+    return InvariantResult(
+        "near_policy_selection_is_not_client_controlled",
+        True,
+        "a client-supplied policy fixture was ignored; the operator's policy governs",
     )
 
 
@@ -810,6 +886,9 @@ INVARIANTS: dict[str, Callable[[], InvariantResult]] = {
         _postgres_shared_state_refuses_cross_instance_replay
     ),
     "near_policy_must_be_in_force": _near_policy_must_be_in_force,
+    "near_policy_selection_is_not_client_controlled": (
+        _near_policy_selection_is_not_client_controlled
+    ),
     "near_native_scope_gap_is_always_stated": _near_native_scope_gap_is_always_stated,
     "near_function_call_key_cannot_transfer_near": _near_function_call_key_cannot_transfer_near,
     "near_provider_success_is_never_verified_without_evidence": (
@@ -836,6 +915,7 @@ INVARIANT_DESCRIPTIONS: dict[str, str] = {
     "state_store_failure_fails_closed": "An unreadable durable state store yields HOLD with no authorization, never ALLOW.",
     "postgres_shared_state_refuses_cross_instance_replay": "With the PostgreSQL backend, a nonce spent by one instance is refused as a replay by another.",
     "near_policy_must_be_in_force": "A NEAR Intents policy update that is signed or requested but not APPLIED and provider-synced is never treated as active.",
+    "near_policy_selection_is_not_client_controlled": "A request cannot choose the NEAR Intents policy it is evaluated against; the operator's configuration governs.",
     "near_native_scope_gap_is_always_stated": "A native NEAR/EVM/Solana request is never described as protected by the Intents destinations, budget, timelock, schedule or owner approval.",
     "near_function_call_key_cannot_transfer_near": "A NEAR function-call key is never treated as able to transfer NEAR or attach NEAR tokens to a call.",
     "near_provider_success_is_never_verified_without_evidence": "A provider success status never yields an independently-verified settlement level without decisive on-chain evidence.",

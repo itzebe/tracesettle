@@ -88,7 +88,7 @@ Amounts are exact `Decimal`s: a limit of `0.3` admits `0.3` and refuses
 `0.30000000000000004`. Severity is compared by an explicit rank, never by the
 severity's string value (`"MEDIUM"` sorts after `"HIGH"` alphabetically).
 
-Twenty structural guarantees are checked by *running the real code*, on demand, at
+Twenty-one structural guarantees are checked by *running the real code*, on demand, at
 `GET /api/guard/invariants` — including `refusal_never_reaches_the_executor` and
 `authorization_is_single_use`. Each checker is also mutation-tested: the guarded
 behaviour is deliberately broken and the checker must notice. A checker that
@@ -181,7 +181,7 @@ refusal is provable: the executor is never called unless the outcome was `ALLOW`
 | H | Native tx wrongly assumed protected by an Intents-only policy | policy-scope rejection |
 | I | Provider reports success without independent evidence | `UNKNOWN` / `UNAVAILABLE` |
 
-Four NEAR-specific structural guarantees join the invariant set, each
+Five NEAR-specific structural guarantees join the invariant set, each
 mutation-tested: `near_policy_must_be_in_force`,
 `near_native_scope_gap_is_always_stated`,
 `near_function_call_key_cannot_transfer_near`, and
@@ -266,7 +266,7 @@ curl -sS -X POST http://127.0.0.1:8080/api/guard/sign \
 curl -sS http://127.0.0.1:8080/api/guard/invariants \
   | python3 -c 'import sys,json;d=json.load(sys.stdin);print("all hold:",d["all_hold"]);[print(" ",i["name"]) for i in d["invariants"]]'
 ```
-→ `all hold: True` and the twenty invariant names, including the four NEAR
+→ `all hold: True` and the twenty-one invariant names, including the five NEAR
 ones (`near_policy_must_be_in_force`, `near_native_scope_gap_is_always_stated`,
 `near_function_call_key_cannot_transfer_near`,
 `near_provider_success_is_never_verified_without_evidence`).
@@ -521,7 +521,7 @@ transaction request ──▶ │ guard/rules.py      7 controls, all run  │
                         │                     validate, then execute │
                         │ guard/audit.py      hash-chained records  │
                         │ guard/monitor.py    counters + incidents  │
-                        │ guard/invariants.py 16 checked guarantees │
+                        │ guard/invariants.py 21 checked guarantees │
                         └────────────────────┬─────────────────────┘
                                              │ ALLOW + authorization
                                              ▼
@@ -590,7 +590,7 @@ identical decisions.
 | `tracesettle/guard/service.py` | Orchestration: controls → authorization → monitor → audit. |
 | `tracesettle/guard/state.py` | Durable state: `GuardStateStore` (SQLite), backend-aware `open_state_store`. |
 | `tracesettle/guard/state_pg.py` | Optional PostgreSQL backend: shared nonces, counters, revocations, idempotency. |
-| `tracesettle/guard/invariants.py` | The twenty structural guarantees, checked by execution. |
+| `tracesettle/guard/invariants.py` | The twenty-one structural guarantees, checked by execution. |
 | `tracesettle/guard/api.py` | Guard HTTP routing and JSON serialization. |
 | `tracesettle/guard/console.py` | The security operations console page. |
 | `docs/TRANSACTION_SECURITY.md` | The security layer in full, including what it does not do. |
@@ -688,7 +688,7 @@ variable and all documented in `docs/TRANSACTION_SECURITY.md`:
   replay-nonce store all have explicit caps, so a flood cannot exhaust memory.
   When durable state is configured, spent nonces and the limit counters live in
   SQLite instead, so they survive a restart (see **Durable state** below).
-- **Structural invariants, checked by execution.** Twenty guarantees at
+- **Structural invariants, checked by execution.** Twenty-one guarantees at
   `GET /api/guard/invariants`, each mutation-tested so a checker that cannot fail
   is treated as a defect.
 - **Honest audit claim.** In-place modification of an audit record is detectable;
@@ -895,7 +895,7 @@ immutable commit SHA (not a moving tag), and cancels superseded runs.
 ## Tests
 
 ```sh
-python3 -m pytest tests/ -q          # 851 passed, 24 skipped (875 with a server)
+python3 -m pytest tests/ -q          # 861 passed, 24 skipped (885 with a server)
 python3 -m pytest tests/test_guard_authorization.py -q
 python3 -m pytest tests/test_guard_invariants.py -q
 python3 -m pytest tests/test_guard_end_to_end.py -q
@@ -954,7 +954,7 @@ Intents), a function-call key that cannot transfer NEAR, a full-access key that
 forces review, the five outcomes, determinism, an invalid amount failing safe to
 `UNKNOWN`, a client-supplied approval flag never honoured, and the settlement
 assurance rule that a provider success claim is never independently verified
-without decisive evidence. Each of the four NEAR invariants is mutation-tested.
+without decisive evidence. Each of the five NEAR invariants is mutation-tested.
 
 ## Read-only guarantee
 

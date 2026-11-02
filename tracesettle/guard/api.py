@@ -185,9 +185,16 @@ class GuardAPI:
 
     @staticmethod
     def _near_fixture_dir() -> Any:
+        """The NEAR fixtures, shipped inside the package.
+
+        They live in ``tracesettle/near/fixtures`` rather than under ``tests/``
+        so a container that copies only the package (the production image) can
+        still serve these endpoints. Loading them from ``tests/`` made three
+        routes raise ``FileNotFoundError`` in the image and drop the connection.
+        """
         import pathlib
 
-        return pathlib.Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "near"
+        return pathlib.Path(__file__).resolve().parents[1] / "near" / "fixtures"
 
     def _near_access_keys(self) -> dict[str, Any]:
         """Analyse the documented access-key shapes. Fixtures, clearly labelled."""
@@ -366,11 +373,27 @@ class GuardAPI:
         )
 
     def _near_policy_read(self, body: Any) -> Any:
-        """Resolve the policy read: explicit fixture, configured provider, or none."""
+        """Resolve the policy read from the *server's* configuration.
+
+        The policy a request is judged against is part of the enforcement
+        decision, so the caller must not choose it. Resolution order:
+
+        1. ``TRACESETTLE_NEAR_POLICY_FIXTURE`` — the operator's pinned fixture.
+        2. The configured Agent API (``TRACESETTLE_NEAR_AGENT_API_URL``).
+        3. Nothing, so the guard's own policy governs.
+
+        A request body may name ``policy_fixture`` or ``agent_id`` only when
+        ``TRACESETTLE_NEAR_ALLOW_CLIENT_POLICY_SELECTION`` is explicitly on, a
+        loopback-only affordance for exploring alternative policies. Honouring
+        them by default let a caller replace a restrictive operator policy with
+        a permissive one and turn a BLOCK into an ALLOW.
+        """
         from .. import config
         from ..near.policy import PolicyAdapter, load_fixture
 
-        fixture = body.get("policy_fixture")
+        allow_client_selection = bool(config.NEAR_ALLOW_CLIENT_POLICY_SELECTION)
+
+        fixture = body.get("policy_fixture") if allow_client_selection else None
         if isinstance(fixture, str) and fixture.strip():
             return load_fixture(fixture.strip())
         if config.NEAR_POLICY_FIXTURE:
@@ -381,7 +404,9 @@ class GuardAPI:
                 api_key=config.NEAR_AGENT_API_KEY,
                 http_client=self.service.http_client,
             )
-            agent_id = body.get("agent_id") or config.NEAR_AGENT_ID
+            agent_id = (
+                body.get("agent_id") if allow_client_selection else None
+            ) or config.NEAR_AGENT_ID
             return adapter.read_policy(str(agent_id))
         return None
 

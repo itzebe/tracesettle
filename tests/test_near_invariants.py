@@ -11,12 +11,12 @@ import pathlib
 
 from tracesettle.guard import invariants as inv
 
-FIXTURE_DIR = pathlib.Path(__file__).resolve().parent / "fixtures" / "near"
+FIXTURE_DIR = pathlib.Path(__file__).resolve().parent.parent / "tracesettle" / "near" / "fixtures"
 
 
 def test_near_invariants_are_registered():
     near = [name for name in inv.INVARIANTS if name.startswith("near_")]
-    assert len(near) == 4
+    assert len(near) == 5
     assert all(name in inv.INVARIANT_DESCRIPTIONS for name in near)
 
 
@@ -72,3 +72,23 @@ def test_near_settlement_invariant_notices_a_false_verification(monkeypatch):
 def test_near_invariants_hold_unmutated():
     for name in [n for n in inv.INVARIANTS if n.startswith("near_")]:
         assert inv.INVARIANTS[name]().holds is True
+
+
+def test_near_policy_selection_invariant_fails_if_a_client_fixture_is_honoured(monkeypatch):
+    """Mutation check: the invariant must fail when client policy selection returns."""
+    from tracesettle.guard import api as api_mod
+
+    original = api_mod.GuardAPI._near_policy_read
+
+    def _honour_client_fixture(self, body):
+        from tracesettle.near.policy import load_fixture
+
+        fixture = body.get("policy_fixture")
+        if isinstance(fixture, str) and fixture.strip():
+            return load_fixture(fixture.strip())
+        return original(self, body)
+
+    monkeypatch.setattr(api_mod.GuardAPI, "_near_policy_read", _honour_client_fixture)
+    result = inv._near_policy_selection_is_not_client_controlled()
+    assert result.holds is False
+    assert "client supplied" in result.detail

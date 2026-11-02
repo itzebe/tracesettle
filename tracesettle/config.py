@@ -277,6 +277,26 @@ NEAR_AGENT_ID = os.environ.get("TRACESETTLE_NEAR_AGENT_ID") or "treasury-agent"
 #: Whether live policy reads are configured. Only presence is inspected here.
 NEAR_AGENT_API_CONFIGURED = bool(NEAR_AGENT_API_URL)
 
+#: Whether a request may name the policy it is evaluated against.
+#:
+#: Off by default, and that is the security-relevant default: the policy a
+#: request is judged against is part of the *enforcement* decision, so a caller
+#: must never be able to select it. With this off, ``policy_fixture`` and
+#: ``agent_id`` in a request body are ignored and the operator's configuration
+#: is used (``TRACESETTLE_NEAR_POLICY_FIXTURE``, then the configured Agent API,
+#: then the guard's own policy). Turning it on is a deliberate, loopback-only
+#: affordance for exploring alternative policies; it must never be enabled on a
+#: public binding.
+NEAR_ALLOW_CLIENT_POLICY_SELECTION = (
+    os.environ.get("TRACESETTLE_NEAR_ALLOW_CLIENT_POLICY_SELECTION", "").strip().lower()
+    in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+)
+
 # ---------------------------------------------------------------------------
 # Serve defaults (env-driven so a container image needs no CLI flags)
 # ---------------------------------------------------------------------------

@@ -33,7 +33,7 @@ from tracesettle.near.attacks import (
 )
 from tracesettle.near.policy import PolicyAdapter, PolicyScope
 
-FIXTURE_DIR = pathlib.Path(__file__).resolve().parent / "fixtures" / "near"
+FIXTURE_DIR = pathlib.Path(__file__).resolve().parent.parent / "tracesettle" / "near" / "fixtures"
 
 
 def load(name: str) -> dict:
