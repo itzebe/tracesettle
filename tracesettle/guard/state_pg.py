@@ -35,6 +35,11 @@ Distributed correctness is placed in the *database*, not in process-local locks
   rather than hanging.
 * **Idempotency and revocation** are ``PRIMARY KEY`` upserts, so they are
   single-valued across every instance.
+* **Migrations** are serialised by a session-scoped advisory lock
+  (``pg_advisory_lock``) held across the inspect-and-migrate sequence. PostgreSQL
+  ``CREATE TABLE IF NOT EXISTS`` is not atomic, so without this lock several
+  instances starting against the same empty database would race the catalog and
+  all but one would fail on a first deployment.
 
 Every method raises :class:`~tracesettle.guard.state.StateStoreError` on a
 database problem and never falls back to in-memory state, so an outage fails
@@ -79,6 +84,17 @@ DEFAULT_APPLICATION_NAME = "tracesettle"
 #: decisions across every instance. Any constant works as long as it is stable;
 #: this one is arbitrary but unique to the guard's decision cycle.
 _DECISION_LOCK_KEY = 0x54524143_45535431  # "TRACEST1"
+
+#: Fixed 64-bit key for the session-scoped advisory lock that serialises schema
+#: migration across every instance. Distinct from the decision lock so the two
+#: never contend. See :func:`_apply_pg_migrations`.
+_MIGRATION_LOCK_KEY = 0x54524143_4553544D  # "TRACESTM"
+
+#: How long a start-up waits for the migration lock before failing closed. A
+#: migration is a handful of DDL statements (milliseconds), so this only ever
+#: elapses if another instance is wedged mid-migration; failing the start-up is
+#: better than hanging forever.
+_MIGRATION_LOCK_TIMEOUT_MS = 30_000
 
 
 # ---------------------------------------------------------------------------
@@ -666,7 +682,67 @@ class PostgresGuardStateStore:
 
 
 def _apply_pg_migrations(connection: Any) -> None:
-    """Bring ``connection`` up to :data:`SCHEMA_VERSION`, one step per transaction."""
+    """Bring ``connection`` up to :data:`SCHEMA_VERSION`, one step per transaction.
+
+    The inspect-and-migrate sequence is serialised across every starting instance
+    by a session-scoped advisory lock. ``CREATE TABLE IF NOT EXISTS`` — and every
+    other ``IF NOT EXISTS`` statement here — is **not** atomic: two instances
+    starting against the same *empty* database can both observe the object missing
+    and both attempt to create it, and PostgreSQL rejects the loser with a
+    ``UniqueViolation`` on the internal ``pg_type`` catalog
+    (``pg_type_typname_nsp_index``). Without serialisation, every instance but one
+    fails to start on a first deployment.
+
+    The lock is held for the whole inspect-and-migrate sequence and released on the
+    same connection in a ``finally``, so a later instance waits, then re-reads the
+    *committed* version and finds nothing to do. The wait is bounded
+    (:data:`_MIGRATION_LOCK_TIMEOUT_MS`), so a wedged migration fails a start-up
+    closed instead of hanging it forever. A migration failure still propagates as
+    :class:`StateStoreError` with each step's transaction rolled back, so a
+    half-migrated database is never reported as successfully initialised.
+    """
+    # Capture the session's current lock_timeout so it can be restored exactly;
+    # ``set_config`` takes a bound parameter, unlike ``SET``.
+    with connection.cursor() as cur:
+        cur.execute("SELECT current_setting('lock_timeout')")
+        previous_lock_timeout = cur.fetchone()[0]
+        cur.execute(
+            "SELECT set_config('lock_timeout', %s, false)",
+            (str(int(_MIGRATION_LOCK_TIMEOUT_MS)),),
+        )
+    acquired = False
+    try:
+        try:
+            with connection.cursor() as cur:
+                cur.execute("SELECT pg_advisory_lock(%s)", (_MIGRATION_LOCK_KEY,))
+            acquired = True
+        except Exception as exc:
+            raise StateStoreError(
+                "could not acquire the schema-migration lock within "
+                f"{_MIGRATION_LOCK_TIMEOUT_MS} ms; another instance may be migrating"
+            ) from exc
+        _run_pg_migrations(connection)
+    finally:
+        # Best effort: never let cleanup mask a migration failure. If the
+        # connection is already dead the server releases the session lock when it
+        # closes, so a failed unlock here cannot leak the lock past this session.
+        if acquired:
+            try:
+                with connection.cursor() as cur:
+                    cur.execute("SELECT pg_advisory_unlock(%s)", (_MIGRATION_LOCK_KEY,))
+            except Exception:
+                pass
+        try:
+            with connection.cursor() as cur:
+                cur.execute(
+                    "SELECT set_config('lock_timeout', %s, false)", (previous_lock_timeout,)
+                )
+        except Exception:
+            pass
+
+
+def _run_pg_migrations(connection: Any) -> None:
+    """Apply each pending migration step, one transaction per step."""
     current = _read_pg_version(connection)
     if current > SCHEMA_VERSION:
         raise StateStoreError(

@@ -532,6 +532,140 @@ def test_newer_schema_version_is_refused(pg_dsn_value):
         store.close()
 
 
+# --- 8b. concurrent first-start on an empty database (migration race) -------
+
+
+def _init_store_in_process(dsn: str, start, results, tag) -> None:  # noqa: ANN001
+    """Open a fresh state store, report its schema version, and run one write.
+
+    Runs in its own OS process: the guarantee under test is that several
+    *independent* instances can migrate the same empty database at once, which a
+    thread cannot exercise (a process-local lock would hide the race).
+    """
+    from tracesettle.guard.state_pg import PostgresGuardStateStore
+
+    try:
+        start.wait(30)
+        store = PostgresGuardStateStore(dsn)
+        try:
+            version = store.schema_version()
+            # A write that only succeeds on a fully-migrated schema.
+            store.consume_nonce(f"migration-race-{tag}", 2_000_000_000.0)
+            results.put(("ok", version))
+        finally:
+            store.close()
+    except Exception as exc:  # noqa: BLE001 - any failure is the outcome under test
+        results.put(("error", f"{type(exc).__name__}: {exc}"))
+
+
+def _empty_database_dsn(pg_dsn_value: str, name: str) -> str:
+    """Create a brand-new empty database and return a DSN pointing at it.
+
+    Migrations only race on a database that has no schema at all, and the shared
+    suite database is already migrated, so the test needs its own empty database.
+    Requires the ``CREATEDB`` privilege; if the role lacks it, the test skips
+    (never silently passes).
+    """
+    import psycopg
+
+    admin = psycopg.connect(pg_dsn_value, autocommit=True)
+    try:
+        with admin.cursor() as cur:
+            cur.execute(f'DROP DATABASE IF EXISTS "{name}"')
+            cur.execute(f'CREATE DATABASE "{name}"')
+    except psycopg.errors.InsufficientPrivilege:  # pragma: no cover - role-dependent
+        pytest.skip("the PostgreSQL role cannot CREATE DATABASE; migration race not exercised")
+    finally:
+        admin.close()
+
+    from psycopg.conninfo import conninfo_to_dict, make_conninfo
+
+    params = conninfo_to_dict(pg_dsn_value)
+    params["dbname"] = name
+    return make_conninfo(**params)
+
+
+def test_concurrent_first_start_on_an_empty_database(pg_dsn_value):
+    """Six independent processes must all migrate one empty database at once.
+
+    Regression for the first-deployment race: PostgreSQL's ``CREATE TABLE IF NOT
+    EXISTS`` is not atomic, so without serialisation the instances that lose the
+    catalog race raise ``UniqueViolation`` on ``pg_type_typname_nsp_index`` and
+    fail to start. Repeated a few times because the race is timing-dependent.
+    """
+    import psycopg
+
+    from tracesettle.guard.state import SCHEMA_VERSION
+
+    ctx = multiprocessing.get_context("spawn")
+    created: list[str] = []
+    try:
+        for attempt in range(3):
+            name = f"tracesettle_migrate_race_{attempt}"
+            created.append(name)
+            dsn = _empty_database_dsn(pg_dsn_value, name)
+            start = ctx.Event()
+            results = ctx.Queue()
+            procs = [
+                ctx.Process(
+                    target=_init_store_in_process, args=(dsn, start, results, f"{attempt}-{i}")
+                )
+                for i in range(6)
+            ]
+            for p in procs:
+                p.start()
+            start.set()
+            for p in procs:
+                p.join(60)
+            outcomes = [results.get() for _ in procs]
+
+            errors = [detail for status, detail in outcomes if status != "ok"]
+            assert not errors, f"attempt {attempt}: instances failed to start: {errors}"
+            assert all(version == SCHEMA_VERSION for _, version in outcomes), (
+                f"attempt {attempt}: not every instance saw schema version "
+                f"{SCHEMA_VERSION}: {outcomes}"
+            )
+
+            # Exactly one version row, and every table created exactly once.
+            admin = psycopg.connect(dsn, autocommit=True)
+            try:
+                with admin.cursor() as cur:
+                    cur.execute("SELECT count(*), min(version), max(version) FROM schema_version")
+                    count, low, high = cur.fetchone()
+                    assert (count, low, high) == (1, SCHEMA_VERSION, SCHEMA_VERSION), (
+                        f"attempt {attempt}: schema_version is not a single row at the current "
+                        f"version: {(count, low, high)}"
+                    )
+                    cur.execute(
+                        "SELECT count(*) FROM information_schema.tables "
+                        "WHERE table_schema = 'public'"
+                    )
+                    assert cur.fetchone()[0] == 5, (
+                        f"attempt {attempt}: expected 5 tables, the schema was created "
+                        "more than once or partially"
+                    )
+            finally:
+                admin.close()
+
+            # A later restart on the now-migrated database must also succeed.
+            from tracesettle.guard.state_pg import PostgresGuardStateStore
+
+            restart = PostgresGuardStateStore(dsn)
+            try:
+                assert restart.schema_version() == SCHEMA_VERSION
+            finally:
+                restart.close()
+    finally:
+        # Drop the throwaway databases so repeated runs start truly empty.
+        admin = psycopg.connect(pg_dsn_value, autocommit=True)
+        try:
+            with admin.cursor() as cur:
+                for name in created:
+                    cur.execute(f'DROP DATABASE IF EXISTS "{name}"')
+        finally:
+            admin.close()
+
+
 # --- 9. retention cleanup does not delete active state ----------------------
 
 
