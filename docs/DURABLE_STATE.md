@@ -66,10 +66,11 @@ file on a single host are safe (SQLite's file locking serialises writers); two
 hosts cannot share it, and network filesystems are not supported by SQLite.
 
 The interface (`GuardStateStore`) is deliberately narrow — atomic consume,
-counter reads, event append — so a future shared backend (PostgreSQL) can
-implement the same methods. The repository contains **no** PostgreSQL dependency
-and no existing abstraction, so introducing one now would be unnecessary
-infrastructure; the narrow interface is the correct preparation.
+counter reads, event append — so a shared backend can implement the same methods.
+**PostgreSQL is now that backend** (section 10), selected with
+`TRACESETTLE_GUARD_STATE_BACKEND=postgresql`. It is an opt-in extra: the driver is
+imported lazily, so the default install and the default image stay
+standard-library only and need no database.
 
 ## 5. Schema (version 2)
 
@@ -170,14 +171,21 @@ in-memory guard, which already bounds its equivalents (`deque(maxlen=...)`).
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `TRACESETTLE_GUARD_STATE_DB` | unset | path to the SQLite state database |
-| `TRACESETTLE_GUARD_STATE_BUSY_TIMEOUT_MS` | `5000` | writer lock wait |
+| `TRACESETTLE_GUARD_STATE_BACKEND` | `auto` | `auto` \| `sqlite` \| `postgresql` \| `memory` |
+| `TRACESETTLE_GUARD_STATE_PG_DSN` | unset | PostgreSQL connection string (libpq form or URL) |
+| `TRACESETTLE_GUARD_STATE_BUSY_TIMEOUT_MS` | `5000` | writer lock wait (SQLite) / decision lock wait (PostgreSQL) |
 | `TRACESETTLE_GUARD_STATE_RETENTION_SECONDS` | `86400` | counter-event / idempotency retention |
+| `TRACESETTLE_GUARD_REQUIRE_POSTGRES` | unset | if set, refuse to start unless the PostgreSQL backend is active |
 
-When unset, the guard keeps its in-memory stores: the loopback development
-workflow is unchanged, and the console reports the state backend honestly so an
-operator can see whether the run is durable. A configured database that cannot be
-opened or fails its integrity check stops the process at start-up rather than
-running with a silently degraded control.
+`auto` (the default) keeps the historical behaviour: a configured
+`TRACESETTLE_GUARD_STATE_DB` means SQLite, otherwise in-memory. `postgresql`
+requires `TRACESETTLE_GUARD_STATE_PG_DSN` and the optional driver, and stops
+start-up if either is missing rather than silently falling back. When unset, the
+guard keeps its in-memory stores: the loopback development workflow is unchanged,
+and the console reports the state backend honestly so an operator can see whether
+the run is durable. A configured database that cannot be opened or fails its
+integrity check stops the process at start-up rather than running with a silently
+degraded control.
 
 ## 9. Deployment
 
@@ -191,7 +199,57 @@ survive.
 
 Durable state here is **single-instance**. Do not run two replicas against the
 same SQLite file on different hosts, and do not place the file on a network
-filesystem. For a multi-replica deployment, implement the narrow `GuardStateStore`
-interface against a shared database (the interface exists for that reason); the
+filesystem. For a multi-replica deployment, use the PostgreSQL backend below; the
 default single-instance SQLite store is correct for one instance and is honest
 about it.
+
+## 10. PostgreSQL backend (multi-instance)
+
+`PostgresGuardStateStore` (`tracesettle/guard/state_pg.py`) implements the same
+`GuardStateStore` contract against a shared PostgreSQL database, so several
+TRACESETTLE instances enforce one set of nonces, revocations, counters, and
+idempotency records. Enabling it:
+
+```sh
+# Optional dependency, only needed for this backend.
+pip install "psycopg[binary]==3.3.6"
+
+export TRACESETTLE_GUARD_STATE_BACKEND=postgresql
+export TRACESETTLE_GUARD_STATE_PG_DSN="postgresql://user:pass@db-host:5432/tracesettle"
+export TRACESETTLE_GUARD_REQUIRE_POSTGRES=1        # fail start-up if PG is not active
+python3 -m tracesettle serve --host 0.0.0.0 --port 8000
+```
+
+The schema is created on first use (schema version 2, identical table and index
+shape to the SQLite store, using `BIGINT GENERATED ALWAYS AS IDENTITY` for the
+event sequence and `DOUBLE PRECISION` for the time columns). It is idempotent and
+reopening an initialised database neither loses rows nor re-runs migrations.
+
+**Atomicity without a retry loop.** SQLite takes a whole-database write lock with
+`BEGIN IMMEDIATE`. PostgreSQL has no equivalent, so the store takes a
+transaction-scoped advisory lock (`pg_advisory_xact_lock`) around each decision
+transaction, with a bounded `lock_timeout`. This serialises the read-decide-write
+critical section across *all* instances, so two concurrent requests on two hosts
+cannot both pass a limit or both spend a nonce. The nonce primary key remains the
+final backstop. A serialization or deadlock failure (SQLSTATE `40001`, `40P01`,
+`55P03`) surfaces as a retryable conflict rather than an error.
+
+**Fail-closed, and honest about failure.** The driver is imported lazily, so the
+default build never needs it. A store that cannot be reached, a failed write, or
+a schema mismatch raises `StateStoreError`, which the guard turns into `HOLD` with
+no authorization — never `ALLOW`. The guard never falls back to in-memory state
+when the shared database is unavailable: a broken shared store is not silently
+downgraded to process memory, because that would reintroduce exactly the replay
+the shared store exists to prevent. A *dropped connection* is different from a
+broken store: the next call reconnects, so a transient network blip does not take
+an instance out of service. A non-connection write failure still latches the
+store degraded until the process is restarted.
+
+**Concurrency is the point.** The distributed guarantees are proven against a real
+server in `tests/test_guard_postgres.py` (cross-instance replay refusal, a shared
+spend window across two store instances, revocation visible across instances, and
+fail-closed behaviour when the database goes away). CI runs them in a dedicated
+job with a `postgres:16` service. The security invariants gain one entry,
+`postgres_shared_state_refuses_cross_instance_replay`, which is exercised for real
+when a DSN is configured and reports honestly that it was not exercised
+otherwise.

@@ -81,7 +81,7 @@ Amounts are exact `Decimal`s: a limit of `0.3` admits `0.3` and refuses
 `0.30000000000000004`. Severity is compared by an explicit rank, never by the
 severity's string value (`"MEDIUM"` sorts after `"HIGH"` alphabetically).
 
-Ten structural guarantees are checked by *running the real code*, on demand, at
+Sixteen structural guarantees are checked by *running the real code*, on demand, at
 `GET /api/guard/invariants` — including `refusal_never_reaches_the_executor` and
 `authorization_is_single_use`. Each checker is also mutation-tested: the guarded
 behaviour is deliberately broken and the checker must notice. A checker that
@@ -148,10 +148,11 @@ a bare interpreter.
 **1. Run the tests.**
 
 ```sh
-python -m pytest tests/ --collect-only -q   # 699 tests collected
-python -m pytest tests/ -q                  # 699 passed
+python -m pytest tests/ --collect-only -q   # 733 tests collected
+python -m pytest tests/ -q                  # 712 passed, 21 skipped
 ```
-→ `699 passed`.
+→ `712 passed, 21 skipped`. The skips are the PostgreSQL integration
+tests; set `TRACESETTLE_TEST_PG_DSN` to a real server to run them (733 pass).
 
 **2. Prove the enforcement boundary: a permitted request executes, a suspicious
 one cannot.**
@@ -204,7 +205,7 @@ curl -sS -X POST http://127.0.0.1:8080/api/guard/sign \
 curl -sS http://127.0.0.1:8080/api/guard/invariants \
   | python3 -c 'import sys,json;d=json.load(sys.stdin);print("all hold:",d["all_hold"]);[print(" ",i["name"]) for i in d["invariants"]]'
 ```
-→ `all hold: True` and the ten invariant names.
+→ `all hold: True` and the sixteen invariant names.
 
 **4. Investigate a real, known-good swap from the command line.**
 
@@ -376,7 +377,7 @@ transaction request ──▶ │ guard/rules.py      7 controls, all run  │
                         │                     validate, then execute │
                         │ guard/audit.py      hash-chained records  │
                         │ guard/monitor.py    counters + incidents  │
-                        │ guard/invariants.py 10 checked guarantees │
+                        │ guard/invariants.py 16 checked guarantees │
                         └────────────────────┬─────────────────────┘
                                              │ ALLOW + authorization
                                              ▼
@@ -443,7 +444,9 @@ identical decisions.
 | `tracesettle/guard/audit.py` | Hash-chained, verifiable audit log. |
 | `tracesettle/guard/monitor.py` | Security counters and incident records. |
 | `tracesettle/guard/service.py` | Orchestration: controls → authorization → monitor → audit. |
-| `tracesettle/guard/invariants.py` | The twelve structural guarantees, checked by execution. |
+| `tracesettle/guard/state.py` | Durable state: `GuardStateStore` (SQLite), backend-aware `open_state_store`. |
+| `tracesettle/guard/state_pg.py` | Optional PostgreSQL backend: shared nonces, counters, revocations, idempotency. |
+| `tracesettle/guard/invariants.py` | The sixteen structural guarantees, checked by execution. |
 | `tracesettle/guard/api.py` | Guard HTTP routing and JSON serialization. |
 | `tracesettle/guard/console.py` | The security operations console page. |
 | `docs/TRANSACTION_SECURITY.md` | The security layer in full, including what it does not do. |
@@ -451,7 +454,7 @@ identical decisions.
 | `.github/workflows/ci.yml` | CI: tests, static analysis, Docker build + runtime, demo determinism. |
 | `demo/demonstrate.py` | Read-only walkthrough (live, or `--offline` replay of captures). |
 | `demo/replay_opener.py` | Offline transport that replays `evidence/raw/` through the real code. |
-| `tests/` | 661 tests. `evidence/raw/` fixtures are real captures; `tests/fixtures/synthetic/` are clearly labelled synthetic. |
+| `tests/` | 733 tests (21 PostgreSQL tests skip without `TRACESETTLE_TEST_PG_DSN`). `evidence/raw/` fixtures are real captures; `tests/fixtures/synthetic/` are clearly labelled synthetic. |
 | `PHASE1_FEASIBILITY.md` | Phase 1 feasibility and API verification. |
 | `submission/` | Hackathon artifacts: API payload shape, technical summary, demo post draft, publication checklist. |
 | `docs/official/` | NEAR documentation captured during Phase 1. |
@@ -537,7 +540,7 @@ variable and all documented in `docs/TRANSACTION_SECURITY.md`:
   replay-nonce store all have explicit caps, so a flood cannot exhaust memory.
   When durable state is configured, spent nonces and the limit counters live in
   SQLite instead, so they survive a restart (see **Durable state** below).
-- **Structural invariants, checked by execution.** Fifteen guarantees at
+- **Structural invariants, checked by execution.** Sixteen guarantees at
   `GET /api/guard/invariants`, each mutation-tested so a checker that cannot fail
   is treated as a defect.
 - **Honest audit claim.** In-place modification of an audit record is detectable;
@@ -613,10 +616,43 @@ operator can see whether the run is durable.
   horizon (`TRACESETTLE_GUARD_STATE_RETENTION_SECONDS`, default 24h, far longer
   than any window), and the window read is index-backed, so evaluation cost does
   not grow with the number of past requests.
-- **Single instance.** A SQLite file is durable state for one application
-  instance, not multi-instance shared state. For several replicas, implement the
-  narrow `GuardStateStore` interface against a shared database. Design and scope
-  are in `docs/DURABLE_STATE.md`.
+- **Single instance, by default.** A SQLite file is durable state for one
+  application instance. To share one set of nonces and counters across several
+  replicas, select the PostgreSQL backend (below). Design and scope are in
+  `docs/DURABLE_STATE.md`.
+
+### Shared state across instances (PostgreSQL)
+
+SQLite is correct for one instance. For several replicas that must enforce the
+same nonces, revocations, and limits, point the guard at a shared PostgreSQL
+database. The driver is an optional extra, imported lazily, so the default
+install and the default image stay standard-library only and need no database:
+
+```sh
+pip install "psycopg[binary]==3.3.6"                 # optional, only for this backend
+export TRACESETTLE_GUARD_STATE_BACKEND=postgresql
+export TRACESETTLE_GUARD_STATE_PG_DSN="postgresql://user:pass@db-host:5432/tracesettle"
+export TRACESETTLE_GUARD_REQUIRE_POSTGRES=1          # refuse to start if PG is not active
+TRACESETTLE_GUARD_AUTH_KEY=$(python3 -c "import secrets;print(secrets.token_hex(32))") \
+TRACESETTLE_API_KEY=change-me \
+python3 -m tracesettle serve --host 0.0.0.0 --port 8000
+```
+→ a token signed by one instance is refused as `REPLAYED` by another, and a
+spending limit is shared: the sum across all instances is enforced, not each
+instance's own total. The console and `GET /api/guard/metrics` report
+`backend: "postgresql"` and `durable: true`.
+
+The PostgreSQL store keeps every guarantee above and adds the one SQLite cannot
+give: an atomic decision across hosts. SQLite takes a whole-database write lock;
+PostgreSQL has no equivalent, so the store serialises the read-decide-write
+critical section with a transaction-scoped advisory lock (`pg_advisory_xact_lock`)
+plus a bounded `lock_timeout`. A broken shared store fails closed (`HOLD`, no
+authorization) and never falls back to process memory — a silent fallback would
+reintroduce the replay the shared store exists to prevent. A dropped connection
+is not a broken store: the next call reconnects, so a transient blip does not take
+an instance out of service. Verified against a real server: cross-instance replay
+refusal, a shared spend window, revocation visible across instances, and
+fail-closed then recovery when the database is stopped and started.
 
 ### Fail-closed startup
 
@@ -668,6 +704,24 @@ a container platform: `TRACESETTLE_HOST` (default `127.0.0.1`; the image sets
 `TRACESETTLE_API_KEY` and `TRACESETTLE_GUARD_AUTH_KEY` before exposing the
 interface.
 
+The default image is dependency-free (SQLite / in-memory). For the PostgreSQL
+shared-state backend, build with the driver included:
+
+```sh
+docker build --build-arg TRACESETTLE_WITH_POSTGRES=1 -t tracesettle:pg .
+docker run --rm -p 8000:8000 \
+  -e TRACESETTLE_GUARD_STATE_BACKEND=postgresql \
+  -e TRACESETTLE_GUARD_REQUIRE_POSTGRES=1 \
+  -e TRACESETTLE_GUARD_STATE_PG_DSN="postgresql://user:pass@db-host:5432/tracesettle" \
+  -e TRACESETTLE_API_KEY=change-me \
+  -e TRACESETTLE_GUARD_AUTH_KEY=$(python3 -c "import secrets;print(secrets.token_hex(32))") \
+  tracesettle:pg
+```
+→ two such containers pointed at one database enforce one set of nonces: a token
+signed by the first is refused as `REPLAYED` by the second. The default build
+(`docker build -t tracesettle .`) stays standard-library only, so no database
+driver ships in an image that does not use one.
+
 ## Continuous integration
 
 `.github/workflows/ci.yml` runs on every pull request and every push to `master`.
@@ -677,7 +731,10 @@ It performs no deployment, publish, or release, and needs no repository secrets:
 - static analysis (`python -m pyflakes tracesettle/ tests/ demo/`);
 - byte-compilation of every module;
 - the offline demo run twice, asserted byte-identical (determinism);
-- a gate that fails if any non-standard-library import appears in the package;
+- a gate that fails if any non-standard-library import appears at module level
+  (the optional PostgreSQL driver is allowed only as a lazy, function-body import);
+- a PostgreSQL job (`postgres:16` service) that runs the distributed
+  shared-state tests against a real server and then the full suite;
 - a Docker build, a non-root runtime check (uid `10001`), a `/api/health`
   probe, a graceful-shutdown check, and a check that the image **refuses to
   start** without credentials.
@@ -688,7 +745,7 @@ immutable commit SHA (not a moving tag), and cancels superseded runs.
 ## Tests
 
 ```sh
-python3 -m pytest tests/ -q          # all 661
+python3 -m pytest tests/ -q          # 712 passed, 21 skipped (733 with a server)
 python3 -m pytest tests/test_guard_authorization.py -q
 python3 -m pytest tests/test_guard_invariants.py -q
 python3 -m pytest tests/test_guard_end_to_end.py -q

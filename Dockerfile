@@ -23,6 +23,15 @@ COPY README.md ./
 # writable by this uid and point TRACESETTLE_GUARD_STATE_DB at it.
 RUN useradd --create-home --uid 10001 tracesettle \
     && chown -R tracesettle:tracesettle /app
+
+# Optional shared-state backend. The default image stays dependency-free (SQLite
+# / in-memory). Build with --build-arg TRACESETTLE_WITH_POSTGRES=1 to add the
+# PostgreSQL driver so TRACESETTLE_GUARD_STATE_BACKEND=postgresql can be used.
+ARG TRACESETTLE_WITH_POSTGRES=""
+RUN if [ "$TRACESETTLE_WITH_POSTGRES" = "1" ]; then \
+        pip install --no-cache-dir "psycopg[binary]==3.3.6" ; \
+    fi
+
 USER tracesettle
 
 EXPOSE 8000

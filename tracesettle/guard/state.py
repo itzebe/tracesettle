@@ -34,7 +34,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
-from typing import Any, Iterator
+from typing import Any, Iterator, Protocol, runtime_checkable
 
 #: Bump when the schema changes and add a migration below.
 SCHEMA_VERSION = 2
@@ -58,6 +58,17 @@ class StateStoreError(RuntimeError):
     """
 
 
+class StateStoreConflict(StateStoreError):
+    """A transient conflict that a caller may safely retry.
+
+    Raised when the database aborts a decision because it serialised against a
+    concurrent one (for example a PostgreSQL ``SERIALIZABLE`` serialization
+    failure). The store is *not* degraded and the transaction was rolled back, so
+    retrying the whole decision is safe. A caller that exhausts its retries must
+    still fail closed — never fall back to weaker state.
+    """
+
+
 @dataclass(frozen=True)
 class CounterEvent:
     """One durable counter event, read back for the velocity context."""
@@ -68,6 +79,64 @@ class CounterEvent:
     outcome: str | None = None
     asset: str | None = None
     amount: Decimal | None = None
+
+
+@runtime_checkable
+class StateStore(Protocol):
+    """The durable-state contract both backends satisfy.
+
+    ``GuardStateStore`` (SQLite) and ``PostgresGuardStateStore`` (PostgreSQL)
+    implement this identical surface, so the guard's authorization and enforcement
+    logic is backend-agnostic and unchanged. Every method raises
+    :class:`StateStoreError` on failure; callers fail closed.
+    """
+
+    @property
+    def degraded(self) -> bool: ...
+
+    @property
+    def backend(self) -> str: ...
+
+    def close(self) -> None: ...
+
+    def schema_version(self) -> int: ...
+
+    def decision_cycle(self) -> Iterator[None]: ...
+
+    def consume_nonce(self, nonce: str, expires_at: float) -> bool: ...
+
+    def is_nonce_consumed(self, nonce: str) -> bool: ...
+
+    def prune_nonces(self, *, now: float | None = None) -> int: ...
+
+    def revoke_authorization(self, authorization_id: str, until: float) -> None: ...
+
+    def is_authorization_revoked(self, authorization_id: str, *, now: float | None = None) -> bool: ...
+
+    def record_event(
+        self,
+        *,
+        kind: str,
+        service_id: str,
+        outcome: str | None = None,
+        asset: str | None = None,
+        amount: object | None = None,
+        at: float | None = None,
+    ) -> None: ...
+
+    def events_since(
+        self, *, since: float, service_id: str | None = None, kind: str | None = None
+    ) -> list[CounterEvent]: ...
+
+    def prune_events(self, *, before: float) -> int: ...
+
+    def prune_idempotency(self, *, before: float) -> int: ...
+
+    def remember_decision(
+        self, request_key: str, decision_id: str, *, at: float | None = None
+    ) -> bool: ...
+
+    def decision_for(self, request_key: str) -> str | None: ...
 
 
 def _decimal_or_none(value: Any) -> Decimal | None:
@@ -246,6 +315,11 @@ class GuardStateStore:
     def degraded(self) -> bool:
         """True once a durable write failed. All later operations raise."""
         return self._degraded
+
+    @property
+    def backend(self) -> str:
+        """A short, stable label for the durable backend (``sqlite``, ``postgresql``)."""
+        return "sqlite"
 
     def _mark_degraded(self) -> None:
         # Called with the lock held.
@@ -585,12 +659,71 @@ class DurableRevocationStore:
         return self._store.is_authorization_revoked(authorization_id)
 
 
-def open_state_store(path: str | os.PathLike[str] | None, *, busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS) -> GuardStateStore | None:
-    """Open a state store, or return ``None`` when no path is configured.
+def open_state_store(
+    path: str | os.PathLike[str] | None,
+    *,
+    backend: str = "auto",
+    busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS,
+    pg_dsn: str | None = None,
+    pg_connect_timeout_s: int = 10,
+    pg_statement_timeout_ms: int = 5000,
+    require_postgres: bool = False,
+) -> GuardStateStore | None:
+    """Open the configured durable state store, or ``None`` for in-memory.
 
-    A configured path that cannot be opened raises: a durable-state control that
-    silently degrades is worse than one that refuses to start.
+    Backend selection is explicit and fails closed:
+
+    * ``auto`` (default) — PostgreSQL when a DSN is configured, else SQLite when a
+      path is configured, else the in-memory stores. This keeps the loopback
+      development workflow unchanged.
+    * ``sqlite`` — a path is required; a missing one raises rather than silently
+      running without durable state.
+    * ``postgresql`` — a DSN is required; a missing one, or a server that cannot be
+      reached, raises. ``psycopg`` must be installed.
+    * ``memory`` — no durable store; spent nonces and counters are process-local.
+
+    ``require_postgres`` is a production guard: when set, any selection other than
+    PostgreSQL (including a missing DSN) raises. There is no override, so a
+    deployment cannot silently lose shared authorization state.
+
+    A configured backend that cannot be opened raises :class:`StateStoreError`: a
+    durable-state control that silently degrades is worse than one that refuses to
+    start. The DSN is never included in an error message.
     """
-    if not path:
+    choice = (backend or "auto").strip().lower()
+    if choice not in {"auto", "memory", "sqlite", "postgresql"}:
+        raise StateStoreError(
+            f"unknown guard-state backend {backend!r}; expected one of "
+            "auto, memory, sqlite, postgresql"
+        )
+
+    if require_postgres and choice != "postgresql":
+        raise StateStoreError(
+            "TRACESETTLE_GUARD_REQUIRE_POSTGRES is set, so the PostgreSQL backend is "
+            f"required, but the configured backend is {choice!r}; set "
+            "TRACESETTLE_GUARD_STATE_BACKEND=postgresql and "
+            "TRACESETTLE_GUARD_STATE_PG_DSN, or unset the requirement"
+        )
+
+    if choice == "memory":
         return None
-    return GuardStateStore(path, busy_timeout_ms=busy_timeout_ms)
+
+    if choice == "postgresql" or (choice == "auto" and pg_dsn):
+        # Imported lazily so the SQLite default never pulls in the driver.
+        from .state_pg import open_postgres_state_store
+
+        return open_postgres_state_store(
+            pg_dsn or "",
+            connect_timeout_s=pg_connect_timeout_s,
+            statement_timeout_ms=pg_statement_timeout_ms,
+        )
+
+    if choice == "sqlite" or (choice == "auto" and path):
+        if not path:
+            raise StateStoreError(
+                "the sqlite guard-state backend was selected but "
+                "TRACESETTLE_GUARD_STATE_DB is unset"
+            )
+        return GuardStateStore(path, busy_timeout_ms=busy_timeout_ms)
+
+    return None
