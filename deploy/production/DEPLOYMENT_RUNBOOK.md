@@ -11,7 +11,8 @@ requires a purchase or a credit card.
   after 15 minutes idle**, so this is a demonstration/limited deployment.
 - A **card-free** PostgreSQL reachable over a **direct or session-mode**
   connection (see `ARCHITECTURE.md` §3). The verified option is **Neon Free**
-  (direct host). Transaction-mode poolers are not compatible with the migration.
+  (direct host). Transaction-mode poolers are not compatible with the migration
+  **or** with the per-decision prepared statements.
 - Two secrets generated locally and stored only in the platform secret manager:
   - `TRACESETTLE_API_KEY`
   - `TRACESETTLE_GUARD_AUTH_KEY`

@@ -53,9 +53,11 @@ concurrently and collide.
 1. Is another instance mid-migration? Query the database:
    `SELECT pid, query, state FROM pg_stat_activity WHERE query ILIKE '%TRACESTM%' OR query ILIKE '%advisory%';`
    and `SELECT * FROM pg_locks WHERE locktype = 'advisory';`.
-2. Is the DSN pointing at a **transaction-mode pooler**? That is the most common
-   cause: a session lock cannot be held across transactions through such a pooler.
-   Fix by using a direct/session connection (see `ARCHITECTURE.md` §3).
+2. Is the DSN pointing at a **transaction-mode pooler**? Two failures come from
+   this: a session lock cannot be held across transactions through such a pooler
+   (this migration lock), and the decision path's named prepared statements do not
+   survive the backend remap (`DuplicatePreparedStatement`). Fix by using a
+   direct/session connection (see `ARCHITECTURE.md` §3).
 3. Is a previous instance still holding the lock after a crash? Session locks
    release when the backend ends, so terminate the stale backend if it is wedged:
    `SELECT pg_terminate_backend(<pid>);`.

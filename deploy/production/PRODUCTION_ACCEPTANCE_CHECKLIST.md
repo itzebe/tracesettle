@@ -36,8 +36,10 @@ the recommended architecture.
 - [x] Cross-instance replay refused; shared spend window enforced; revocation visible
       across instances; idempotency single across instances (24/24 PG tests, 0 skipped).
 - [x] Connection pooling compatibility documented: **direct or session mode** required
-      for the migration lock; Neon documents session advisory locks as unsupported on
-      the pooled connection (`ARCHITECTURE.md` §3).
+      for the migration lock **and** for the per-decision prepared statements; Neon
+      documents session advisory locks as unsupported on the pooled connection
+      (`ARCHITECTURE.md` §3). A transaction-mode pooler also breaks the decision path
+      with `DuplicatePreparedStatement` (reproduced against PgBouncer).
 
 ## E. Code quality and safety
 

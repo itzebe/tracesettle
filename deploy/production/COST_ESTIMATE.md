@@ -59,6 +59,12 @@ enforce authorization continuously.
   connection string for tools that need session state (…, migrations …)". TraceSettle's
   migration takes a **session-scoped** advisory lock, so the DSN must be the
   **direct** host (no `-pooler` suffix).
+- A transaction-mode pooler is unusable for a second, independent reason: the
+  `psycopg` driver prepares statements after 5 executions, and those named
+  prepared statements do not survive the pooler's backend remap — a second
+  connection raises `DuplicatePreparedStatement` on a guard decision. Reproduced
+  against PgBouncer 1.26.1 (`pool_mode=transaction`). So the direct host is
+  required for the decision path too, not only the migration.
 - Neon Free is permanent and needs no card. Its limits (1 GB, 100 CU-hours/month,
   5 GB egress/month, scale-to-zero after 5 min) are ample for a low-traffic guard,
   but scale-to-zero adds a cold start to the first request after idle.

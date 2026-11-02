@@ -64,21 +64,35 @@ target.
 
 ## 3. Connection-pooling compatibility (important)
 
-Two different locks are used:
+Two different locks are used, and both must survive on the same backend
+connection:
 
 | Lock | Scope | Where | Pooler constraint |
 | --- | --- | --- | --- |
-| `pg_advisory_xact_lock` | one transaction | per decision | safe behind a **transaction**-mode pooler |
 | `pg_advisory_lock` (session) | one session | schema migration only | requires a **direct or session**-mode connection |
+| `pg_advisory_xact_lock` | one transaction | per decision | transaction-scoped, but the *client* still needs its prepared statements to work — see below |
 
-The migration lock is session-scoped and is taken across the whole
-inspect-and-migrate sequence. A **transaction-mode** pooler remaps the backend
-connection at every transaction boundary, so a session lock acquired on one
-backend is not held by the next statement — the migration mutex silently stops
-protecting anything. Therefore:
+Two independent things break under a **transaction-mode** pooler:
+
+1. The migration lock is session-scoped and is taken across the whole
+   inspect-and-migrate sequence. A transaction-mode pooler remaps the backend
+   connection at every transaction boundary, so a session lock acquired on one
+   backend is not held by the next statement — the migration mutex silently stops
+   protecting anything.
+2. `psycopg` (the driver) prepares statements after 5 executions by default. Under
+   a transaction-mode pooler those named prepared statements belong to a backend
+   that the next transaction may not use, so a second connection gets
+   `DuplicatePreparedStatement: prepared statement "_pg3_0" already exists` — a
+   guard decision fails, not just the migration. **Reproduced** in this review
+   against PgBouncer 1.26.1 in `pool_mode=transaction` with
+   `max_prepared_statements=0` (the managed-pooler default): two concurrent
+   clients produced `DuplicatePreparedStatement` on the second.
+
+Therefore:
 
 - **Use a direct connection or a session-mode pooler** for
-  `TRACESETTLE_GUARD_STATE_PG_DSN`.
+  `TRACESETTLE_GUARD_STATE_PG_DSN` — for the migration lock *and* for the
+  prepared statements the decision path uses.
 - Do **not** use a transaction-mode pooler endpoint:
   - Neon: avoid the `-pooler` host (PgBouncer, `pool_mode=transaction`); use the
     direct host. **Neon's own documentation lists "Session-level advisory locks"
@@ -100,10 +114,12 @@ protecting anything. Therefore:
   inactivity** and resumes on the next connection, adding a cold start to the
   first guard decision after idle. This is acceptable for a demonstration; it is
   not a continuous-enforcement posture.
-- The migration takes the session advisory lock once at start-up; the per-decision
-  lock is transaction-scoped (`pg_advisory_xact_lock`) and is safe behind any
-  pooler. So even on a transaction-mode pooler the *decisions* are correct — it is
-  the **start-up migration** that requires the direct/session connection.
+- The migration takes the session advisory lock once at start-up, and the
+  per-decision lock is transaction-scoped (`pg_advisory_xact_lock`). That makes
+  the *lock* pooler-safe, but a transaction-mode pooler is still unusable: the
+  decision path's prepared statements do not survive the backend remap (see §3,
+  reproduced against PgBouncer). **Both** the start-up migration **and** the
+  per-decision path therefore require the direct/session connection.
 
 ## 4. Startup behaviour (fail-closed)
 
