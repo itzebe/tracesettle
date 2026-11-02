@@ -81,13 +81,29 @@ protecting anything. Therefore:
   `TRACESETTLE_GUARD_STATE_PG_DSN`.
 - Do **not** use a transaction-mode pooler endpoint:
   - Neon: avoid the `-pooler` host (PgBouncer, `pool_mode=transaction`); use the
-    direct host.
+    direct host. **Neon's own documentation lists "Session-level advisory locks"
+    among the features not supported with pooled connections**, and says to "use
+    the direct connection string for tools that need session state (…,
+    migrations …)". This is the reason the free Neon path must use the direct host.
   - Supabase: use the direct connection (`:5432` direct, or the **session**
     pooler on `:5432`); avoid the transaction pooler on `:6543`.
-  - Render: avoid the PgBouncer pooled URL on `:6432`; use the direct URL.
+  - Render: avoid the PgBouncer pooled URL on `:6432`; use the direct URL. (Render
+    Free Postgres does not offer managed pooling at all, but it expires in 30 days.)
 - Connection **counts** stay tiny: one connection per instance handles a decision
   at a time; the store is not a connection-pooling workload. Size the database
   connection budget for `instances x (1 + 1 spare)`, not for request concurrency.
+
+## 3a. Zero-budget connection notes
+
+- **Neon Free** is the recommended card-free PostgreSQL. Use the **direct**
+  connection string (no `-pooler`). Free compute **suspends after 5 minutes of
+  inactivity** and resumes on the next connection, adding a cold start to the
+  first guard decision after idle. This is acceptable for a demonstration; it is
+  not a continuous-enforcement posture.
+- The migration takes the session advisory lock once at start-up; the per-decision
+  lock is transaction-scoped (`pg_advisory_xact_lock`) and is safe behind any
+  pooler. So even on a transaction-mode pooler the *decisions* are correct — it is
+  the **start-up migration** that requires the direct/session connection.
 
 ## 4. Startup behaviour (fail-closed)
 
@@ -130,7 +146,21 @@ The container image binds `0.0.0.0`, so it inherits every rule above.
 
 ## 7. Deployment shape
 
-One container image, one process, one PostgreSQL database, one persistent volume
-(optional, for the audit log). The image is non-root (uid `10001`), exposes
+One container image, one process, one PostgreSQL database, and (optionally) a
+persistent volume for the audit log. The image is non-root (uid `10001`), exposes
 `8000`, has a `/api/health` healthcheck, and shuts down gracefully. See
 `DEPLOYMENT_RUNBOOK.md` for the concrete steps.
+
+Under the **zero-budget** constraint the shape is the same, with two caveats:
+
+- **Host:** Render **Free** web service — card-free and permanent, but it **spins
+  down after 15 minutes of inactivity** and wakes in about a minute. A sleeping
+  process enforces nothing, so this is a **demonstration/limited** deployment, not
+  a continuously-enforcing production one.
+- **Storage:** a free host filesystem is **ephemeral**. The on-disk audit log is
+  lost on restart/spin-down, and Neon Free compute suspends after 5 minutes idle.
+  A persistent volume and always-on compute both require a paid plan, which is out
+  of scope.
+
+For a full production posture you would need always-on compute and a persistent
+volume; neither is available at $0. See `COST_ESTIMATE.md` §6–§7.

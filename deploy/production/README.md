@@ -1,12 +1,14 @@
-# TRACESETTLE — production deployment package
+# TRACESETTLE — zero-budget deployment package
 
 Everything needed to deploy TraceSettle as a hardened, read-only transaction
-authorization and settlement-investigation service. Prepared against master
+authorization and settlement-investigation service **at $0** — no purchases, no
+paid subscriptions, no credit-card commitments. Prepared against master
 `1bd7d8f23226fb403d4854483e1a2f1e27c47cf3` (PR #6 merged).
 
-**Status: preparation complete and locally verified. Nothing here has been
-deployed.** Deployment requires explicit authorization; several steps need an
-external account, payment, or an owner action (see `PRODUCTION_ACCEPTANCE_CHECKLIST.md` §H).
+**Status: a free demonstration deployment is feasible and locally verified. A
+production-grade deployment is NOT possible at $0** (see §7 of `COST_ESTIMATE.md`
+and `PRODUCTION_ACCEPTANCE_CHECKLIST.md`). Nothing here has been deployed, and no
+external account has been created.
 
 ## Contents
 
@@ -14,12 +16,12 @@ external account, payment, or an owner action (see `PRODUCTION_ACCEPTANCE_CHECKL
 | --- | --- |
 | `ARCHITECTURE.md` | Components, why PostgreSQL, connection-pooling rules, startup behaviour, honesty boundaries. |
 | `.env.production.example` | Configuration template — placeholders only. |
-| `DEPLOYMENT_RUNBOOK.md` | Build, provision, configure, deploy, verify. |
+| `DEPLOYMENT_RUNBOOK.md` | Build, provision, configure, deploy, verify (free path first). |
 | `ROLLBACK_RUNBOOK.md` | Revert the app and handle schema compatibility. |
 | `INCIDENT_RESPONSE.md` | PostgreSQL outage, migration lock, restart, NEAR outage, audit divergence, credential compromise. |
 | `MONITORING.md` | What observability exists (verified) vs future work; alerts and thresholds. |
-| `COST_ESTIMATE.md` | Platform + PostgreSQL + RPC selection and monthly cost. |
-| `NEAR_ARCHIVAL_RPC.md` | Live provider probe results and recommendation. |
+| `COST_ESTIMATE.md` | Zero-budget architecture, free-provider evidence, capability matrix. |
+| `NEAR_ARCHIVAL_RPC.md` | Live provider probe results; the free archival gap. |
 | `AUDIT_ANCHORING.md` | Design/proposal for external anchoring — **not implemented**. |
 | `PRODUCTION_ACCEPTANCE_CHECKLIST.md` | Verified checklist of what is done and what remains. |
 
@@ -95,20 +97,29 @@ docker build \
 - No credentials in build arguments or layers; the driver is the only extra.
 - Runs as uid `10001`; healthcheck probes `/api/health`; shuts down gracefully.
 
-## Recommended infrastructure (see `COST_ESTIMATE.md`)
+## Recommended infrastructure (zero-budget — see `COST_ESTIMATE.md`)
 
-- **Host:** Render (paid, always-on web service). Free tiers sleep/expire.
-- **PostgreSQL:** Render Postgres Basic-256mb (~$6/mo), direct connection; or Neon
-  free (direct host, not `-pooler`) to start.
-- **NEAR archive RPC:** paid archive node; the free archive endpoint is
-  deprecated and rate-limited.
-- **Audit anchoring:** proposed via OpenTimestamps — not implemented.
+- **Host:** Render **Free** web service (card-free, permanent; spins down after
+  15 min idle, ~1 min to wake). Suitable for a **demonstration/limited** deployment.
+- **PostgreSQL:** **Neon Free** (card-free, permanent), **direct** connection host
+  (no `-pooler`). Session advisory locks require the direct connection.
+- **NEAR archive RPC:** only the deprecated, rate-limited free archive
+  (`archival-rpc.mainnet.near.org`) — **unresolved limitation**; historical
+  lookups may return `UNAVAILABLE`.
+- **Audit anchoring:** proposed via OpenTimestamps (free) — **not implemented**.
+
+No paid service is recommended anywhere in this package.
 
 ## Honest limitations
 
-- No real-funds execution: the executor is a `SimulatedExecutor`.
-- The audit chain is tamper-evident, not tamper-proof, and **not** externally
-  anchored yet.
-- Historical NEAR lookups need a paid archive node to be reliable.
+- **Free demonstration, not production.** The free host sleeps and the free
+  database scales to zero, so continuous enforcement is not guaranteed.
+- **Persistent storage is limited.** A free host filesystem is ephemeral; the
+  on-disk audit log does not survive a restart. This needs a paid volume.
+- No real-funds execution: the executor is a `SimulatedExecutor`. It does **not**
+  sign or broadcast NEAR transactions.
+- The audit chain is tamper-evident, **not** tamper-proof, and **not** externally
+  anchored (anchoring is unimplemented).
+- Historical NEAR lookups need a paid archive node to be reliable; none is used.
 - A previously exposed GitHub credential remains an **open, owner-side**
   revocation item.

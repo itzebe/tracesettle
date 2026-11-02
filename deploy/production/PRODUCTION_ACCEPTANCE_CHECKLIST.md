@@ -1,9 +1,10 @@
-# TRACESETTLE — production acceptance checklist
+# TRACESETTLE — zero-budget acceptance checklist
 
-Every box below was verified locally on 2026-11-01 against master
+Every item below was verified locally on 2026-11-01 against master
 `1bd7d8f23226fb403d4854483e1a2f1e27c47cf3`. Items that require an account,
 payment, or authorization are marked **[post-authorization]** and were **not**
-performed.
+performed. No purchase, subscription, or credit card is required by anything in
+the recommended architecture.
 
 ## A. Image build
 
@@ -20,24 +21,23 @@ performed.
 - [x] Guard metrics reachable with `X-API-Key`; unauthorized read returns `401`.
 - [x] With PostgreSQL configured, `state.backend="postgresql"`, `state.durable=true`.
 - [x] Graceful shutdown: exit `0` within 1 s of `docker stop`.
-- [x] Non-root user cannot be assumed; container runs as uid `10001`.
+- [x] Container runs as uid `10001`.
 
 ## C. Fail-closed startup
 
-- [x] No credentials on the public bind → exit `2`, message
-      `refusing to start: binding a public interface (host='0.0.0.0') requires authentication`.
+- [x] No credentials on the public bind → exit `2`.
 - [x] `TRACESETTLE_GUARD_REQUIRE_POSTGRES=1` with a non-PostgreSQL backend → exit `2`.
-- [x] PostgreSQL backend with an unreachable DSN → exit `2`
-      (`refusing to start: cannot connect to the PostgreSQL state database`), DSN not printed.
+- [x] PostgreSQL backend with an unreachable DSN → exit `2`, DSN not printed.
 
 ## D. PostgreSQL shared state
 
 - [x] Migration serialised by a session advisory lock across the inspect-and-migrate
-      sequence (first-deploy race fixed in `65e96c5`).
+      sequence.
 - [x] Cross-instance replay refused; shared spend window enforced; revocation visible
       across instances; idempotency single across instances (24/24 PG tests, 0 skipped).
-- [x] Connection pooling compatibility documented: **direct or session mode** required;
-      transaction-mode poolers break the migration lock (`ARCHITECTURE.md` §3).
+- [x] Connection pooling compatibility documented: **direct or session mode** required
+      for the migration lock; Neon documents session advisory locks as unsupported on
+      the pooled connection (`ARCHITECTURE.md` §3).
 
 ## E. Code quality and safety
 
@@ -53,6 +53,7 @@ performed.
 - [x] Every variable it lists exists in `tracesettle/config.py` (no invented names).
 - [x] Mandatory/optional/secret roles documented.
 - [x] Secret-scan of all new files: no credential-shaped strings.
+- [x] No paid service is recommended anywhere in the package.
 
 ## G. Documentation
 
@@ -60,21 +61,38 @@ performed.
       `INCIDENT_RESPONSE.md`, `MONITORING.md`, `COST_ESTIMATE.md`,
       `NEAR_ARCHIVAL_RPC.md`, `AUDIT_ANCHORING.md` present and internally consistent.
 - [x] `AUDIT_ANCHORING.md` states clearly that anchoring is **not implemented**.
-- [x] `NEAR_ARCHIVAL_RPC.md` records the live probe results and marks untested
-      providers **UNVERIFIED**.
+- [x] `NEAR_ARCHIVAL_RPC.md` records the live probe results and states the free
+      archival gap as unresolved.
+- [x] The free host, free database, and free-archive limitations are stated, not
+      hidden.
 
-## H. Not performed (requires authorization / external account)
+## H. Capability matrix (honest)
 
-- [ ] **[post-authorization]** Build the image with the real production secrets and deploy it.
-- [ ] **[post-authorization]** Provision managed PostgreSQL and set the DSN.
-- [ ] **[post-authorization]** Set a stable `TRACESETTLE_GUARD_AUTH_KEY` and `TRACESETTLE_API_KEY` in the platform secret manager.
-- [ ] **[post-authorization]** Point the NEAR fallback at a paid archive node.
+| Capability | Result | Basis |
+| --- | --- | --- |
+| Free application hosting | **Verified** | Render Free web service — docs: "No payment is required" |
+| Free PostgreSQL | **Verified** | Neon Free — docs: "no credit card required", "no time limits" |
+| Session advisory locks | **Verified on direct connection**; **Unsupported** on transaction-mode poolers | Neon docs list "Session-level advisory locks" as unsupported on pooled connections |
+| Free NEAR archival RPC | **Unverified / Unavailable** | only the deprecated, rate-limited `archival-rpc.mainnet.near.org` resolves historical tx |
+| Persistent storage | **Limited** | free host filesystem is ephemeral; a persistent volume needs a paid host |
+| Security guarantees | **Preserved** | no guard property is weakened by this architecture |
+| Always-on enforcement | **Unavailable for free** | card-free hosts sleep (Render 15 min; Koyeb/Northflank require a card) |
+| Production readiness | **Not ready** | a free deployment is a demonstration |
+
+## I. Not performed (requires authorization / external account)
+
+- [ ] **[post-authorization]** Deploy to a card-free host with real secrets.
+- [ ] **[post-authorization]** Provision Neon Free and set the **direct** DSN.
 - [ ] **[post-authorization]** Implement external audit-chain anchoring (`AUDIT_ANCHORING.md`).
 - [ ] **[post-authorization]** Owner: revoke/rotate the previously exposed GitHub credential.
 
-## I. Verdict
+## J. Verdict
 
-Production **preparation** is complete and locally verified. Deployment itself
-remains pending authorization, and several prerequisites depend on external
-accounts, payment, or owner actions (section H). No production resource was
-created or changed.
+**A free demonstration deployment is feasible** (Render Free + Neon Free + the
+deprecated free NEAR archive) and every repository-side artifact is verified.
+
+**A production-grade deployment is not possible at $0.** Two capabilities cannot
+be met without paying: **always-on compute** (every card-free host found sleeps or
+scales to zero) and a **reliable NEAR archive** (the only free one is deprecated
+and rate-limited). Persistent audit storage is likewise a paid capability. None of
+these were purchased or provisioned. No production resource was created or changed.

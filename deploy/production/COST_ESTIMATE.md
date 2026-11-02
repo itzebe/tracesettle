@@ -1,92 +1,132 @@
-# TRACESETTLE — platform selection and cost estimate
+# TRACESETTLE — zero-budget architecture and cost
 
-All figures are published list prices read 2026-11-01 and are estimates, not
-quotes. Distinguish carefully:
+**Constraint: $0. No purchases, no paid subscriptions, no paid infrastructure, no
+credit-card commitments, and no service that requires payment to continue.**
 
-- **Permanent free** — no time limit, no expiry.
-- **Trial** — time- or credit-limited; not a production option.
-- **Paid** — a real recurring cost.
+This document replaces the earlier paid-tier plan. Everything recommended here is
+free **without** a payment method. A free trial that becomes paid is not free and
+is excluded. A "free tier" that requires a credit card at sign-up is excluded
+unless the owner explicitly authorizes the card.
 
-## 1. Hosting platform selection
+Verified against provider documentation on 2026-11-01. Where a claim is a probe
+result from this environment it says so; where it is from provider docs it is
+quoted.
 
-Requirements that decide this: **always-on** (no sleep — the guard must hold
-state and enforce continuously), a **persistent PostgreSQL connection**, stable
-configuration across restarts, secrets in environment variables, a health check,
-graceful shutdown, Docker, and optionally a persistent volume for the audit log.
+## 1. What TraceSettle actually needs
 
-| Platform | Always-on | Docker | Health check | Graceful shutdown | Secrets | Persistent volume | Free tier | Smallest always-on cost |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| **Render** | Yes on paid | Yes | Yes | Yes | Yes | Yes | Free web **sleeps after 15 min**; free PG **expires in 30 days** | Web Starter **$7/mo** |
-| Fly.io | Yes | Yes | Yes | Yes | Yes | Yes | None for new orgs (2-hour trial) | Machine **~$1.94–2.19/mo** (256 MB) |
-| Railway | Yes | Yes | Yes | Yes | Yes | Yes | 30-day trial; limited free plan | Hobby **$5/mo** + usage |
-
-### Recommendation: Render
-
-**Why Render.** It is a managed container platform whose paid tier gives exactly
-what TraceSettle needs with the least operational work: always-on web services,
-native Docker deploys, a `/api/health` health check, graceful shutdown, secrets
-as environment variables, persistent disks, and a **managed PostgreSQL in the same
-region** so the app uses the internal network. The critical exclusions are all on
-the **free** tier (which sleeps and expires a database), so the plan is a small
-paid one, not the free tier.
-
-**Runner-up: Fly.io.** Cheaper compute (~$2/mo for a 256 MB machine) but its
-managed Postgres starts at $38/month, so you would run PostgreSQL elsewhere
-(e.g. Neon) and accept a second vendor and more ops. Reasonable if cost matters
-more than simplicity.
-
-**Rejected: the free tiers of all three** — a sleeping web service and a database
-that expires after 30 days cannot host a continuous authorization guard.
-
-## 2. PostgreSQL provider selection
-
-| Provider | Free tier | Permanent free? | Session advisory lock | Notes |
-| --- | --- | --- | --- | --- |
-| **Render PostgreSQL** | 1 GB, **expires 30 days**, no backups | No | Yes via **direct** URL (avoid pooled `:6432`) | same-vendor, same-region; Basic-256mb **$6/mo** |
-| Neon | 0.25 CU, scale-to-zero, 0.5 GB | Yes (limited) | Yes on the **direct** host; **no** on the `-pooler` (transaction mode) | free is usable but scale-to-zero adds cold-start; Launch **~$19/mo** |
-| Supabase | 500 MB, pauses after ~1 week idle | Yes (limited) | Yes on direct `:5432` or **session** pooler `:5432`; **no** on `:6543` | Pro **$25/mo**; free pauses |
-| Railway PostgreSQL | metered | Trial only | Yes on direct | a few $/mo |
-
-**Recommendation:** **Render PostgreSQL (Basic-256mb, ~$6/mo)** when Render is the
-host — one vendor, same region, direct connection, no scale-to-zero. If you want
-a free start, **Neon** (direct host, not `-pooler`) works; accept scale-to-zero
-and treat it as non-production until upgraded.
-
-**Connection-pooling rule (applies to every provider):** use a **direct** or
-**session-mode** connection. A **transaction-mode** pooler remaps the backend
-connection between transactions and breaks the session-level advisory lock used
-during migration. See `ARCHITECTURE.md` §3.
-
-## 3. NEAR archival RPC
-
-- Free: `archival-rpc.mainnet.near.org` — permanent free, but **deprecated and
-  hard rate-limited**. Acceptable only at very low historical-lookup volume.
-- Paid: a NEAR archive plan from QuickNode/Chainstack (~**$49/mo**) or metered
-  dRPC/GetBlock (a few dollars at low volume). See `NEAR_ARCHIVAL_RPC.md`.
-
-## 4. Monitoring
-
-- Platform-native metrics/logs: **$0**.
-- An external uptime check on `/api/health`: free tiers exist (**$0**).
-- A managed observability vendor is optional; budget **$0–25/mo**.
-
-## 5. Estimated monthly operating cost
-
-| Line | Free-tier path | Recommended paid path |
+| Need | Why | Free-satisfiable? |
 | --- | --- | --- |
-| App host | $0 (but sleeps — not production) | Render Web Starter **$7** |
-| PostgreSQL | $0 (Neon free, scale-to-zero) | Render PG Basic-256mb **$6** |
-| Audit volume (~1 GB) | $0 | Render disk **~$0.25** |
-| NEAR archive RPC | $0 (deprecated free) | $0 free, or **~$49** paid |
-| Monitoring | $0 | **$0** |
-| **Total** | **$0** (with caveats) | **~$13/mo** free-archive, **~$62/mo** paid-archive |
+| Docker/container host running Python | the only process | Yes (with caveats, §2) |
+| Environment variables / secrets | API key, signing key, DSN | Yes |
+| Health check + graceful shutdown | deploy safety | Yes |
+| **Always-on** process | the guard must enforce continuously | **No free, card-free option found** |
+| PostgreSQL, **direct/session** connection | shared state + session advisory lock in migration | Yes (Neon free) |
+| Persistent storage for the audit log | tamper-evident record | Limited (ephemeral filesystem on free hosts) |
+| Historical NEAR archival RPC | old settlement evidence | **No verified free permanent option** |
 
-**Bottom line:** the honest production floor is about **$13/month** (Render web +
-Render Postgres + a small audit disk) using the deprecated free NEAR archive; add
-**~$49/month** for a reliable paid NEAR archive. The `$0` path is not production:
-the app host sleeps and the free databases expire or pause.
+The two hard blockers are **always-on** and **free archival NEAR**. Everything
+else has a genuine free answer.
 
-## 6. Not done here
+## 2. Free hosting — what exists, and the trap
 
-No account created, no plan purchased, no payment details entered, no resource
-provisioned. These are post-authorization steps.
+| Platform | Card required? | Free tier permanent? | Sleeps / scales to zero? | Docker? | Persistent disk? | Verdict |
+| --- | --- | --- | --- | --- | --- | --- |
+| **Render** (Free web service) | **No** — docs: "No payment is required" | Yes, no expiry | **Yes** — spins down after 15 min idle, ~1 min to wake | Yes | No on free (ephemeral FS) | **Best card-free option; demonstration/limited only** |
+| Koyeb (Free instance) | **Yes** — since Feb 2026 a card with a $29 hold is required | Yes | Yes — scales to zero after 1 h | Yes | No | Excluded (card) |
+| Northflank (Sandbox) | **Yes** — card requested at sign-up as anti-abuse verification | Yes | No — always-on | Yes | Limited | Excluded (card) |
+| Oracle Cloud (Always Free) | **Yes** for most users — docs: "most users need a mobile phone number and a credit card to create an account" | Yes | No | Yes (VM) | Yes | Excluded (card) |
+| Fly.io | Yes — no free tier for new orgs | No (2-hour trial) | — | Yes | Yes | Excluded (trial + card) |
+| Railway | Trial credit only | No | — | Yes | Yes | Excluded (trial) |
+| Google Cloud Run / App Engine | Billing account (card) required | Free allowance only | Yes (scale to zero) | Yes | No | Excluded (card) |
+
+**Conclusion.** The only genuinely card-free, permanent container host found is
+**Render's Free web service**. It is **not always-on**: it spins down after 15
+minutes without traffic and takes about a minute to wake. That makes it suitable
+for a **demonstration or limited deployment**, not for a service that must
+enforce authorization continuously.
+
+## 3. Free PostgreSQL
+
+| Provider | Card? | Permanent free? | Session advisory locks? | Pauses / scales to zero? | Storage | Verdict |
+| --- | --- | --- | --- | --- | --- | --- |
+| **Neon** (Free) | **No** — docs: "no credit card required" | Yes, "no time limits" | **Yes on the direct host**; **no** on the `-pooler` (transaction mode) | Yes — compute suspends after 5 min idle | 1 GB/project, 100 CU-hours/month | **Recommended** |
+| Supabase (Free) | No | Yes, with caveats | Yes on direct `:5432` or **session** pooler `:5432`; **no** on `:6543` (transaction) | Pauses after inactivity (restore manually) | 500 MB/project, 2 active projects | Viable alternative |
+| Render PostgreSQL (Free) | No | **No — expires 30 days after creation** | Direct only (no managed pooling on free) | — | 1 GB | **Excluded (30-day expiry)** |
+
+**Recommendation: Neon Free, direct connection string.**
+- Neon's own docs state that **session-level advisory locks are not supported on
+  the pooled (transaction-mode) connection** and that you must "use the direct
+  connection string for tools that need session state (…, migrations …)". TraceSettle's
+  migration takes a **session-scoped** advisory lock, so the DSN must be the
+  **direct** host (no `-pooler` suffix).
+- Neon Free is permanent and needs no card. Its limits (1 GB, 100 CU-hours/month,
+  5 GB egress/month, scale-to-zero after 5 min) are ample for a low-traffic guard,
+  but scale-to-zero adds a cold start to the first request after idle.
+
+**Not chosen:** Render Free Postgres expires after 30 days — it cannot host a
+continuous guard.
+
+## 4. Free NEAR archival RPC — no verified permanent option
+
+Probed read-only on 2026-11-01 (single request each, public endpoints, no keys,
+within rate limits):
+
+| Endpoint | Result for historical tx `5E3Gdbhw…ypFb` | Interpretation |
+| --- | --- | --- |
+| `archival-rpc.mainnet.near.org` | **OK** (6 receipts, 9 logs, 3.6 s) | archival — but **deprecated and rate-limited** |
+| `free.rpc.fastnear.com` | `UNKNOWN_TRANSACTION` | non-archival (the default primary) |
+| `rpc.mainnet.near.org`, `near.drpc.org`, `rpc.fastnear.com`, `near-mainnet.gateway.tatum.io` | `UNKNOWN_TRANSACTION` | non-archival |
+| `1rpc.io/near` | "the method tx does not exist/is not available" | `tx` disabled |
+| `near.blockpi.network/…/public` | HTTP 503 "Apikey no…" | key required |
+| `near.lava.build` | HTTP 410 "This endpoint has been discontinued." | discontinued |
+| `rpc.ankr.com/near` | `Unauthorized: … API key` | key required |
+| `near.nownodes.io` | HTTP 422 "Missing API_key" | key required |
+| `archival-rpc.mainnet.pagoda.co`, `rpc.mainnet.pagoda.co` | HTTP 403 (rate-limit body) | blocked here |
+| `allthatnode`, `getblock`, `chainstack`, `blastapi`, `nownodes` public hosts | DNS not resolvable / 404 | no public endpoint |
+
+**Conclusion.** The **only** endpoint that resolved the historical transaction
+without an account or key was `archival-rpc.mainnet.near.org`, the already-default
+fallback, which NEAR documents as **deprecated and hard rate-limited**. No
+genuinely free, permanent, key-free archival provider was verified. This is an
+**unresolved limitation**, not a solved problem. See `NEAR_ARCHIVAL_RPC.md`.
+
+## 5. Cost
+
+| Line | Free path | Cost |
+| --- | --- | --- |
+| Application host | Render Free web service | **$0** |
+| PostgreSQL | Neon Free (direct connection) | **$0** |
+| Audit log storage | ephemeral filesystem on free host (lost on restart) | **$0** |
+| NEAR archival RPC | deprecated free archive only (rate-limited) | **$0** |
+| Monitoring | platform-native + a free uptime check | **$0** |
+| Audit anchoring | OpenTimestamps (free; not implemented) | **$0** |
+| **Total** | | **$0** |
+
+There is no paid tier recommended anywhere in this package. If a capability
+cannot be met for $0, it is documented as an unresolved limitation rather than
+priced.
+
+## 6. Honest capability matrix
+
+| Capability | Result |
+| --- | --- |
+| Free application hosting | **Verified** (Render Free; card-free, permanent) |
+| Free PostgreSQL | **Verified** (Neon Free; card-free, permanent) |
+| Session advisory locks | **Verified on Neon direct connection**; unsupported on any transaction-mode pooler |
+| Free NEAR archival RPC | **Unverified / Unavailable** — only a deprecated rate-limited endpoint works |
+| Persistent storage | **Limited** — free host filesystem is ephemeral; audit log does not survive restart |
+| Security guarantees | **Preserved** (no guarantee is weakened by this architecture) |
+| Always-on enforcement | **Unavailable for free** — the free host sleeps, the free database scales to zero |
+| Production readiness | **Not ready** — a free deployment is a demonstration, not production |
+
+## 7. What this means
+
+A **free demonstration deployment is feasible**: Render Free (card-free) + Neon
+Free (card-free) + the deprecated free NEAR archive. It demonstrates the
+investigator, the guard's ALLOW/BLOCK/REQUIRE_APPROVAL decisions, signer
+authorization, PostgreSQL shared state, and the fail-closed behaviour.
+
+A **production-grade deployment is not genuinely possible at $0**: the guard must
+be always-on to enforce continuously, and every card-free host found either sleeps
+or scales to zero; the only free archival NEAR endpoint is deprecated and
+rate-limited. Those two gaps are the reason. See `PRODUCTION_ACCEPTANCE_CHECKLIST.md`.

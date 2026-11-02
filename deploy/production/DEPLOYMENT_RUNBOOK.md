@@ -1,19 +1,23 @@
 # TRACESETTLE — deployment runbook
 
-Steps to deploy the prepared production image. **Nothing here has been executed
-against production.** Run each step only after deployment is authorized.
+Steps to deploy the image, **free path first**. Nothing here has been executed
+against production. Run each step only after deployment is authorized. No step
+requires a purchase or a credit card.
 
 ## 0. Prerequisites
 
-- A container host with **always-on** instances, a health check, graceful
-  shutdown, and environment-variable secrets (see `COST_ESTIMATE.md` for the
-  recommended platform).
-- A PostgreSQL database reachable over a **direct or session-mode** connection
-  (see `ARCHITECTURE.md` §3). Transaction-mode poolers are not compatible.
+- A **card-free** container host. The verified option is **Render Free web
+  service** (Docker, health check, env vars, graceful shutdown). It **spins down
+  after 15 minutes idle**, so this is a demonstration/limited deployment.
+- A **card-free** PostgreSQL reachable over a **direct or session-mode**
+  connection (see `ARCHITECTURE.md` §3). The verified option is **Neon Free**
+  (direct host). Transaction-mode poolers are not compatible with the migration.
 - Two secrets generated locally and stored only in the platform secret manager:
   - `TRACESETTLE_API_KEY`
   - `TRACESETTLE_GUARD_AUTH_KEY`
 - The image built from this repo at a pinned commit.
+
+No purchase, subscription, or credit card is required for any step below.
 
 ## 1. Generate the secrets (once)
 
@@ -98,17 +102,19 @@ Use `.env.production.example` as the checklist. Mandatory for a public deploy:
 | `TRACESETTLE_GUARD_STATE_PG_DSN` | the direct connection string |
 | `TRACESETTLE_GUARD_REQUIRE_POSTGRES` | `1` |
 | `TRACESETTLE_NEAR_RPC_URL` | `https://free.rpc.fastnear.com` |
-| `TRACESETTLE_NEAR_RPC_FALLBACK_URL` | your paid archive endpoint |
+| `TRACESETTLE_NEAR_RPC_FALLBACK_URL` | `https://archival-rpc.mainnet.near.org` (the only free archive; deprecated + rate-limited) |
 
-Optional: `TRACESETTLE_GUARD_AUDIT_LOG=/data/audit.jsonl` plus a persistent volume
-mounted at `/data` owned by uid `10001`.
+Optional: `TRACESETTLE_GUARD_AUDIT_LOG=/data/audit.jsonl`. On a **free** host the
+filesystem is ephemeral, so the file does not survive a restart; a persistent
+volume needs a paid host. Treat the on-disk log as best-effort on the free tier.
 
 ## 6. Deploy
 
-- Deploy the image by digest (immutable) rather than a mutable tag.
+- Deploy the image (by digest if the host supports it).
 - Health check path: `/api/health`.
-- One instance is sufficient; add instances only because of load, since
-  PostgreSQL makes them share state safely.
+- One instance is sufficient. On the free tier the service sleeps after 15 minutes
+  idle and the database scales to zero after 5 minutes idle; the next request wakes
+  both (expect a cold start).
 
 ## 7. Post-deploy verification
 

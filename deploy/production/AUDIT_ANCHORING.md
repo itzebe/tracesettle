@@ -42,13 +42,16 @@ digest for an empty log). Nothing publishes it. That is the gap.
 **Primary: OpenTimestamps.** It is free, needs no key (so it adds no custody
 risk), and the proof verifies against the Bitcoin chain with no third party
 trusted at verification time. Its cost profile matches a low-frequency anchor
-(e.g. one digest per batch or per hour).
+(e.g. one digest per batch or per hour). It is the only option that satisfies the
+**$0 constraint with no credit-card commitment**, which is why it is the sole
+recommendation here.
 
 **Secondary (defence in depth): Sigstore Rekor**, which adds a transparency-log
 monitor that alarms on inconsistency. This is optional and can follow later.
 
 Avoid putting digests on a public chain with a funded key: it adds key custody
-and spend risk for no benefit over OpenTimestamps at this scale.
+and spend risk for no benefit over OpenTimestamps at this scale, and it would
+require a purchase.
 
 ## 4. Recommended architecture
 

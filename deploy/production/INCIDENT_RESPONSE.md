@@ -103,8 +103,11 @@ is `NOT_FOUND`. The rest of the investigation proceeds.
 **Recover.**
 1. Retry after the rate-limit window (`Retry-After` can be hundreds of seconds on
    the deprecated free archive).
-2. Point `TRACESETTLE_NEAR_RPC_FALLBACK_URL` at a paid archive node (see
-   `NEAR_ARCHIVAL_RPC.md`).
+2. Under the zero-budget constraint there is no alternative free archive: the
+   only free archive is the deprecated, rate-limited
+   `archival-rpc.mainnet.near.org` (see `NEAR_ARCHIVAL_RPC.md`). Retry after the
+   rate-limit window. A reliable archive node is a **paid** option and is out of
+   scope.
 
 **Avoid false confirmations.** Never reclassify `UNAVAILABLE` as failed, and never
 confirm a stage from a non-decisive event. Reconciliation is deterministic and
