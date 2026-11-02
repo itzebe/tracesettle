@@ -2,6 +2,9 @@
 .env
 .env.*
 !.env.example
+# Placeholder-only production template (contains no real values; validated by
+# deploy/production/validate_config.py). The un-ignored name ends in ".example".
+!deploy/production/.env.production.example
 *.pem
 *.key
 # Service credential stores (hashes only, but still never commit)
