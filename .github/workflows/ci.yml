@@ -69,6 +69,25 @@ jobs:
           fi
           echo "offline demo is byte-identical across runs"
 
+      - name: NEAR attack demonstration determinism
+        run: |
+          set -eu
+          python demo/near_demo.py --json > /tmp/near-1.json
+          python demo/near_demo.py --json > /tmp/near-2.json
+          if ! cmp -s /tmp/near-1.json /tmp/near-2.json; then
+            echo "NEAR demonstration output is not deterministic"
+            diff -u /tmp/near-1.json /tmp/near-2.json || true
+            exit 1
+          fi
+          python - <<'PY'
+          import json
+          with open("/tmp/near-1.json") as handle:
+              data = json.load(handle)
+          if not data["all_passed"]:
+              raise SystemExit("a NEAR attack scenario did not match its expected outcome")
+          print(f'{len(data["results"])} NEAR attack scenarios matched expectation')
+          PY
+
       - name: Confirm no runtime third-party imports
         run: |
           set -eu

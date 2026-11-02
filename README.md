@@ -20,6 +20,13 @@ checked.
    verified** from what is **merely reported**, flags contradictions and gaps, and
    prints an evidence-backed report.
 
+3. **NEAR agent protection (new).** An agent-side authorization wrapper an AI agent
+   or payment service must pass before it may sign. It inspects the real transaction
+   parameters, the NEAR Intents agent policy, and the NEAR access-key scope, and
+   returns `ALLOW`, `REQUIRE_APPROVAL`, `BLOCK`, `HOLD` or `UNKNOWN`. A provider's
+   settlement claim is still verified after the fact, never trusted. See
+   [`docs/NEAR_INTEGRATION.md`](docs/NEAR_INTEGRATION.md).
+
 TRACESETTLE never signs a real transaction, never submits one, never holds funds,
 and never asks for a private key or seed phrase. The reference signer simulates
 execution; it is the *enforcement boundary*, not a wallet.
@@ -81,7 +88,7 @@ Amounts are exact `Decimal`s: a limit of `0.3` admits `0.3` and refuses
 `0.30000000000000004`. Severity is compared by an explicit rank, never by the
 severity's string value (`"MEDIUM"` sorts after `"HIGH"` alphabetically).
 
-Sixteen structural guarantees are checked by *running the real code*, on demand, at
+Twenty structural guarantees are checked by *running the real code*, on demand, at
 `GET /api/guard/invariants` — including `refusal_never_reaches_the_executor` and
 `authorization_is_single_use`. Each checker is also mutation-tested: the guarded
 behaviour is deliberately broken and the checker must notice. A checker that
@@ -125,6 +132,60 @@ signal:
 Correlation uses explicit identifiers only (intent hash, deposit address,
 recipient address, transaction hash). Amount and timestamp similarity are never
 used to link stages.
+
+### NEAR agent protection
+
+An AI agent or a payment service acting for one must ask TRACESETTLE before it
+signs. `AgentAuthorizationWrapper.evaluate(transaction)` reads the **actual**
+parameters — never the agent's explanation — and runs three independent checks,
+where the strictest outcome wins:
+
+1. the Transaction Guard's deterministic decision;
+2. the NEAR Intents policy scope;
+3. the NEAR access-key scope.
+
+| Outcome | Meaning |
+| --- | --- |
+| `ALLOW` | An exact, transaction-bound authorization is valid; proceed. |
+| `REQUIRE_APPROVAL` | The mission's "WARN": an authenticated human must approve. |
+| `BLOCK` | Refuse to sign or submit. |
+| `HOLD` | Do not execute while the required condition is unresolved. |
+| `UNKNOWN` | Fail safely: the evidence needed to authorize was not obtained. |
+
+**A NEAR Intents policy is in force only when the provider reports `status:
+APPLIED` and `provider_policy_synced: true`.** A requested or signed update is not
+active, and its rules are never treated as if they were.
+
+**The policy scope gap is stated, not hidden.** An Intents policy's destinations,
+USD budget, timelock, schedule and owner approval protect the **Intents** path. A
+**native** NEAR/EVM/Solana request is not protected by them — only the policy's
+native method switch, plus an independent TraceSettle decision. The wrapper
+reports the gap explicitly.
+
+**A NEAR function-call key cannot transfer NEAR** and cannot attach NEAR tokens to
+a call. The wrapper checks the declared key scope before a native request reaches a
+signer, and treats an unrecognised permission as unrestricted, never as safe.
+
+Nine deterministic attack scenarios run against the real controls, and every
+refusal is provable: the executor is never called unless the outcome was `ALLOW`.
+
+| id | Attack | Expected |
+| --- | --- | --- |
+| A | Legitimate payment | `ALLOW` + executed |
+| B | Prompt-injected agent, unauthorised destination | `BLOCK` |
+| C | Destination changed after approval | `REFUSED (WRONG_PARAMETERS)` |
+| D | Agent exceeds its spending policy | `REQUIRE_APPROVAL` / `BLOCK` |
+| E | Unauthorised service identity | `BLOCK` |
+| F | Replayed authorization | `REFUSED (REPLAYED)` |
+| G | Operation outside the permitted key scope | `BLOCK` |
+| H | Native tx wrongly assumed protected by an Intents-only policy | policy-scope rejection |
+| I | Provider reports success without independent evidence | `UNKNOWN` / `UNAVAILABLE` |
+
+Four NEAR-specific structural guarantees join the invariant set, each
+mutation-tested: `near_policy_must_be_in_force`,
+`near_native_scope_gap_is_always_stated`,
+`near_function_call_key_cannot_transfer_near`, and
+`near_provider_success_is_never_verified_without_evidence`.
 
 ## Try it: do X → see Y
 
@@ -205,7 +266,10 @@ curl -sS -X POST http://127.0.0.1:8080/api/guard/sign \
 curl -sS http://127.0.0.1:8080/api/guard/invariants \
   | python3 -c 'import sys,json;d=json.load(sys.stdin);print("all hold:",d["all_hold"]);[print(" ",i["name"]) for i in d["invariants"]]'
 ```
-→ `all hold: True` and the sixteen invariant names.
+→ `all hold: True` and the twenty invariant names, including the four NEAR
+ones (`near_policy_must_be_in_force`, `near_native_scope_gap_is_always_stated`,
+`near_function_call_key_cannot_transfer_near`,
+`near_provider_success_is_never_verified_without_evidence`).
 
 **4. Investigate a real, known-good swap from the command line.**
 
@@ -304,6 +368,86 @@ python3 demo/demonstrate.py --offline
 network access. It substitutes only the network transport, so the adapter,
 engine, and report code is the real code. The run is labelled `OFFLINE REPLAY`
 and states the capture date; it does not show that an endpoint is answering now.
+
+**11. Run the NEAR agent attack demonstration.**
+
+```sh
+python3 demo/near_demo.py
+```
+→ runs the nine scenarios against the real controls. Expected: A `ALLOW` +
+executed, B `BLOCK`, C `REFUSED (WRONG_PARAMETERS)`, D `REQUIRE_APPROVAL` /
+`BLOCK`, E `BLOCK`, F `REFUSED (REPLAYED)`, G `BLOCK`, H policy-scope rejection,
+I `UNKNOWN`. Every scenario prints whether the simulated executor was reached;
+for B–E and G–I it is `0`.
+
+**12. Attempt an attack and see why it is blocked.**
+
+```sh
+python3 demo/near_demo.py --scenario B
+```
+→ a prompt injection tells the agent to pay `0xdeadbeef…`. The wrapper reads the
+real destination, not the agent's explanation, and returns `BLOCK` with the
+findings `GUARD_DECISION`, `GUARD_UNAPPROVED_DESTINATION` and
+`POLICY_DESTINATION_DENIED`. The executor is never called (`executor executions
+-> 0`).
+
+```sh
+python3 demo/near_demo.py --scenario H
+```
+→ a native NEAR transfer is rejected (`POLICY_SCOPE_REJECTED`) because the
+Intents policy does not enable `native.near.transfer`, and the run states that
+the Intents money controls do not apply to a native request.
+
+**13. Verify the policy scope gap and the access-key facts.**
+
+```sh
+python3 demo/near_demo.py --policy-scope
+python3 demo/near_demo.py --access-keys
+```
+→ the first prints which controls protect the `INTENTS` path versus a
+`NATIVE_NEAR` request; the second prints that a function-call key cannot transfer
+NEAR, that an omitted `method_names` means every method, and that an omitted
+`allowance` means unlimited gas.
+
+**14. Inspect the NEAR surface over HTTP (server from step 8 running).**
+
+```sh
+curl -sS http://127.0.0.1:8000/api/guard/near/scenarios \
+  | python3 -c 'import sys,json;d=json.load(sys.stdin);print("all passed:",d["all_passed"])'
+curl -sS http://127.0.0.1:8000/api/guard/near/policy-scope \
+  | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d["scope"]["NATIVE_NEAR"]["non_applicable_controls"])'
+```
+→ `all passed: True`, and the native scope names the controls that do **not**
+apply (`destinations`, `budget_usd`, `timelock_ms`, `schedule`,
+`owner_approval`).
+
+**15. Evaluate one agent transaction over HTTP — allowed, then blocked.**
+
+The default policy approves `0x4e6d3a556e485188e9c9a528bc72c88bd92bd735` and
+`0xb741c00f6d63b6ded0ccada1a82bcbadc38a572b`, so the first call passes.
+
+```sh
+curl -sS -X POST http://127.0.0.1:8000/api/guard/near/agent-evaluate \
+  -H 'Content-Type: application/json' \
+  -d '{"transaction":{"service_id":"treasury-agent","operation":"WITHDRAWAL",
+       "chain":"eth","asset":"USDC","amount":"100",
+       "destination":"0x4e6d3a556e485188e9c9a528bc72c88bd92bd735",
+       "scope":"INTENTS","policy_action":"withdraw"}}' \
+  | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d["outcome"],d["permits_signing"])'
+```
+→ `ALLOW True`.
+
+```sh
+curl -sS -X POST http://127.0.0.1:8000/api/guard/near/agent-evaluate \
+  -H 'Content-Type: application/json' \
+  -d '{"transaction":{"service_id":"treasury-agent","operation":"WITHDRAWAL",
+       "chain":"eth","asset":"USDC","amount":"100",
+       "destination":"0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+       "scope":"INTENTS","policy_action":"withdraw"}}' \
+  | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d["outcome"],d["permits_signing"])'
+```
+→ `BLOCK False`. The destination is unapproved, so the wrapper refuses to permit
+signing. Nothing is signed or broadcast in either call.
 
 ## Supported input and honest limits
 
@@ -461,6 +605,9 @@ identical decisions.
 | `docs/official/` | NEAR documentation captured during Phase 1. |
 | `requirements-dev.txt` | Development-only tool pins (`pytest`, `pyflakes`). Not needed at runtime. |
 
+tracesettle/near/          NEAR agent protection: policy scope, access-key
+                          analysis, the agent authorization wrapper, the attack
+                          scenarios, the settlement assurance view, TEE research
 ## Runtime dependencies
 
 **None.** TRACESETTLE imports only the Python standard library at runtime
@@ -732,6 +879,8 @@ It performs no deployment, publish, or release, and needs no repository secrets:
 - static analysis (`python -m pyflakes tracesettle/ tests/ demo/`);
 - byte-compilation of every module;
 - the offline demo run twice, asserted byte-identical (determinism);
+- the NEAR attack demonstration run twice, asserted byte-identical, with every
+  scenario required to match its expected outcome;
 - a gate that fails if any non-standard-library import appears at module level
   (the optional PostgreSQL driver is allowed only as a lazy, function-body import);
 - a PostgreSQL job (`postgres:16` service) that runs the distributed
@@ -746,7 +895,7 @@ immutable commit SHA (not a moving tag), and cancels superseded runs.
 ## Tests
 
 ```sh
-python3 -m pytest tests/ -q          # 716 passed, 23 skipped (739 with a server)
+python3 -m pytest tests/ -q          # 827 passed, 24 skipped (851 with a server)
 python3 -m pytest tests/test_guard_authorization.py -q
 python3 -m pytest tests/test_guard_invariants.py -q
 python3 -m pytest tests/test_guard_end_to_end.py -q
@@ -754,6 +903,9 @@ python3 -m pytest tests/test_safety_invariants.py -q
 python3 -m pytest tests/test_serviceauth.py tests/test_serviceauth_http.py -q
 python3 -m pytest tests/test_securityconfig.py tests/test_failclosed_startup.py -q
 python3 -m pytest tests/test_ui.py -q
+python3 -m pytest tests/test_near_policy.py tests/test_near_access_keys.py -q
+python3 -m pytest tests/test_near_agent_wrapper.py tests/test_near_attacks.py -q
+python3 -m pytest tests/test_near_api.py tests/test_near_invariants.py -q
 ```
 
 Test coverage includes successful settlement, a failed intent with a verified
@@ -792,6 +944,18 @@ records and chain verification, incident creation and resolution, provider and
 RPC failure handling on the settlement side, and the end-to-end vertical slice
 for both the permitted and the refused path.
 
+The NEAR tests make no network calls and broadcast nothing. They exercise the
+real policy parser, the real access-key analyser, the real wrapper, the real
+guard controls, the real signer and the real API. Coverage includes: a policy
+that is signed but not applied (never in force), a frozen agent, a disabled
+action, a destination outside the policy list, the native scope gap (both when
+the switch is off and on), an unreadable policy (`HOLD` for native, review for
+Intents), a function-call key that cannot transfer NEAR, a full-access key that
+forces review, the five outcomes, determinism, an invalid amount failing safe to
+`UNKNOWN`, a client-supplied approval flag never honoured, and the settlement
+assurance rule that a provider success claim is never independently verified
+without decisive evidence. Each of the four NEAR invariants is mutation-tested.
+
 ## Read-only guarantee
 
 TRACESETTLE cannot recover, reverse, freeze, or move funds. It cannot report a
@@ -809,12 +973,23 @@ execution rather than signing anything.
 
 - **Track: `security` (AI Security & Defense).** The track's own hint is "spending
   limits, policy engines, sandboxed wallets... give AI money without giving it the
-  keys to everything", which is precisely what the Transaction Guard and
-  Authorization Firewall are. A secondary `defi` track could be claimed through the
-  NEAR Intents settlement verification, but the primary contribution is security.
+  keys to everything", which is precisely what the Transaction Guard, the
+  Authorization Firewall, and the NEAR agent authorization wrapper are. A secondary
+  `defi` track could be claimed through the NEAR Intents settlement verification,
+  but the primary contribution is security.
+- **The NEAR integration.** An agent-side authorization wrapper for the NEAR
+  Intents Agent API: it reads the agent policy and its real enforcement scope, the
+  NEAR access-key scope, and returns `ALLOW` / `REQUIRE_APPROVAL` / `BLOCK` /
+  `HOLD` / `UNKNOWN` on the **actual** transaction parameters. Nine deterministic
+  attack scenarios prove the boundary refuses. See
+  [`docs/NEAR_INTEGRATION.md`](docs/NEAR_INTEGRATION.md). Verifiable execution (TEE)
+  is researched and deliberately not integrated: see
+  [`docs/TEE_RESEARCH.md`](docs/TEE_RESEARCH.md).
 - **No artificial AI.** No LLM is used, and none was added to qualify for an AI
   category. Every decision is a deterministic, testable rule; the whole point is
   that a model must not be able to talk its way past the boundary.
+- **Zero budget.** No paid service, no account, no transaction. The runtime is
+  standard-library only and every external source is public and read-only.
 - **Deadline: 2026-11-14T23:59:00Z.** The repository must be public by then; the
   submission is a single form POST and cannot be edited afterward.
 - **Not yet done:** making the repository public, posting the demo on X, and sending

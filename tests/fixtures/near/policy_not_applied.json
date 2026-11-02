@@ -1,0 +1,50 @@
+{
+  "_provenance": "synthetic",
+  "_note": "A policy update that was signed but is not yet APPLIED and not provider-synced. Its rules must NOT be treated as active.",
+  "agent_id": "demo-agent.near",
+  "revision": 8,
+  "status": "SIGNED",
+  "provider_policy_synced": false,
+  "frozen": false,
+  "actions": [
+    "swap",
+    "transfer",
+    "withdraw"
+  ],
+  "assets": "any",
+  "confidential": false,
+  "owner_approval": false,
+  "limits": {
+    "per_transaction": {
+      "nep141:usdc.near": "100000000"
+    },
+    "daily": {
+      "nep141:usdc.near": "500000000"
+    },
+    "max_actions_per_hour": 20
+  },
+  "destinations": {
+    "mode": "any",
+    "list": []
+  },
+  "budget_usd": "500",
+  "timelock_ms": 0,
+  "schedule": null,
+  "native": {
+    "near": {
+      "sign_message": false,
+      "transfer": false,
+      "call": false
+    },
+    "evm": {
+      "sign_typed_data": false,
+      "sign_message": false,
+      "sign_transaction": false
+    },
+    "solana": {
+      "sign_message": false,
+      "sign_transaction": false
+    }
+  },
+  "policy_hash": "synthetichash0000000000000000000000000000000000000000000000000000000000"
+}

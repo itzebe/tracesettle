@@ -625,6 +625,171 @@ def _postgres_shared_state_refuses_cross_instance_replay() -> InvariantResult:
     )
 
 
+# ---------------------------------------------------------------------------
+# NEAR integration invariants
+# ---------------------------------------------------------------------------
+#
+# These prove the NEAR-specific guarantees with the real wrapper, the real
+# policy parser, and the real access-key analyser. They are the structural
+# counterpart to the attack scenarios: the scenarios show the attacks are
+# stopped, these show the property that stops them cannot silently weaken.
+
+
+def _near_wrapper(*, policy_read=None, access_key=None):
+    """A throwaway NEAR wrapper over a real guard service."""
+    from ..near.agent_wrapper import AgentAuthorizationWrapper
+    from ..near.attacks import DEMO_KEY, near_demo_policy
+
+    authority = AuthorizationAuthority(
+        key=DEMO_KEY, key_id="invariant-near", ephemeral=False, replay_store=InMemoryReplayStore()
+    )
+    service = GuardService(policy=near_demo_policy(), authority=authority)
+    return AgentAuthorizationWrapper(service, policy_read=policy_read, access_key=access_key)
+
+
+def _near_policy_fixture(name: str):
+    import json
+    import pathlib as _pathlib
+
+    from ..near.policy import PolicyAdapter
+
+    root = _pathlib.Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "near"
+    raw = json.loads((root / name).read_text())
+    return PolicyAdapter.from_fixture(raw)
+
+
+def _near_legit_tx(**overrides):
+    from ..near.agent_wrapper import AgentTransaction
+    from ..near.policy import PolicyScope
+
+    base = dict(
+        service_id="treasury-agent",
+        operation="WITHDRAWAL",
+        chain="base",
+        asset="USDC",
+        amount="1250.50",
+        destination="0x1111111111111111111111111111111111111111",
+        scope=PolicyScope.INTENTS,
+        policy_action="withdraw",
+        request_id="near-invariant",
+    )
+    base.update(overrides)
+    return AgentTransaction(**base)
+
+
+def _near_policy_must_be_in_force():
+    """A signed-but-not-applied policy update must never be treated as active."""
+    not_applied = _near_policy_fixture("policy_not_applied.json")
+    wrapper = _near_wrapper(policy_read=not_applied)
+    decision = wrapper.evaluate(_near_legit_tx())
+    if decision.outcome.value == "ALLOW":
+        return InvariantResult(
+            "near_policy_must_be_in_force",
+            False,
+            "a signed-but-not-applied policy produced ALLOW",
+        )
+    return InvariantResult(
+        "near_policy_must_be_in_force",
+        True,
+        f"a signed-but-not-applied policy yields {decision.outcome.value}, never ALLOW",
+    )
+
+
+def _near_native_scope_gap_is_always_stated():
+    """A native request must never be described as covered by the Intents money rules."""
+    from ..near.policy import PolicyScope
+
+    on_read = _near_policy_fixture("policy_native_transfer.json")
+    wrapper = _near_wrapper(policy_read=on_read)
+    tx = _near_legit_tx(
+        operation="TRANSFER",
+        chain="near",
+        asset="NEAR",
+        amount="5",
+        scope=PolicyScope.NATIVE_NEAR,
+        policy_action="transfer",
+        transfers_near=True,
+        metadata={"native_method": "transfer"},
+    )
+    decision = wrapper.evaluate(tx)
+    if "destinations" not in decision.non_applicable_controls:
+        return InvariantResult(
+            "near_native_scope_gap_is_always_stated",
+            False,
+            "a native request did not report that the destinations control does not apply",
+        )
+    if decision.outcome.value == "ALLOW" and not decision.limitations:
+        return InvariantResult(
+            "near_native_scope_gap_is_always_stated",
+            False,
+            "a native request was allowed without stating the scope gap",
+        )
+    return InvariantResult(
+        "near_native_scope_gap_is_always_stated",
+        True,
+        "a native request reports that the Intents money controls do not apply",
+    )
+
+
+def _near_function_call_key_cannot_transfer_near():
+    """A function-call key must never be treated as able to transfer NEAR."""
+    from ..near.access_keys import key_supports_operation, parse_access_key
+
+    key = parse_access_key(
+        {
+            "permission": {
+                "FunctionCall": {
+                    "receiver_id": "wrap.near",
+                    "method_names": ["ft_transfer"],
+                    "allowance": "1",
+                }
+            }
+        }
+    )
+    allowed, _ = key_supports_operation(key, operation="TRANSFER", transfers_near=True)
+    if allowed:
+        return InvariantResult(
+            "near_function_call_key_cannot_transfer_near",
+            False,
+            "a function-call key was treated as able to transfer NEAR",
+        )
+    return InvariantResult(
+        "near_function_call_key_cannot_transfer_near",
+        True,
+        "a function-call key can never transfer NEAR or attach NEAR to a call",
+    )
+
+
+def _near_provider_success_is_never_verified_without_evidence():
+    """A provider success claim must never produce an independently-verified level."""
+    from ..model import OverallOutcome, ReconciliationResult, Stage, StageAssessment, StageState
+    from ..near.settlement import AssuranceLevel, settlement_assurance_from_result
+
+    result = ReconciliationResult(
+        stages=(
+            StageAssessment(stage=Stage.NEAR_SETTLEMENT, state=StageState.MISSING, summary="none"),
+            StageAssessment(
+                stage=Stage.DESTINATION_CHAIN_DELIVERY, state=StageState.MISSING, summary="none"
+            ),
+        ),
+        last_confirmed_stage=None,
+        outcome=OverallOutcome.UNKNOWN,
+        summary="no evidence",
+    )
+    assurance = settlement_assurance_from_result(result, provider_reported_success=True)
+    if assurance.level is AssuranceLevel.VERIFIED or assurance.independently_verified:
+        return InvariantResult(
+            "near_provider_success_is_never_verified_without_evidence",
+            False,
+            "a provider success claim produced an independently-verified settlement",
+        )
+    return InvariantResult(
+        "near_provider_success_is_never_verified_without_evidence",
+        True,
+        "a provider success claim without independent evidence stays UNKNOWN/UNAVAILABLE",
+    )
+
+
 INVARIANTS: dict[str, Callable[[], InvariantResult]] = {
     "non_allow_never_authorizes": _non_allow_never_authorizes,
     "refusal_never_reaches_the_executor": _refusal_never_reaches_the_executor,
@@ -643,6 +808,12 @@ INVARIANTS: dict[str, Callable[[], InvariantResult]] = {
     "state_store_failure_fails_closed": _state_store_failure_fails_closed,
     "postgres_shared_state_refuses_cross_instance_replay": (
         _postgres_shared_state_refuses_cross_instance_replay
+    ),
+    "near_policy_must_be_in_force": _near_policy_must_be_in_force,
+    "near_native_scope_gap_is_always_stated": _near_native_scope_gap_is_always_stated,
+    "near_function_call_key_cannot_transfer_near": _near_function_call_key_cannot_transfer_near,
+    "near_provider_success_is_never_verified_without_evidence": (
+        _near_provider_success_is_never_verified_without_evidence
     ),
 }
 
@@ -664,6 +835,10 @@ INVARIANT_DESCRIPTIONS: dict[str, str] = {
     "durable_counters_survive_restart": "Window-volume and velocity counters persist across a restart; a limit is not reset by a bounce.",
     "state_store_failure_fails_closed": "An unreadable durable state store yields HOLD with no authorization, never ALLOW.",
     "postgres_shared_state_refuses_cross_instance_replay": "With the PostgreSQL backend, a nonce spent by one instance is refused as a replay by another.",
+    "near_policy_must_be_in_force": "A NEAR Intents policy update that is signed or requested but not APPLIED and provider-synced is never treated as active.",
+    "near_native_scope_gap_is_always_stated": "A native NEAR/EVM/Solana request is never described as protected by the Intents destinations, budget, timelock, schedule or owner approval.",
+    "near_function_call_key_cannot_transfer_near": "A NEAR function-call key is never treated as able to transfer NEAR or attach NEAR tokens to a call.",
+    "near_provider_success_is_never_verified_without_evidence": "A provider success status never yields an independently-verified settlement level without decisive on-chain evidence.",
 }
 
 

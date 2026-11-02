@@ -143,6 +143,25 @@ class GuardAPI:
             return ApiResponse(200, payload)
         if path == "/api/guard/scenarios":
             return ApiResponse(200, {"scenarios": SCENARIOS, "note": SIMULATION_NOTE})
+        if path == "/api/guard/near/scenarios":
+            from ..near.attacks import SIMULATION_NOTE as NEAR_NOTE
+            from ..near.attacks import run_all
+
+            results = run_all()
+            return ApiResponse(
+                200,
+                {
+                    "note": NEAR_NOTE,
+                    "results": [r.to_dict() for r in results],
+                    "all_passed": all(r.passed for r in results),
+                },
+            )
+        if path == "/api/guard/near/access-keys":
+            return ApiResponse(200, {"keys": self._near_access_keys()})
+        if path == "/api/guard/near/policy-scope":
+            return ApiResponse(200, self._near_policy_scope())
+        if path == "/api/guard/near/settlement-demo":
+            return ApiResponse(200, self._near_settlement_demo())
         if path == "/api/guard/invariants":
             from .invariants import INVARIANT_DESCRIPTIONS, check_all
 
@@ -162,6 +181,90 @@ class GuardAPI:
             )
         return ApiResponse(404, {"error": "not found"})
 
+    # -- NEAR helpers -------------------------------------------------------
+
+    @staticmethod
+    def _near_fixture_dir() -> Any:
+        import pathlib
+
+        return pathlib.Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "near"
+
+    def _near_access_keys(self) -> dict[str, Any]:
+        """Analyse the documented access-key shapes. Fixtures, clearly labelled."""
+        import json
+
+        from ..near.access_keys import parse_access_key
+
+        raw = json.loads((self._near_fixture_dir() / "access_keys.json").read_text())
+        return {
+            "note": (
+                "Synthetic fixtures reproducing the documented NEAR access-key permission shapes. "
+                "No private key material is present or requested."
+            ),
+            "keys": {
+                name: parse_access_key(shape).to_dict()
+                for name, shape in raw.get("keys", {}).items()
+            },
+        }
+
+    def _near_policy_scope(self) -> dict[str, Any]:
+        """Report which policy controls protect each transaction path."""
+        import json
+
+        from ..near.policy import (
+            PolicyAdapter,
+            PolicyScope,
+            controls_applicable_to,
+            controls_not_applicable_to,
+        )
+
+        raw = json.loads((self._near_fixture_dir() / "policy_in_force.json").read_text())
+        read = PolicyAdapter.from_fixture(raw)
+        return {
+            "note": (
+                "The NEAR Intents policy protects the INTENTS path. Native NEAR/EVM/Solana "
+                "requests skip destinations, budget, timelock, schedule and owner approval; only "
+                "the policy's native method switch and an independent TraceSettle decision govern."
+            ),
+            "policy": read.to_dict(),
+            "scope": {
+                scope.value: {
+                    "applicable_controls": list(controls_applicable_to(scope)),
+                    "non_applicable_controls": list(controls_not_applicable_to(scope)),
+                }
+                for scope in PolicyScope
+            },
+        }
+
+    def _near_settlement_demo(self) -> dict[str, Any]:
+        """The post-settlement assurance view: a provider claim is never proof.
+
+        Runs the deterministic engine over a synthetic evidence set in which the
+        provider reports success but no decisive on-chain evidence exists, and
+        reports the honest assurance level (UNKNOWN, not VERIFIED).
+        """
+        from ..near.settlement import settlement_assurance_from_result
+        from ..reconcile import reconcile
+
+        from ..model import SourceStatus
+
+        result = reconcile(
+            [],
+            {"oneclick_status": SourceStatus.RATE_LIMITED},
+            expected_intent_hashes=[],
+            expected_origin_tx_hashes=[],
+        )
+        assurance = settlement_assurance_from_result(result, provider_reported_success=True)
+        return {
+            "note": (
+                "A provider success status is a REPORTED claim, never independent settlement "
+                "proof. This synthetic case has the provider report success with no decisive "
+                "on-chain evidence, so the assurance level is not VERIFIED."
+            ),
+            "provider_reported_success": True,
+            "assurance": assurance.to_dict(),
+        }
+
     # -- POST ---------------------------------------------------------------
 
     def _post(
@@ -179,6 +282,10 @@ class GuardAPI:
             if not self._identity_matches(body, authenticated_service_id):
                 return ApiResponse(403, {"error": "service identity does not match the credential"})
             return self._sign(body, authenticated_service_id)
+        if path == "/api/guard/near/agent-evaluate":
+            if not self._identity_matches(body, authenticated_service_id):
+                return ApiResponse(403, {"error": "service identity does not match the credential"})
+            return self._near_agent_evaluate(body)
         if path.startswith("/api/guard/incidents/") and path.endswith("/status"):
             incident_id = path[len("/api/guard/incidents/") : -len("/status")].strip("/")
             return self._incident_status(incident_id, body)
@@ -231,6 +338,64 @@ class GuardAPI:
             )
         )
         return ApiResponse(200, result.to_dict())
+
+    def _near_agent_evaluate(self, body: Any) -> ApiResponse:
+        """Evaluate an agent transaction through the NEAR wrapper.
+
+        The wrapper inspects the real transaction parameters, the NEAR Intents
+        policy scope, and the access-key scope. It returns one of ALLOW,
+        REQUIRE_APPROVAL, BLOCK, HOLD or UNKNOWN. The transaction is never
+        signed or broadcast here.
+        """
+        if not isinstance(body, dict):
+            return _bad_request("request body must be a JSON object")
+        transaction = body.get("transaction")
+        if not isinstance(transaction, dict):
+            return _bad_request("field 'transaction' must be a JSON object")
+        try:
+            decision = self.service.evaluate_agent_transaction(
+                transaction,
+                policy_read=self._near_policy_read(body),
+                access_key=self._near_access_key(body),
+            )
+        except RequestValidationError as exc:
+            return _bad_request(str(exc))
+        return ApiResponse(
+            200,
+            decision.to_dict(include_authorization=bool(body.get("return_authorization", False))),
+        )
+
+    def _near_policy_read(self, body: Any) -> Any:
+        """Resolve the policy read: explicit fixture, configured provider, or none."""
+        from .. import config
+        from ..near.policy import PolicyAdapter, load_fixture
+
+        fixture = body.get("policy_fixture")
+        if isinstance(fixture, str) and fixture.strip():
+            return load_fixture(fixture.strip())
+        if config.NEAR_POLICY_FIXTURE:
+            return load_fixture(config.NEAR_POLICY_FIXTURE)
+        if config.NEAR_AGENT_API_URL:
+            adapter = PolicyAdapter(
+                base_url=config.NEAR_AGENT_API_URL,
+                api_key=config.NEAR_AGENT_API_KEY,
+                http_client=self.service.http_client,
+            )
+            agent_id = body.get("agent_id") or config.NEAR_AGENT_ID
+            return adapter.read_policy(str(agent_id))
+        return None
+
+    @staticmethod
+    def _near_access_key(body: Any) -> Any:
+        from ..near.access_keys import parse_access_key
+
+        raw = body.get("access_key")
+        if raw is None:
+            return None
+        try:
+            return parse_access_key(raw)
+        except ValueError as exc:
+            raise RequestValidationError(f"field 'access_key': {exc}") from exc
 
     def _incident_status(self, incident_id: str, body: Any) -> ApiResponse:
         if not incident_id:

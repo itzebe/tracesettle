@@ -169,6 +169,7 @@ CONSOLE_HTML = """<!DOCTYPE html>
     <li role="presentation"><button role="tab" id="tab-overview" aria-controls="panel-overview" aria-selected="true">Security Overview</button></li>
     <li role="presentation"><button role="tab" id="tab-guard" aria-controls="panel-guard" aria-selected="false">Transaction Guard</button></li>
     <li role="presentation"><button role="tab" id="tab-lab" aria-controls="panel-lab" aria-selected="false">Attack Simulations</button></li>
+    <li role="presentation"><button role="tab" id="tab-near" aria-controls="panel-near" aria-selected="false">NEAR Agent Security</button></li>
     <li role="presentation"><button role="tab" id="tab-investigations" aria-controls="panel-investigations" aria-selected="false">Investigations</button></li>
     <li role="presentation"><button role="tab" id="tab-incidents" aria-controls="panel-incidents" aria-selected="false">Security Incidents</button></li>
     <li role="presentation"><button role="tab" id="tab-policies" aria-controls="panel-policies" aria-selected="false">Policies &amp; Controls</button></li>
@@ -245,6 +246,52 @@ CONSOLE_HTML = """<!DOCTYPE html>
       simulated result never describes a real blockchain transaction.</p>
     <div id="lab-scenarios"></div>
     <div id="lab-output" aria-live="polite"></div>
+  </section>
+
+  <section role="tabpanel" id="panel-near" aria-labelledby="tab-near">
+    <h1>NEAR Agent Security</h1>
+    <p class="lede">The pre-execution boundary for an AI agent or payment service that acts on NEAR.
+      Before the agent may sign, the wrapper inspects the real transaction parameters, the NEAR
+      Intents policy scope, and the access-key scope. It returns one of ALLOW, REQUIRE_APPROVAL,
+      BLOCK, HOLD or UNKNOWN. Nothing here signs or broadcasts a transaction.</p>
+
+    <div class="panel">
+      <h2>Policy scope</h2>
+      <p class="small">An Intents policy protects the INTENTS path. A native NEAR/EVM/Solana
+        request is <strong>not</strong> protected by its destinations, budget, timelock, schedule or
+        owner approval; only the native method switch and an independent TraceSettle decision
+        govern. This is the gap the panel makes visible.</p>
+      <div id="near-scope"></div>
+    </div>
+
+    <div class="panel">
+      <h2>Access-key permissions</h2>
+      <p class="small">A function-call key cannot transfer NEAR and cannot attach NEAR tokens to a
+        call. A full-access key is total control of the account. No private key material is present
+        or requested.</p>
+      <div id="near-keys"></div>
+    </div>
+
+    <div class="panel">
+      <h2>Attack simulations</h2>
+      <p class="small">Nine deterministic scenarios against the real controls. Each is a controlled
+        simulation; the executor is simulated and nothing is broadcast.</p>
+      <div class="actions" style="margin-bottom:12px">
+        <button class="act primary" type="button" id="near-run">Run all scenarios</button>
+      </div>
+      <div id="near-attacks"></div>
+    </div>
+
+    <div class="panel">
+      <h2>Evaluate one agent transaction</h2>
+      <p class="small">Inspects the real parameters, not the agent's explanation. The destination
+        below is unapproved, so the default result is BLOCK.</p>
+      <div class="actions" style="margin-bottom:12px">
+        <button class="act" type="button" id="near-eval-legit">Evaluate an approved payment</button>
+        <button class="act" type="button" id="near-eval-attack">Evaluate an unapproved destination</button>
+      </div>
+      <div id="near-eval-output"></div>
+    </div>
   </section>
 
   <section role="tabpanel" id="panel-investigations" aria-labelledby="tab-investigations">
@@ -373,6 +420,7 @@ function showTab(name) {
   const loaders = {
     overview: loadOverview, guard: () => {}, lab: loadLab, investigations: () => {},
     incidents: () => loadIncidents("OPEN"), policies: loadPolicies, integrations: loadIntegrations,
+    near: loadNear,
     audit: loadAudit, settings: loadSettings,
   };
   if (loaders[name]) { loaders[name](); }
@@ -537,6 +585,95 @@ async function submitGuard(ev) {
 }
 
 /* ---- lab ---- */
+/* ---- NEAR agent security ---- */
+async function loadNear() {
+  const scopeEl = document.getElementById("near-scope");
+  const keysEl = document.getElementById("near-keys");
+  const attacksEl = document.getElementById("near-attacks");
+  scopeEl.innerHTML = loading("Loading policy scope…");
+  keysEl.innerHTML = loading("Loading access-key analysis…");
+  attacksEl.innerHTML = "";
+  try {
+    const scope = await api("GET", "/api/guard/near/policy-scope");
+    const rows = Object.keys(scope.scope).map((name) => {
+      const s = scope.scope[name];
+      const applicable = (s.applicable_controls || []).map(esc).join(", ") || "none";
+      const gap = (s.non_applicable_controls || []).map(esc).join(", ") || "none";
+      return '<tr><td>' + esc(name) + "</td><td class=\"small\">" + applicable +
+        '</td><td class="small">' + gap + "</td></tr>";
+    }).join("");
+    scopeEl.innerHTML = '<div class="note sim">' + esc(scope.note) + "</div>" +
+      '<table class="table"><thead><tr><th>Path</th><th>Controls that apply</th>' +
+      "<th>Controls that do NOT apply</th></tr></thead><tbody>" + rows + "</tbody></table>";
+  } catch (err) { scopeEl.innerHTML = '<div class="note bad">' + esc(err.message) + "</div>"; }
+
+  try {
+    const keys = await api("GET", "/api/guard/near/access-keys");
+    const list = keys.keys || {};
+    keysEl.innerHTML = '<div class="note sim">' + esc(keys.note) + "</div>" +
+      Object.keys(list).map((name) => {
+        const k = list[name];
+        return '<div class="card"><h3>' + esc(name) + "</h3>" +
+          '<div class="kv small"><dt>Permission</dt><dd>' + esc(k.permission) + "</dd>" +
+          "<dt>Risk</dt><dd>" + sev(k.risk) + "</dd>" +
+          "<dt>Can transfer NEAR</dt><dd>" + esc(k.can_transfer_near) + "</dd>" +
+          "<dt>Can add keys</dt><dd>" + esc(k.can_add_keys) + "</dd>" +
+          "<dt>Receiver</dt><dd>" + esc(k.receiver_id || "—") + "</dd>" +
+          "<dt>Methods</dt><dd>" + esc((k.method_names || []).join(", ") || "all methods") +
+          "</dd></div></div>";
+      }).join("");
+  } catch (err) { keysEl.innerHTML = '<div class="note bad">' + esc(err.message) + "</div>"; }
+
+  const runBtn = document.getElementById("near-run");
+  runBtn.onclick = runNearAttacks;
+  document.getElementById("near-eval-legit").onclick = () => evalNear(true);
+  document.getElementById("near-eval-attack").onclick = () => evalNear(false);
+}
+
+async function runNearAttacks() {
+  const el = document.getElementById("near-attacks");
+  el.innerHTML = loading("Running nine scenarios…");
+  try {
+    const data = await api("GET", "/api/guard/near/scenarios");
+    el.innerHTML = '<div class="note sim">' + esc(data.note) + "</div>" +
+      data.results.map((r) => {
+        const cls = r.passed ? "s-ALLOW" : "s-BLOCK";
+        return '<div class="card"><h3>' + esc(r.scenario_id) + ". " + esc(r.title) + "</h3>" +
+          '<div class="kv small"><dt>Expected</dt><dd class="small">' + esc(r.expected) + "</dd>" +
+          "<dt>Observed</dt><dd>" + status(r.observed) + "</dd>" +
+          "<dt>Detail</dt><dd class=\"small\">" + esc(r.detail) + "</dd></div>" +
+          '<div class="small ' + cls + '">' + (r.passed ? "PASS" : "FAIL") + "</div></div>";
+      }).join("") +
+      '<div class="note ' + (data.all_passed ? "ok" : "bad") + '">' +
+      esc((data.all_passed ? "All scenarios matched expectation" : "A scenario did not match")) +
+      "</div>";
+  } catch (err) { el.innerHTML = '<div class="note bad">' + esc(err.message) + "</div>"; }
+}
+
+async function evalNear(approved) {
+  const out = document.getElementById("near-eval-output");
+  out.innerHTML = loading("Evaluating…");
+  const transaction = {
+    service_id: "treasury-agent",
+    operation: "WITHDRAWAL",
+    chain: "base",
+    asset: "USDC",
+    amount: "1250.50",
+    destination: approved ? "0x4e6d3a556e485188e9c9a528bc72c88bd92bd735"
+      : "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+    scope: "INTENTS",
+    policy_action: "withdraw",
+  };
+  try {
+    const d = await api("POST", "/api/guard/near/agent-evaluate", { transaction: transaction });
+    out.innerHTML = '<div class="card"><div class="kv"><dt>Outcome</dt><dd>' + status(d.outcome) +
+      "</dd><dt>Permits signing</dt><dd>" + esc(d.permits_signing) +
+      '</dd><dt>Summary</dt><dd class="small">' + esc(d.summary) + "</dd></div>" +
+      '<div class="small">Findings: ' +
+      esc((d.findings || []).map((f) => f.code).join(", ")) + "</div></div>";
+  } catch (err) { out.innerHTML = '<div class="note bad">' + esc(err.message) + "</div>"; }
+}
+
 async function loadLab() {
   const el = document.getElementById("lab-scenarios");
   el.innerHTML = loading("Loading scenarios…");

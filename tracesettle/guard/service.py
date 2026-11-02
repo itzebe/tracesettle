@@ -210,6 +210,7 @@ class GuardService:
         audit: AuditLog | None = None,
         signer: ReferenceSigner | None = None,
         state_store: GuardStateStore | None = None,
+        http_client: Any = None,
     ) -> None:
         self.policy = policy or DEFAULT_POLICY
         self.audit = audit or AuditLog()
@@ -224,6 +225,10 @@ class GuardService:
         )
         self._volume = _WindowVolume()
         self._signer = signer or ReferenceSigner(self.authority, on_outcome=self._on_sign_outcome)
+        #: Optional HTTP client used only by the NEAR policy adapter to read
+        #: provider policy state. None disables live reads; a local fixture is
+        #: then used. The guard itself never performs network I/O.
+        self.http_client = http_client
 
     # -- evaluation ---------------------------------------------------------
 
@@ -418,6 +423,70 @@ class GuardService:
             },
         )
         return result
+
+    def evaluate_agent_transaction(
+        self,
+        payload: dict[str, Any],
+        *,
+        policy_read: Any = None,
+        access_key: Any = None,
+    ) -> Any:
+        """Evaluate an agent transaction through the NEAR authorization wrapper.
+
+        This is the pre-execution boundary an AI agent must pass before it may
+        sign. The wrapper inspects the *actual* transaction parameters (never the
+        agent's explanation), the NEAR Intents policy scope, and the access-key
+        scope, and returns one of ALLOW, REQUIRE_APPROVAL, BLOCK, HOLD or
+        UNKNOWN. Nothing is signed or broadcast here.
+
+        Imported lazily so the NEAR integration never becomes a hard dependency
+        of the core guard, and so a deployment that does not use it pays nothing.
+        """
+        from ..near.agent_wrapper import AgentAuthorizationWrapper, AgentTransaction
+        from ..near.policy import PolicyScope
+
+        scope_raw = str(payload.get("scope", "INTENTS")).strip().upper()
+        try:
+            scope = PolicyScope(scope_raw)
+        except ValueError as exc:
+            raise RequestValidationError(
+                "field 'scope' must be one of INTENTS, NATIVE_NEAR, NATIVE_EVM, NATIVE_SOLANA"
+            ) from exc
+
+        asserted = tuple(
+            str(k)
+            for k, v in payload.items()
+            if str(k).strip().lower() in ASSERTED_APPROVAL_FIELDS and v not in (None, False, 0, "", [], {})
+        )
+        transaction = AgentTransaction(
+            service_id=str(payload.get("service_id", "")),
+            operation=str(payload.get("operation", "")),
+            chain=str(payload.get("chain", "")),
+            asset=str(payload.get("asset", "")),
+            amount=str(payload.get("amount", "")),
+            destination=str(payload.get("destination", "")),
+            scope=scope,
+            policy_action=(str(payload["policy_action"]) if payload.get("policy_action") else None),
+            request_id=(str(payload["request_id"]) if payload.get("request_id") else None),
+            idempotency_key=(
+                str(payload["idempotency_key"]) if payload.get("idempotency_key") else None
+            ),
+            client_reference=(
+                str(payload["client_reference"]) if payload.get("client_reference") else None
+            ),
+            receiver_id=(str(payload["receiver_id"]) if payload.get("receiver_id") else None),
+            method_name=(str(payload["method_name"]) if payload.get("method_name") else None),
+            transfers_near=bool(payload.get("transfers_near", False)),
+            simulated=bool(payload.get("simulated", True)),
+            asserted_approval_fields=asserted,
+            metadata=(
+                payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+            ),
+        )
+        wrapper = AgentAuthorizationWrapper(
+            self, policy_read=policy_read, access_key=access_key
+        )
+        return wrapper.evaluate(transaction)
 
     def evaluate_payload(self, payload: dict[str, Any], *, simulated: bool = False) -> GuardDecision:
         return self.evaluate(request_from_payload(payload, simulated=simulated))

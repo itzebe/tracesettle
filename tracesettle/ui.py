@@ -51,7 +51,9 @@ _AUTH_REFUSED = object()
 
 #: The guard POST routes that carry a service identity and therefore require
 #: per-service authentication when a credential registry is configured.
-_SERVICE_OPERATION_PATHS = frozenset({"/api/guard/evaluate", "/api/guard/sign"})
+_SERVICE_OPERATION_PATHS = frozenset(
+    {"/api/guard/evaluate", "/api/guard/sign", "/api/guard/near/agent-evaluate"}
+)
 
 #: Distinguishes "no registry argument was supplied" (load from configuration)
 #: from an explicit ``None`` (service authentication deliberately disabled).

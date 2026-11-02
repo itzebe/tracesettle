@@ -122,6 +122,7 @@ def test_console_declares_every_required_section():
     for section in (
         "Security Overview",
         "Transaction Guard",
+        "NEAR Agent Security",
         "Investigations",
         "Security Incidents",
         "Policies &amp; Controls",
@@ -157,6 +158,10 @@ def test_console_requests_only_same_origin_endpoints():
     assert "/api/guard/incidents" in html
     assert "/api/guard/audit" in html
     assert "/api/guard/policy" in html
+    assert "/api/guard/near/scenarios" in html
+    assert "/api/guard/near/access-keys" in html
+    assert "/api/guard/near/policy-scope" in html
+    assert "/api/guard/near/agent-evaluate" in html
     assert "api/investigate?format=full" in html
     # No third-party origins: everything is same-origin.
     assert "https://cdn" not in html
@@ -330,3 +335,83 @@ def test_unknown_guard_route_is_404():
     with running_server() as base:
         assert _request("GET", base + "/api/guard/does-not-exist")[0] == 404
         assert _request("POST", base + "/api/guard/does-not-exist", {})[0] == 404
+
+
+def test_console_near_tab_states_the_scope_gap_and_the_simulation_label():
+    with running_server() as base:
+        _, body, _ = _request("GET", base + "/console")
+    html = _html(body)
+    assert "NEAR Agent Security" in html
+    assert "Policy scope" in html
+    assert "Access-key permissions" in html
+    assert "cannot transfer NEAR" in html
+    # The panel never claims a real transaction.
+    assert "nothing is broadcast" in html
+
+
+def test_near_agent_evaluate_over_http_allows_and_blocks():
+    with running_server() as base:
+        status, body, _ = _request(
+            "POST",
+            base + "/api/guard/near/agent-evaluate",
+            {
+                "transaction": {
+                    "service_id": "treasury-agent",
+                    "operation": "WITHDRAWAL",
+                    "chain": "eth",
+                    "asset": "USDC",
+                    "amount": "100",
+                    "destination": APPROVED_DESTINATION,
+                    "scope": "INTENTS",
+                    "policy_action": "withdraw",
+                }
+            },
+        )
+    assert status == 200
+    assert body["outcome"] == "ALLOW"
+
+    with running_server() as base:
+        status, body, _ = _request(
+            "POST",
+            base + "/api/guard/near/agent-evaluate",
+            {
+                "transaction": {
+                    "service_id": "treasury-agent",
+                    "operation": "WITHDRAWAL",
+                    "chain": "eth",
+                    "asset": "USDC",
+                    "amount": "100",
+                    "destination": UNAPPROVED_DESTINATION,
+                    "scope": "INTENTS",
+                    "policy_action": "withdraw",
+                }
+            },
+        )
+    assert status == 200
+    assert body["outcome"] == "BLOCK"
+    assert body["permits_signing"] is False
+
+
+def test_near_scenarios_endpoint_over_http():
+    with running_server() as base:
+        status, body, _ = _request("GET", base + "/api/guard/near/scenarios")
+    assert status == 200
+    assert body["all_passed"] is True
+    assert len(body["results"]) == 9
+
+
+def test_console_near_demo_destinations_match_the_real_default_policy():
+    """The console's one-click demo must use a destination the real policy approves.
+
+    A hardcoded demo address that the policy does not approve would make the
+    "approved payment" button return BLOCK, which is a false demonstration.
+    """
+    from tracesettle.guard.policy import DEFAULT_POLICY
+    from tracesettle.guard.console import CONSOLE_HTML
+
+    approved = {d.lower() for d in DEFAULT_POLICY.approved_destinations}
+    # The legitimate demo address is the one on the ternary's true branch.
+    assert "0x4e6d3a556e485188e9c9a528bc72c88bd92bd735" in CONSOLE_HTML
+    assert "0x4e6d3a556e485188e9c9a528bc72c88bd92bd735" in approved
+    # The attack demo address must not be approved by the policy.
+    assert "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef" not in approved

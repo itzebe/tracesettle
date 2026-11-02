@@ -1,0 +1,46 @@
+{
+  "_provenance": "synthetic",
+  "_note": "Reproduces the documented NEAR access-key permission shapes. No private key material is present or implied.",
+  "keys": {
+    "full_access": {
+      "permission": "FullAccess",
+      "is_gas_key": false
+    },
+    "function_call_scoped": {
+      "permission": {
+        "FunctionCall": {
+          "receiver_id": "wrap.near",
+          "method_names": [
+            "ft_transfer",
+            "ft_transfer_call"
+          ],
+          "allowance": "250000000000000000000000"
+        }
+      },
+      "is_gas_key": false
+    },
+    "function_call_unrestricted_methods": {
+      "permission": {
+        "FunctionCall": {
+          "receiver_id": "wrap.near",
+          "method_names": [],
+          "allowance": null
+        }
+      },
+      "is_gas_key": false
+    },
+    "gas_key_scoped": {
+      "permission": {
+        "FunctionCall": {
+          "receiver_id": "intents.near",
+          "method_names": [
+            "execute_intents"
+          ],
+          "allowance": null
+        }
+      },
+      "is_gas_key": true,
+      "num_nonces": 1024
+    }
+  }
+}
