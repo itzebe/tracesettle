@@ -865,3 +865,56 @@ default (SQLite/in-memory) path and the settlement engine are unchanged.
     Counts: **739 pass with PG / 716 pass + 23 skip without**; pyflakes clean;
     compileall OK; 16/16 invariants hold; offline demo byte-identical; Docker
     non-root (uid 10001) healthy, guard evaluate→sign→replay verified live.
+
+## NEAR agent protection integration (2026-11-02, `feat/near-security-integration`)
+
+A NEAR integration was added to the transaction security layer, ahead of the
+submission deadline. It sits **in front of** a signer; it adds no trading,
+swapping, bridging, custody, real signing, or fund recovery. The settlement
+engine and its correlation rules are untouched.
+
+- **New package `tracesettle/near/`** (stdlib only): `policy.py` (Intents agent
+  policy read + scope analysis), `access_keys.py` (permission analysis),
+  `agent_wrapper.py` (the agent-side boundary), `attacks.py` (nine scenarios),
+  `settlement.py` (assurance view over the engine), `tee.py` (research only).
+- **The wrapper returns one of five outcomes** — `ALLOW`, `REQUIRE_APPROVAL`
+  (the mission's "WARN"), `BLOCK`, `HOLD`, `UNKNOWN` — from three independent
+  checks, strictest-wins by an explicit severity `rank`. `UNKNOWN` is the
+  strictest: "we could not prove it is safe" must never be weaker than a refusal.
+  The wrapper reads the **actual parameters**, never the agent's explanation.
+- **A policy is in force only when** `status == "APPLIED"` **and**
+  `provider_policy_synced == true`. A requested or signed update is never
+  active. `IntentsPolicy.in_force` encodes this.
+- **The scope gap is stated, not hidden.** An Intents policy's `destinations`,
+  `budget_usd`, `timelock_ms`, `schedule`, `owner_approval` protect the INTENTS
+  path only. A native NEAR/EVM/Solana request is **not** protected by them; only
+  the `native.*` method switch and an independent TraceSettle decision govern.
+  `controls_applicable_to` / `controls_not_applicable_to` return the real sets.
+- **Access-key facts the code states:** a function-call key cannot transfer NEAR
+  and cannot attach NEAR to a call; an omitted `method_names` means **every**
+  method; an omitted `allowance` means **unlimited** gas; an unrecognised
+  permission is treated as **unrestricted**, never as safe. No private key is
+  ever requested, derived, or stored.
+- **No endpoint is invented.** With no `TRACESETTLE_NEAR_AGENT_API_URL` the
+  adapter reports `UNCONFIGURED`. Fixtures are labelled `local_fixture=True`.
+- **Every refusal is provable:** the executor is never called unless the outcome
+  was `ALLOW`. Nine scenarios (A–I) assert this.
+- **Four new invariants (now 20 total)**, each mutation-tested:
+  `near_policy_must_be_in_force`, `near_native_scope_gap_is_always_stated`,
+  `near_function_call_key_cannot_transfer_near`,
+  `near_provider_success_is_never_verified_without_evidence`.
+- **`/api/guard/near/agent-evaluate` is a service-facing route** and is bound to
+  the authenticated service identity in `ui.py` (`_SERVICE_OPERATION_PATHS`).
+  Found in review: without this a caller could declare another service's id.
+- **TEE is researched, not integrated.** OutLayer is paid and non-refundable, so
+  it is out of the zero-budget scope; NEAR AI Cloud attestations are not verified
+  by this tool. `assess_verifiable_execution` claims protection **only** with a
+  verified attestation. See `docs/TEE_RESEARCH.md`.
+- **Tests:** 716 → **851 passed** (24 skipped; 875 with a server). New files
+  `tests/test_near_{policy,access_keys,agent_wrapper,attacks,api,invariants}.py`
+  plus NEAR cases in `tests/test_guard_ui.py` and `tests/test_serviceauth_http.py`.
+  No NEAR test makes a network call.
+- **CI** gained a NEAR attack-demonstration determinism step (run twice,
+  byte-identical, every scenario must match expectation).
+- **Not done, and requiring explicit human confirmation:** making the repository
+  public, pushing, posting on X, and sending the submission.
