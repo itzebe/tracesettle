@@ -37,6 +37,9 @@ node_modules/
 dist/
 build/
 
+# Vercel CLI local state (project link; may hold org/project ids)
+.vercel/
+
 # OS / editor
 .DS_Store
 .idea/

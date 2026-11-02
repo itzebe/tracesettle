@@ -420,17 +420,58 @@ def test_concurrency_cap_rejects_excess_with_503():
             holder.close()
 
 
+def _retry_while_503(call, deadline: float = 2.0):
+    """Call ``call`` and retry it while it is refused with a transient 503.
+
+    The concurrency slot is released in ``process_request_thread``'s ``finally``,
+    i.e. *after* the response for the preceding request is written. A client can
+    therefore observe the next request refused with 503 for a few milliseconds
+    after it received the previous response, even though that request returned
+    its slot correctly. The window is scheduling-dependent and wider under load
+    (as in the full suite). Retrying within a short deadline distinguishes a
+    *not-yet-released* slot (the retry succeeds) from a *leaked* slot (every
+    retry keeps returning 503), so a genuine leak still fails the test instead of
+    flaking on the release timing.
+    """
+    limit = time.monotonic() + deadline
+    while True:
+        result = call()
+        if result[0] != 503 or time.monotonic() >= limit:
+            return result
+        time.sleep(0.02)
+
+
 def test_semaphore_slot_is_released_after_success_and_error():
     """A slot is returned on every path, so the server keeps serving."""
     with running_server(max_concurrency=1) as base:
         # A successful request.
-        status, _, _ = _get(base + "/api/health")
+        status, _, _ = _retry_while_503(lambda: _get(base + "/api/health"))
         assert status == 200
         # A malformed request (handler returns early, before the body is read).
-        status, _ = _post(base + "/api/investigate", None, raw=b"{not json")
+        status, _ = _retry_while_503(
+            lambda: _post(base + "/api/investigate", None, raw=b"{not json")
+        )
         assert status == 400
         # The slot must be free again: another request still succeeds.
+        status, _, _ = _retry_while_503(lambda: _get(base + "/api/health"))
+        assert status == 200
+
+
+def test_transient_503_is_a_release_timing_race_not_a_leak():
+    """The slot returns *after* the response, so the next request can briefly 503.
+
+    This documents the race directly: the concurrency slot is released in
+    ``process_request_thread``'s ``finally``, after the response body is written,
+    so a client that issues the next request immediately can be refused with 503
+    before the previous worker has released its slot. The refusal is transient --
+    a bounded retry succeeds -- which is what distinguishes it from a leaked slot
+    (see ``test_handler_exception_releases_slot`` and the cap/503 test above).
+    """
+    with running_server(max_concurrency=1) as base:
         status, _, _ = _get(base + "/api/health")
+        assert status == 200
+        # Issue the next request immediately; it must eventually be served.
+        status, _, _ = _retry_while_503(lambda: _get(base + "/api/health"), deadline=2.0)
         assert status == 200
 
 

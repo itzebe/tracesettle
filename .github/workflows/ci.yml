@@ -255,3 +255,92 @@ jobs:
       - name: Clean up
         if: always()
         run: docker rm -f tracesettle-ci || true
+
+  vercel-container:
+    name: Vercel container image
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: vercel.json is valid and pins Dockerfile.vercel
+        run: |
+          set -eu
+          python - <<'PY'
+          import json
+
+          with open("vercel.json") as fh:
+              config = json.load(fh)
+          service = config["services"]["tracesettle"]
+          # The whole point of the file: the image is built from Dockerfile.vercel,
+          # never the generic root Dockerfile (which lacks the PostgreSQL driver).
+          assert service["root"] == "."
+          assert service["runtime"] == "container"
+          assert service["entrypoint"] == "Dockerfile.vercel"
+          assert config["rewrites"] == [
+              {"source": "/(.*)", "destination": {"service": "tracesettle"}}
+          ]
+          print("vercel.json pins Dockerfile.vercel and routes all traffic to it")
+          PY
+
+      - name: Build the Vercel image
+        run: docker build -f Dockerfile.vercel -t tracesettle:vercel .
+
+      - name: Image carries the driver, runs non-root, exposes port 80
+        run: |
+          set -eu
+          # The Vercel build passes no Docker build arguments, so the PostgreSQL
+          # driver must be baked in. Assert it, plus the non-root user and port.
+          user=$(docker inspect --format '{{.Config.User}}' tracesettle:vercel)
+          ports=$(docker inspect --format '{{json .Config.ExposedPorts}}' tracesettle:vercel)
+          driver=$(docker run --rm --entrypoint python tracesettle:vercel -c \
+            "import psycopg; print(psycopg.__version__)")
+          echo "user=$user ports=$ports psycopg=$driver"
+          test "$user" = "tracesettle"
+          echo "$ports" | grep -q '"80/tcp"'
+          test -n "$driver"
+
+      - name: Container serves on port 80 and answers the health check
+        run: |
+          set -eu
+          # Throwaway CI credentials, never real secrets. The image binds
+          # 0.0.0.0, so fail-closed startup requires both.
+          GUARD_KEY=$(python -c "import secrets;print(secrets.token_hex(32))")
+          docker run -d --name tracesettle-vercel -p 8000:80 \
+            -e TRACESETTLE_API_KEY=ci-throwaway-key \
+            -e TRACESETTLE_GUARD_AUTH_KEY="$GUARD_KEY" \
+            tracesettle:vercel
+          for i in $(seq 1 30); do
+            state=$(docker inspect --format '{{.State.Health.Status}}' tracesettle-vercel || echo unknown)
+            if [ "$state" = "healthy" ]; then break; fi
+            sleep 1
+          done
+          state=$(docker inspect --format '{{.State.Health.Status}}' tracesettle-vercel)
+          echo "health=$state"
+          docker logs tracesettle-vercel
+          # The default bind is port 80, the port Vercel routes to.
+          docker logs tracesettle-vercel 2>&1 | grep -q "serving on http://0.0.0.0:80"
+          test "$state" = "healthy"
+          # The published port answers.
+          code=$(docker exec tracesettle-vercel python -c \
+            "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:80/api/health', timeout=5).status)")
+          test "$code" = "200"
+
+      - name: Unauthenticated guard call is rejected
+        run: |
+          set -eu
+          code=$(docker exec tracesettle-vercel python -c "
+          import urllib.error, urllib.request
+          try:
+              urllib.request.urlopen('http://127.0.0.1:80/api/investigate', data=b'{}', timeout=5)
+              print(200)
+          except urllib.error.HTTPError as exc:
+              print(exc.code)
+          ")
+          echo "unauthenticated /api/investigate -> $code"
+          test "$code" = "401"
+
+      - name: Clean up
+        if: always()
+        run: docker rm -f tracesettle-vercel || true

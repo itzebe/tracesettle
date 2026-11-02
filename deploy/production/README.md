@@ -23,12 +23,17 @@ external account has been created.
 | `COST_ESTIMATE.md` | Zero-budget architecture, free-provider evidence, capability matrix. |
 | `NEAR_ARCHIVAL_RPC.md` | Live provider probe results; the free archival gap. |
 | `AUDIT_ANCHORING.md` | Design/proposal for external anchoring — **not implemented**. |
+| `VERCEL_DEPLOYMENT.md` | Vercel Hobby deployment via the Container Runtime (`Dockerfile.vercel` + `vercel.json`). |
 | `PRODUCTION_ACCEPTANCE_CHECKLIST.md` | Verified checklist of what is done and what remains. |
 
 There is deliberately **no separate production Dockerfile**: the existing
 `Dockerfile` already meets the requirements (non-root, healthcheck, graceful
 shutdown, optional PostgreSQL driver via build arg, no secrets). Use it with
 `--build-arg TRACESETTLE_WITH_POSTGRES=1`.
+
+For **Vercel** only, a separate `Dockerfile.vercel` exists at the repository
+root, because Vercel's container build passes no Docker build arguments and
+routes to port 80. See `VERCEL_DEPLOYMENT.md`.
 
 ## Mandatory configuration (summary)
 

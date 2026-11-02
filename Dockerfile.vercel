@@ -1,0 +1,68 @@
+# TRACESETTLE — Vercel Container Runtime image.
+#
+# Vercel builds this file, stores the image in Vercel Container Registry, and runs
+# it as an autoscaling Vercel Function (Container Runtime, beta). A
+# `Dockerfile.vercel` selects the Container preset, so no `vercel.json` is
+# required — see deploy/production/VERCEL_DEPLOYMENT.md for the reasoning.
+#
+# It mirrors the production `Dockerfile` (non-root, no secrets, env-driven bind)
+# with two Vercel-specific differences:
+#
+#   1. The PostgreSQL driver is installed unconditionally. Vercel's container
+#      build does not pass Docker build arguments, so the production image's
+#      opt-in `--build-arg TRACESETTLE_WITH_POSTGRES=1` cannot be supplied here.
+#      The driver is required for shared guard state on Vercel, so it is always
+#      present. The runtime stays standard-library-only; psycopg is the single
+#      optional extra and is imported lazily (see tracesettle/guard/state_pg.py).
+#
+#   2. It defaults to port 80, the port Vercel routes container traffic to.
+#      `PORT` is still read first, so setting the project `PORT` environment
+#      variable overrides it. Both TRACESETTLE_PORT and PORT are honoured by
+#      tracesettle/config.py; PORT takes precedence there.
+#
+# The production `Dockerfile` is intentionally left unchanged: this is an
+# additive, Vercel-specific variant, not a replacement.
+
+FROM python:3.13-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    TRACESETTLE_HOST=0.0.0.0 \
+    PORT=80
+
+WORKDIR /app
+
+# Only the package and the metadata a reader needs are copied in. `.dockerignore`
+# keeps tests, docs, and evidence out of the build context.
+COPY tracesettle/ ./tracesettle/
+COPY README.md ./
+
+# Create an unprivileged user and drop to it. With durable guard state in
+# PostgreSQL the tool writes nothing to the filesystem; the audit log is left
+# unset on Vercel because a Function filesystem is ephemeral (see the guide).
+RUN useradd --create-home --uid 10001 tracesettle \
+    && chown -R tracesettle:tracesettle /app
+
+# Shared guard state requires the PostgreSQL driver. Installed unconditionally
+# because Vercel's container build passes no build arguments. Pinned to match
+# requirements-dev.txt.
+RUN pip install --no-cache-dir "psycopg[binary]==3.3.6"
+
+USER tracesettle
+
+# Port 80 is unprivileged for a non-root user in the Linux container runtime, so
+# binding it as uid 10001 works without extra capabilities.
+EXPOSE 80
+
+# The container runs as PID 1 under Vercel, which sends SIGTERM on scale-down
+# with a 30 second grace period. tracesettle.ui installs a SIGTERM handler that
+# stops the server cleanly, so the process exits well within that window instead
+# of waiting to be killed. The image's own HEALTHCHECK is not used by Vercel's
+# container runtime (health is measured by routing traffic to the port), but it
+# is kept so the same image stays verifiable with plain `docker run`.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+    CMD python -c "import os,urllib.request; \
+port=os.environ.get('PORT','80'); \
+urllib.request.urlopen(f'http://127.0.0.1:{port}/api/health', timeout=4).read()" || exit 1
+
+CMD ["python", "-m", "tracesettle", "serve"]
