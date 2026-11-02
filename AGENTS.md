@@ -682,3 +682,88 @@ functionality. Runtime stays standard-library only; no verification was weakened
 - **Docker verified live:** image builds; no credentials → exit `2` with
   `refusing to start`; with both credentials → non-root uid `10001`, health
   `healthy`, `Server: TRACESETTLE`, graceful `SIGTERM` exit `0`.
+
+## Durable authorization state (2026-11-01, HEAD `b3432de` + this change)
+
+The guard's security-critical state — spent nonces, revoked authorizations, and
+the velocity / volume / rejection counters — was process-local. A restart forgot a
+spent nonce (a replay became valid again) and cleared every limit. This change
+gives that state a home on disk, without a new runtime dependency.
+
+- **New module `tracesettle/guard/state.py`.** `GuardStateStore` is a stdlib
+  `sqlite3` store (`journal_mode=WAL`, `synchronous=FULL`, `busy_timeout`,
+  `foreign_keys=ON`). Tables: `consumed_nonces` (nonce `PRIMARY KEY` = atomic
+  single-use), `revoked_authorizations`, `counter_events` (DECISION /
+  AUTHORIZATION_ISSUED / SIGNER), `idempotency`. Money is an exact decimal
+  **string**, never a float. Numbered migrations run in a transaction; a database
+  from a newer schema is refused rather than misread. `DurableReplayStore` and
+  `DurableRevocationStore` structurally match the in-memory stores, so
+  `AuthorizationAuthority` accepts them unchanged.
+- **One decision = one transaction.** `GuardService.evaluate` runs the counter
+  read, the controls, the idempotency claim, and the counter append inside
+  `GuardStateStore.decision_cycle()` (`BEGIN IMMEDIATE`). Without it two
+  concurrent evaluations both read an empty window and both authorize past the
+  limit — a real breach. `test_without_the_atomic_cycle_the_limit_is_exceeded`
+  neutralises the cycle and shows the breach, so the concurrency test is not
+  vacuous. Process-local monitor/audit writes happen only after commit.
+- **Fail closed, always.** A store error becomes `HOLD` (never `ALLOW`) with a
+  `STATE_STORE_UNAVAILABLE` finding; `AuthorizationAuthority.validate` turns a
+  consume error into `AuthState.STATE_STORE_UNAVAILABLE` (a refusal). A failed
+  write latches the store `degraded` and every later read/write raises, so a
+  counter that failed to persist cannot leave a limit silently unenforced.
+- **Idempotency.** `request_id` claims a durable `request_key` before issuing an
+  authorization, so a retried request is answered from the stored decision and is
+  **not** counted twice in the window.
+- **Config.** `TRACESETTLE_GUARD_STATE_DB` (unset = in-memory, the loopback
+  default) and `TRACESETTLE_GUARD_STATE_BUSY_TIMEOUT_MS` (default 5000).
+  `_build_guard_service` hard-fails at start-up on an unopenable policy, audit, or
+  state database. The console/metrics report the backend honestly (`sqlite` vs
+  `in-memory`).
+- **Scope, stated honestly.** A SQLite file is durable state for **one** instance,
+  not multi-instance shared state. The narrow `GuardStateStore` interface is the
+  seam for a future shared backend; no PostgreSQL dependency is introduced.
+- **Invariants:** 12 → **15 total**. New: `durable_nonce_is_single_use_across_restart`,
+  `durable_counters_survive_restart`, and `state_store_failure_fails_closed`.
+- **Tests:** 661 → **694 passed** (0 skipped). New `tests/test_guard_durable_state.py`
+  (27): restart survival, real-HTTP replay refusal across two server lifetimes,
+  atomic-cycle concurrency + mutation, degraded latch on a real closed connection,
+  corrupt-database refusal, idempotency dedup, and builder/config wiring. pyflakes
+  clean; compileall OK; no non-stdlib runtime imports; offline demo byte-identical
+  (md5 `4864f13c…`).
+- **Docker verified live:** builds; non-root uid `10001`; `/api/health` `200`;
+  `Server: TRACESETTLE`; with a mounted writable volume and
+  `TRACESETTLE_GUARD_STATE_DB` set, a token signed once is **REFUSED/REPLAYED**
+  after a `docker restart` and a fresh token still executes.
+
+### Independent review fix — durable state stays bounded (2026-11-01)
+
+Adversarial review of PR #5 found one real defect; it is fixed on the same branch.
+
+- **Defect: `counter_events` and `idempotency` grew without bound.** `prune_events`
+  existed but had **no callers**, so the counter table grew with every decision.
+  Worse, the window read (`WHERE at >= ?`) had no leading-`at` index — the v1
+  indexes lead with `service_id`/`kind`, so SQLite did a full scan plus a temp
+  b-tree. Measured **~1.6 ms/read at 50k rows and rising linearly**; the in-memory
+  guard already bounds its equivalents (`deque(maxlen=…)`), so this was a parity
+  and availability regression that could eventually stall the enforcement path.
+- **Fix.** Schema **v2** adds `counter_events_at(at)` and `idempotency_at(at)`
+  (migrated in place; a v1 database keeps its data). `DurableReplayStore` — the one
+  object called on every signing attempt — now prunes consumed nonces, old counter
+  events, and old idempotency keys on `prune_interval_seconds` (default 300s) with
+  retention `TRACESETTLE_GUARD_STATE_RETENTION_SECONDS` (default 24h, well above
+  any window). Pruning runs outside the decision transaction so it cannot roll a
+  decision back. Measured after the fix: **~0.03 ms/read**, index search, no
+  growth with table size.
+- **Tests:** 694 → **699 passed** (0 skipped). New in
+  `tests/test_guard_durable_state.py`: index-not-scan plan, prune drops old and
+  keeps recent events, the signing path triggers the prune, idempotency retention,
+  and a v1→v2 in-place migration that preserves data. `test_schema_version_is_recorded`
+  now tracks `SCHEMA_VERSION` instead of a hardcoded `1`.
+- **Not changed (verified correct, do not "fix"):** durable vs in-memory decision
+  parity on identical sequences; cross-process exactly-one-winner and cross-process
+  limit enforcement; SIGKILL crash recovery of a committed nonce; expiry and
+  revocation surviving a restart; a configured auth key is stable across restarts
+  (only an *unset* key mints an ephemeral one, and that is disclosed).
+- **Docs:** `docs/DURABLE_STATE.md` §5 documents schema v2, the index rationale,
+  and the retention rule; §8 adds the retention variable; README gains a
+  **Bounded** bullet and the current count (699).

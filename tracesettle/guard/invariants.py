@@ -388,6 +388,149 @@ def _service_credentials_are_hashed_at_rest() -> InvariantResult:
     )
 
 
+def _durable_nonce_is_single_use_across_restart() -> InvariantResult:
+    """A spent nonce stays spent when the process is replaced."""
+    import tempfile
+
+    from .state import DurableReplayStore, GuardStateStore
+
+    with tempfile.TemporaryDirectory() as directory:
+        path = f"{directory}/state.db"
+        # First "process": issue a token and spend it.
+        store = GuardStateStore(path)
+        authority = AuthorizationAuthority(
+            key=_INVARIANT_KEY,
+            key_id="invariant-key",
+            ephemeral=False,
+            replay_store=DurableReplayStore(store),
+        )
+        service = GuardService(policy=DEFAULT_POLICY, authority=authority)
+        request = service.evaluate_payload(_payload()).request
+        token = service.evaluate(request).authorization
+        signer = ReferenceSigner(authority)
+        first = signer.sign(SignRequest(transaction=request, authorization=token))
+        store.close()
+        if first.outcome is not SignOutcome.EXECUTED:
+            return InvariantResult(
+                "durable_nonce_is_single_use_across_restart",
+                False,
+                "the first signing attempt did not execute",
+            )
+        # Second "process": reopen the same database and replay the same token.
+        store2 = GuardStateStore(path)
+        authority2 = AuthorizationAuthority(
+            key=_INVARIANT_KEY,
+            key_id="invariant-key",
+            ephemeral=False,
+            replay_store=DurableReplayStore(store2),
+        )
+        signer2 = ReferenceSigner(authority2)
+        second = signer2.sign(SignRequest(transaction=request, authorization=token))
+        store2.close()
+        if second.state is not AuthState.REPLAYED:
+            return InvariantResult(
+                "durable_nonce_is_single_use_across_restart",
+                False,
+                f"a replay after restart yielded {second.state.value}, not REPLAYED",
+            )
+    return InvariantResult(
+        "durable_nonce_is_single_use_across_restart",
+        True,
+        "a token spent before a restart is refused as REPLAYED after it",
+    )
+
+
+def _durable_counters_survive_restart() -> InvariantResult:
+    """A window-volume counter written before a restart is still enforced after it."""
+    import tempfile
+
+    from .policy import PolicyConfig, ServicePolicy
+    from .state import GuardStateStore
+
+    # A policy whose window limit is reachable in two ordinary requests, so the
+    # check does not depend on the default per-transaction limit or threshold.
+    policy = PolicyConfig(
+        approved_destinations=DEFAULT_POLICY.approved_destinations,
+        blocked_destinations=DEFAULT_POLICY.blocked_destinations,
+        services={
+            "treasury-agent": ServicePolicy(
+                service_id="treasury-agent",
+                allowed_operations=frozenset({"WITHDRAWAL"}),
+                allowed_chains=frozenset({"eth"}),
+                allowed_assets=frozenset({"USDC"}),
+                max_amount_per_transaction=Decimal("10000"),
+                max_amount_per_window=Decimal("1000"),
+                approval_threshold=None,
+            )
+        },
+        per_transaction_limit=Decimal("10000"),
+        window_seconds=3600,
+        max_requests_per_window=100,
+        max_blocked_per_window=100,
+        approval_threshold=None,
+        max_rejected_authorizations=100,
+        allow_unlisted_destinations=False,
+    )
+    with tempfile.TemporaryDirectory() as directory:
+        path = f"{directory}/state.db"
+        store = GuardStateStore(path)
+        service = GuardService(policy=policy, state_store=store)
+        first = service.evaluate_payload(_payload(amount="600", request_id="inv-a"))
+        store.close()
+        if first.decision is not Decision.ALLOW:
+            return InvariantResult(
+                "durable_counters_survive_restart",
+                False,
+                f"the first request was {first.decision.value}, so no volume was recorded",
+            )
+        # A fresh process must still see the accumulated volume and hold.
+        store2 = GuardStateStore(path)
+        service2 = GuardService(policy=policy, state_store=store2)
+        decision = service2.evaluate_payload(_payload(amount="600", request_id="inv-b"))
+        store2.close()
+        if decision.decision is Decision.ALLOW:
+            return InvariantResult(
+                "durable_counters_survive_restart",
+                False,
+                "the window-volume counter reset on restart and allowed an over-limit request",
+            )
+    return InvariantResult(
+        "durable_counters_survive_restart",
+        True,
+        "window volume accumulated before a restart still holds a request after it",
+    )
+
+
+def _state_store_failure_fails_closed() -> InvariantResult:
+    """A broken state store turns evaluation into HOLD, never ALLOW."""
+    import tempfile
+
+    from .state import GuardStateStore
+
+    with tempfile.TemporaryDirectory() as directory:
+        store = GuardStateStore(f"{directory}/state.db")
+        service = GuardService(policy=DEFAULT_POLICY, state_store=store)
+        store.close()  # every later read/write raises StateStoreError
+        decision = service.evaluate_payload(_payload())
+        if decision.decision is Decision.ALLOW or decision.authorization is not None:
+            return InvariantResult(
+                "state_store_failure_fails_closed",
+                False,
+                "a broken state store still produced an authorization",
+            )
+        if decision.decision is not Decision.HOLD:
+            return InvariantResult(
+                "state_store_failure_fails_closed",
+                False,
+                f"a broken state store produced {decision.decision.value}, not HOLD",
+            )
+    return InvariantResult(
+        "state_store_failure_fails_closed",
+        True,
+        "an unreadable state store yields HOLD with no authorization",
+    )
+
+
 INVARIANTS: dict[str, Callable[[], InvariantResult]] = {
     "non_allow_never_authorizes": _non_allow_never_authorizes,
     "refusal_never_reaches_the_executor": _refusal_never_reaches_the_executor,
@@ -401,6 +544,9 @@ INVARIANTS: dict[str, Callable[[], InvariantResult]] = {
     "amounts_are_exact_decimals": _amounts_are_exact_decimals,
     "service_identity_cannot_be_forged": _service_identity_cannot_be_forged,
     "service_credentials_are_hashed_at_rest": _service_credentials_are_hashed_at_rest,
+    "durable_nonce_is_single_use_across_restart": _durable_nonce_is_single_use_across_restart,
+    "durable_counters_survive_restart": _durable_counters_survive_restart,
+    "state_store_failure_fails_closed": _state_store_failure_fails_closed,
 }
 
 #: Human-readable statement of each guarantee, for the console and the docs.
@@ -417,6 +563,9 @@ INVARIANT_DESCRIPTIONS: dict[str, str] = {
     "amounts_are_exact_decimals": "Amounts are compared as exact decimals, never as binary floats.",
     "service_identity_cannot_be_forged": "A service credential authenticates exactly one identity; a request declaring another service is refused.",
     "service_credentials_are_hashed_at_rest": "Service credentials are stored only as one-way hashes; the plaintext secret never appears in a store or a public view.",
+    "durable_nonce_is_single_use_across_restart": "A nonce consumed before a process restart is refused as a replay after it.",
+    "durable_counters_survive_restart": "Window-volume and velocity counters persist across a restart; a limit is not reset by a bounce.",
+    "state_store_failure_fails_closed": "An unreadable durable state store yields HOLD with no authorization, never ALLOW.",
 }
 
 

@@ -155,7 +155,7 @@ silently downgrade an outcome. This was a real defect caught by a test.
 
 ## 8. Structural invariants (`guard/invariants.py`)
 
-Twelve guarantees, each checked by *running the real code* against an isolated
+Fifteen guarantees, each checked by *running the real code* against an isolated
 service, exposed at `GET /api/guard/invariants` and asserted in
 `tests/test_guard_invariants.py`:
 
@@ -173,6 +173,9 @@ service, exposed at `GET /api/guard/invariants` and asserted in
 | `amounts_are_exact_decimals` | `0.3` is admitted, `0.30000000000000004` is refused |
 | `service_identity_cannot_be_forged` | a credential authenticates one identity; a mismatched `service_id` is refused |
 | `service_credentials_are_hashed_at_rest` | only a one-way hash is stored; the plaintext secret never appears |
+| `durable_nonce_is_single_use_across_restart` | a nonce spent before a restart is refused as `REPLAYED` after it |
+| `durable_counters_survive_restart` | velocity/volume counters persist across a restart; a limit is not reset by a bounce |
+| `state_store_failure_fails_closed` | an unreadable durable store yields `HOLD` with no authorization, never `ALLOW` |
 
 Every checker is also mutation-tested: the guarded behaviour is deliberately
 broken and the checker is shown to notice. A checker that cannot fail proves
@@ -193,7 +196,7 @@ single document with no third-party origins and a restrictive
 | `POST` | `/api/guard/incidents/{id}/status` | acknowledge or resolve |
 | `GET` | `/api/guard/audit` | audit records (`?verify=1` to check the chain) |
 | `GET` | `/api/guard/scenarios` | the three labelled simulation scenarios |
-| `GET` | `/api/guard/invariants` | run the twelve structural checks now |
+| `GET` | `/api/guard/invariants` | run the fifteen structural checks now |
 | `POST` | `/api/guard/evaluate` | evaluate a transaction request |
 | `POST` | `/api/guard/sign` | attempt a signing through the reference signer |
 
@@ -273,6 +276,8 @@ transactions themselves are not real, and the console says so on the page.
 | `TRACESETTLE_GUARD_AUTH_TTL` | 90 | authorization lifetime in seconds |
 | `TRACESETTLE_GUARD_POLICY` | built-in | path to a JSON policy override |
 | `TRACESETTLE_GUARD_AUDIT_LOG` | in-memory | path to a persistent audit log |
+| `TRACESETTLE_GUARD_STATE_DB` | in-memory | path to a SQLite store for spent nonces and counters (survives a restart) |
+| `TRACESETTLE_GUARD_STATE_BUSY_TIMEOUT_MS` | 5000 | SQLite writer-lock wait in milliseconds |
 | `TRACESETTLE_GUARD_MAX_BODY_BYTES` | 8192 | request body cap |
 | `TRACESETTLE_API_KEY` | unset | guards the guard endpoints |
 | `TRACESETTLE_SERVICE_CREDENTIALS` | unset | path to a per-service credential store |
@@ -297,7 +302,11 @@ Stated plainly, so nothing is mistaken for done:
 - **No live chain submission.** The executor is simulated by design; the
   read-only invariant is not traded away for a demo.
 - **No durable incident store.** Incidents are in memory and reset on restart;
-  the audit log can persist, incidents cannot yet.
+  the audit log and the guard state store can persist, incidents cannot yet.
+- **Durable state is single-instance.** Spent nonces and counters can persist in
+  SQLite (see `docs/DURABLE_STATE.md`), but a SQLite file is durable state for one
+  instance, not multi-instance shared state; a multi-replica deployment needs the
+  `GuardStateStore` interface implemented against a shared database.
 - **No NEAR-side on-chain policy enforcement** (for example a function-call key
   scoped to an approved contract and method). That is the natural next step for
   the `security` track and is not built.

@@ -47,6 +47,13 @@ from .policy import DEFAULT_POLICY, PolicyConfig, load_policy
 from .rules import evaluate_controls
 from .service import GuardService, RequestValidationError, request_from_payload
 from .signer import ExecutionReceipt, ReferenceSigner, SignRequest, SimulatedExecutor
+from .state import (
+    DurableReplayStore,
+    DurableRevocationStore,
+    GuardStateStore,
+    StateStoreError,
+    open_state_store,
+)
 
 __all__ = [
     "AuditLog",
@@ -60,11 +67,14 @@ __all__ = [
     "ControlResult",
     "DEFAULT_POLICY",
     "Decision",
+    "DurableReplayStore",
+    "DurableRevocationStore",
     "EvaluationContext",
     "ExecutionReceipt",
     "FindingSeverity",
     "GuardDecision",
     "GuardService",
+    "GuardStateStore",
     "InMemoryReplayStore",
     "Incident",
     "IncidentSeverity",
@@ -79,8 +89,10 @@ __all__ = [
     "SignRequest",
     "SignResult",
     "SimulatedExecutor",
+    "StateStoreError",
     "TransactionRequest",
     "evaluate_controls",
     "load_policy",
+    "open_state_store",
     "request_from_payload",
 ]

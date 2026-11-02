@@ -650,11 +650,16 @@ class Handler(BaseHTTPRequestHandler):
 def _build_guard_service() -> GuardService:
     """Build the guard from configuration.
 
-    A configured policy file or audit-log path that cannot be read is a hard
-    failure: a security control must not silently fall back to a weaker default.
+    A configured policy file, audit-log path, or durable-state database that
+    cannot be read is a hard failure: a security control must not silently fall
+    back to a weaker default. When a state database is configured, the replay
+    store and the revocation store are backed by it, so spent nonces and
+    revocations survive a restart.
     """
     from .guard.audit import AuditLog
+    from .guard.authorization import AuthorizationAuthority
     from .guard.policy import DEFAULT_POLICY, load_policy
+    from .guard.state import DurableReplayStore, DurableRevocationStore, open_state_store
 
     if config.GUARD_POLICY_PATH:
         policy = load_policy(config.GUARD_POLICY_PATH)
@@ -664,7 +669,19 @@ def _build_guard_service() -> GuardService:
         path=config.GUARD_AUDIT_LOG_PATH,
         max_records=config.GUARD_AUDIT_MAX_RECORDS,
     )
-    return GuardService(policy=policy, audit=audit)
+    state_store = open_state_store(
+        config.GUARD_STATE_DB, busy_timeout_ms=config.GUARD_STATE_BUSY_TIMEOUT_MS
+    )
+    if state_store is None:
+        return GuardService(policy=policy, audit=audit)
+    authority = AuthorizationAuthority(
+        replay_store=DurableReplayStore(
+            state_store, counter_retention_seconds=config.GUARD_STATE_RETENTION_SECONDS
+        ),
+        revocations=DurableRevocationStore(state_store),
+        ttl_seconds=policy.authorization_ttl_seconds,
+    )
+    return GuardService(policy=policy, audit=audit, authority=authority, state_store=state_store)
 
 
 def _load_service_registry() -> Any:

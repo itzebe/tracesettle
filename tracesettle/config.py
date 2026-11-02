@@ -128,6 +128,23 @@ GUARD_POLICY_PATH = os.environ.get("TRACESETTLE_GUARD_POLICY") or None
 GUARD_AUDIT_LOG_PATH = os.environ.get("TRACESETTLE_GUARD_AUDIT_LOG") or None
 GUARD_AUDIT_MAX_RECORDS = int(os.environ.get("TRACESETTLE_GUARD_AUDIT_MAX_RECORDS", "10000"))
 
+#: Optional SQLite database for durable guard state: spent nonces, revoked
+#: authorizations, and the velocity/volume/rejection counters. Unset keeps the
+#: in-memory stores (the loopback development default); the console reports the
+#: backend honestly. This is durable state for *one* application instance, not
+#: shared multi-instance state. A configured path that cannot be opened stops
+#: start-up rather than running with a silently degraded control.
+GUARD_STATE_DB = os.environ.get("TRACESETTLE_GUARD_STATE_DB") or None
+GUARD_STATE_BUSY_TIMEOUT_MS = int(os.environ.get("TRACESETTLE_GUARD_STATE_BUSY_TIMEOUT_MS", "5000"))
+
+#: How long durable counter events and idempotency keys are retained. Events older
+#: than this cannot affect any velocity/volume window (the window is a few hours at
+#: most), so pruning them keeps the tables bounded and the window read fast. It must
+#: stay well above the largest configured window; 24h is a safe default.
+GUARD_STATE_RETENTION_SECONDS = float(
+    os.environ.get("TRACESETTLE_GUARD_STATE_RETENTION_SECONDS", "86400")
+)
+
 #: Per-client-IP budget for the guard endpoints. Tighter than the investigation
 #: endpoint: these endpoints make no outbound calls, so a high rate is abusive.
 GUARD_RATE_LIMIT_PER_MINUTE = int(os.environ.get("TRACESETTLE_GUARD_RATE_LIMIT_PER_MINUTE", "120"))
