@@ -103,3 +103,50 @@ finally:
         "/api/guard/near/settlement-demo": 200,
         "/api/guard/invariants": 200,
     }, results
+
+
+def test_settlement_assurance_runs_from_a_package_only_copy(tmp_path):
+    """The assurance vocabulary and its rules must not depend on test-only files."""
+    root = _package_only_copy(tmp_path)
+    script = (
+        "import sys, json;"
+        f"sys.path.insert(0, {str(root)!r});"
+        "from tracesettle.model import OverallOutcome, ReconciliationResult, Stage,"
+        " StageAssessment, StageState;"
+        "from tracesettle.near.settlement import AssuranceLevel, settlement_assurance_from_result;"
+        "refund = ReconciliationResult(stages=(StageAssessment(stage=Stage.REFUND,"
+        " state=StageState.CONFIRMED, summary='payout'),), last_confirmed_stage=Stage.REFUND,"
+        " outcome=OverallOutcome.REFUND_VERIFIED, summary='refund');"
+        "a = settlement_assurance_from_result(refund);"
+        "print(json.dumps({'levels': sorted(x.value for x in AssuranceLevel),"
+        " 'refund_level': a.level.value, 'verified': a.independently_verified}))"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, timeout=120
+    )
+    assert out.returncode == 0, out.stderr
+    result = json.loads(out.stdout.strip().splitlines()[-1])
+    assert {"VERIFIED", "REFUNDED", "FAILED", "PARTIAL", "PENDING", "UNKNOWN", "UNAVAILABLE"} <= set(
+        result["levels"]
+    )
+    assert result["refund_level"] == "REFUNDED"
+    assert result["verified"] is False
+
+
+def test_all_invariants_hold_from_a_package_only_copy(tmp_path):
+    """Every structural invariant must be checkable with only the shipped package."""
+    root = _package_only_copy(tmp_path)
+    script = (
+        "import sys, json;"
+        f"sys.path.insert(0, {str(root)!r});"
+        "from tracesettle.guard.invariants import check_all;"
+        "r = check_all();"
+        "print(json.dumps({'n': len(r), 'all_hold': all(x.holds for x in r)}))"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, timeout=120
+    )
+    assert out.returncode == 0, out.stderr
+    result = json.loads(out.stdout.strip().splitlines()[-1])
+    assert result["n"] == 23
+    assert result["all_hold"] is True
