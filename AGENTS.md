@@ -1006,3 +1006,56 @@ fixed and regression-tested. Two defects, one new capability.
   cloud keys, JWTs, PEM private keys) over every blob in every ref returned
   nothing. No real credential exists in the history. The remote URL's token lives
   only in the untracked `.git/config`.
+
+## Release-workflow pass: real-HTTP lifecycle acceptance + publication audit (2026-11-03)
+
+Completed the pre-submission release workflow (audit → push → PR → CI). No
+verification rule was weakened and no production configuration was touched.
+
+- **Genuine gap closed: the lifecycle was never driven over a real socket.** The
+  lifecycle tests in `tests/test_near_lifecycle.py` call the lifecycle object
+  directly, so a route registered under the wrong path, gated by the wrong flag,
+  or answered without a body would pass every direct-call test and fail in the
+  product. `tests/test_near_acceptance.py` now drives the **whole journey over a
+  real HTTP socket** (transport substituted, everything else real): create →
+  authorize → live quote → approve → status → assurance; a blocked intent cannot
+  obtain a fundable deposit address; and the routes 404 when the lifecycle is
+  disabled. Counts: 938 → **941 passed, 24 skipped**; `pyflakes` clean;
+  `compileall` OK; offline demo byte-identical (`4864f13c…`); near demo
+  byte-identical (`037fa3ab…`).
+- **Run the suite in a clean environment.** Ambient `TRACESETTLE_*` variables in
+  the shell (from a locally launched server) make ~45 tests fail, because they
+  read the same config the tests set. Use
+  `env -u TRACESETTLE_API_KEY -u TRACESETTLE_GUARD_AUTH_KEY -u TRACESETTLE_INTENTS_DB … python -m pytest tests/ -q`.
+- **Branch reconciliation:** `feat/near-security-integration` is a clean
+  fast-forward from `master` (`80f8f95`); the recovery commit `d1d17fb` was
+  already an ancestor (merged via PR #9). No merge/rebase was needed. Head after
+  this pass: `a284c502`.
+- **Secret audit of the FULL publication history** (after `git fetch --unshallow`;
+  the clone was shallow, so the boundary commit was NOT the whole history). Scanned
+  all 591 blobs across all refs with `detect-secrets` 1.5.0 plus targeted greps.
+  No private keys, no seed phrases, no PATs/cloud keys/JWTs. Findings were entropy
+  noise, the placeholder `postgresql://user:pass@…` docs, and the ephemeral CI
+  Postgres service password `tracesettle:tracesettle` (a throwaway container
+  credential). **One real exposure:** the unrelated `knotwork-backup` branch
+  carries `.openhands/memory/MEMORY.md`, which contains the owner's personal email
+  (`jonathanebi05@gmail.com`) and sandbox/account notes. That branch is a VR
+  prototype unrelated to TraceSettle and would be published with the repo. Deleting
+  it (or scrubbing that file from its history) needs a token with admin rights and
+  the owner's explicit decision; it is NOT done here.
+- **Repository visibility cannot be changed by this token.** `$GITHUB_TOKEN` is a
+  GitHub App installation token (`ghu_`) with `x-accepted-github-permissions:
+  metadata=read` and contents write only. REST `PATCH {private:false}` /
+  `{visibility:public}`, `gh repo edit --visibility public`, and the GraphQL
+  `updateRepository` mutation all return `403 Resource not accessible by
+  integration` (GraphQL `UpdateRepositoryInput` does not accept `visibility`/
+  `isPrivate`). Changing visibility requires the owner (UI) or a classic PAT with
+  `repo` scope.
+- **PR #10** (`feat: add NEAR agent authorization and settlement security`, base
+  `master`) exists and was updated with the current head and evidence. CI on
+  `a284c502` is **green**: all four jobs (Tests and static analysis, PostgreSQL
+  shared-state integration, Docker build and runtime, Vercel container image)
+  succeeded.
+- **Authorized actions completed:** pushed `feat/near-security-integration`
+  (`d69f9c8..a284c50`), updated PR #10. **Not done:** merge, production deploy, X
+  post, submission.
