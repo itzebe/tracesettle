@@ -133,6 +133,25 @@ Correlation uses explicit identifiers only (intent hash, deposit address,
 recipient address, transaction hash). Amount and timestamp similarity are never
 used to link stages.
 
+### Settlement assurance in the report
+
+Every investigation report carries a `settlement_assurance` view over the same
+deterministic result, so the question "did the money arrive, and is that
+independently proven?" has a first-class answer rather than being left to the
+reader to infer from stage states. It maps the engine's stages onto the NEAR
+settlement path (deposit address, source-chain transaction, deposit confirmation,
+intent execution, destination transaction, destination receipt, refund) and
+reports one of `VERIFIED`, `REPORTED_ONLY`, `CONTRADICTORY`, `UNAVAILABLE`, or
+`UNKNOWN`.
+
+**A provider's success status is a `REPORTED` claim and never raises the level.**
+If the provider says `SUCCESS` but no decisive on-chain evidence confirms it, the
+assurance level is not `VERIFIED` — the report says so explicitly, and the
+Markdown document, the main page and the operations console all render the view.
+The same capability is exercised end to end in `tests/test_near_acceptance.py`,
+which drives the real server and the real report builder, so it cannot regress
+into an unused library.
+
 ### NEAR agent protection
 
 An AI agent or a payment service acting for one must ask TRACESETTLE before it
@@ -184,8 +203,9 @@ refusal is provable: the executor is never called unless the outcome was `ALLOW`
 Five NEAR-specific structural guarantees join the invariant set, each
 mutation-tested: `near_policy_must_be_in_force`,
 `near_native_scope_gap_is_always_stated`,
-`near_function_call_key_cannot_transfer_near`, and
-`near_provider_success_is_never_verified_without_evidence`.
+`near_function_call_key_cannot_transfer_near`,
+`near_provider_success_is_never_verified_without_evidence`, and
+`near_policy_selection_is_not_client_controlled`.
 
 ## Try it: do X → see Y
 
@@ -269,7 +289,8 @@ curl -sS http://127.0.0.1:8080/api/guard/invariants \
 → `all hold: True` and the twenty-one invariant names, including the five NEAR
 ones (`near_policy_must_be_in_force`, `near_native_scope_gap_is_always_stated`,
 `near_function_call_key_cannot_transfer_near`,
-`near_provider_success_is_never_verified_without_evidence`).
+`near_provider_success_is_never_verified_without_evidence`,
+`near_policy_selection_is_not_client_controlled`).
 
 **4. Investigate a real, known-good swap from the command line.**
 
@@ -599,7 +620,7 @@ identical decisions.
 | `.github/workflows/ci.yml` | CI: tests, static analysis, Docker build + runtime, demo determinism. |
 | `demo/demonstrate.py` | Read-only walkthrough (live, or `--offline` replay of captures). |
 | `demo/replay_opener.py` | Offline transport that replays `evidence/raw/` through the real code. |
-| `tests/` | 741 tests (24 PostgreSQL tests skip without `TRACESETTLE_TEST_PG_DSN`). `evidence/raw/` fixtures are real captures; `tests/fixtures/synthetic/` are clearly labelled synthetic. |
+| `tests/` | 868 tests (24 PostgreSQL tests skip without `TRACESETTLE_TEST_PG_DSN`). `evidence/raw/` fixtures are real captures; `tests/fixtures/synthetic/` are clearly labelled synthetic. |
 | `PHASE1_FEASIBILITY.md` | Phase 1 feasibility and API verification. |
 | `submission/` | Hackathon artifacts: API payload shape, technical summary, demo post draft, publication checklist. |
 | `docs/official/` | NEAR documentation captured during Phase 1. |
@@ -895,7 +916,7 @@ immutable commit SHA (not a moving tag), and cancels superseded runs.
 ## Tests
 
 ```sh
-python3 -m pytest tests/ -q          # 861 passed, 24 skipped (885 with a server)
+python3 -m pytest tests/ -q          # 868 passed, 24 skipped (892 with a server)
 python3 -m pytest tests/test_guard_authorization.py -q
 python3 -m pytest tests/test_guard_invariants.py -q
 python3 -m pytest tests/test_guard_end_to_end.py -q
@@ -906,6 +927,7 @@ python3 -m pytest tests/test_ui.py -q
 python3 -m pytest tests/test_near_policy.py tests/test_near_access_keys.py -q
 python3 -m pytest tests/test_near_agent_wrapper.py tests/test_near_attacks.py -q
 python3 -m pytest tests/test_near_api.py tests/test_near_invariants.py -q
+python3 -m pytest tests/test_near_acceptance.py -q   # product-level wiring
 ```
 
 Test coverage includes successful settlement, a failed intent with a verified

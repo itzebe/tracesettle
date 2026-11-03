@@ -899,10 +899,11 @@ engine and its correlation rules are untouched.
   adapter reports `UNCONFIGURED`. Fixtures are labelled `local_fixture=True`.
 - **Every refusal is provable:** the executor is never called unless the outcome
   was `ALLOW`. Nine scenarios (A–I) assert this.
-- **Four new invariants (now 20 total)**, each mutation-tested:
+- **Five new invariants (now 21 total)**, each mutation-tested:
   `near_policy_must_be_in_force`, `near_native_scope_gap_is_always_stated`,
   `near_function_call_key_cannot_transfer_near`,
-  `near_provider_success_is_never_verified_without_evidence`.
+  `near_provider_success_is_never_verified_without_evidence`,
+  `near_policy_selection_is_not_client_controlled`.
 - **`/api/guard/near/agent-evaluate` is a service-facing route** and is bound to
   the authenticated service identity in `ui.py` (`_SERVICE_OPERATION_PATHS`).
   Found in review: without this a caller could declare another service's id.

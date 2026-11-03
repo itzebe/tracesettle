@@ -780,6 +780,24 @@ function renderInvestigation(d) {
     "<th>State</th><th>Explanation</th></tr></thead><tbody>" +
     (d.stages || []).map((s) => "<tr><td>" + esc(s.stage) + "</td><td>" + status(s.state) +
       '</td><td class="wrap">' + esc(s.summary) + "</td></tr>").join("") + "</tbody></table></div>";
+  const assurance = d.settlement_assurance;
+  if (assurance) {
+    let a = '<div class="panel"><h2>Settlement assurance</h2><div class="kv">' +
+      "<dt>Assurance level</dt><dd>" + status(assurance.level) + "</dd>" +
+      "<dt>Independently verified</dt><dd>" + (assurance.independently_verified ? "yes" : "no") + "</dd>" +
+      "<dt>Provider claimed success</dt><dd>" + (assurance.provider_claimed_success ? "yes" : "no") + "</dd>" +
+      (assurance.partial_settlement ? "<dt>Partial settlement</dt><dd>yes</dd>" : "") +
+      "</div><p>" + esc(assurance.summary) + "</p>";
+    a += '<table><thead><tr><th>Settlement stage</th><th>State</th><th>Confirmed</th>' +
+      "<th>Detail</th></tr></thead><tbody>" +
+      (assurance.stages || []).map((s) => "<tr><td>" + esc(s.name) + "</td><td>" + status(s.state) +
+        "</td><td>" + (s.confirmed ? "yes" : "no") + '</td><td class="wrap">' + esc(s.detail) +
+        "</td></tr>").join("") + "</tbody></table>";
+    if ((assurance.limitations || []).length) {
+      a += "<ul>" + assurance.limitations.map((l) => "<li>" + esc(l) + "</li>").join("") + "</ul>";
+    }
+    html += a + "</div>";
+  }
   const sources = d.sources || [];
   if (sources.length) {
     html += '<div class="panel"><h2>Provider status and source availability</h2><table><thead><tr>' +

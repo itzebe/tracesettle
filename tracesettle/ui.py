@@ -197,6 +197,29 @@ function render(d) {
   summary += '<p>' + esc(d.summary) + '</p>';
   html += panel('Result', summary);
 
+  const assurance = d.settlement_assurance;
+  if (assurance) {
+    const aRows = (assurance.stages || []).map(s =>
+      '<tr class="stage-row"><td>' + esc(s.name) + '</td><td>' + pill(s.state) +
+      '</td><td>' + (s.confirmed ? 'yes' : 'no') + '</td><td>' + esc(s.detail) + '</td></tr>'
+    ).join('');
+    let aHtml = '<div class="kv">' +
+      '<dt>Assurance level</dt><dd class="outcome">' + esc(assurance.level) + '</dd>' +
+      '<dt>Independently verified</dt><dd>' + (assurance.independently_verified ? 'yes' : 'no') + '</dd>' +
+      '<dt>Provider claimed success</dt><dd>' + (assurance.provider_claimed_success ? 'yes' : 'no') + '</dd>' +
+      (assurance.partial_settlement ? '<dt>Partial settlement</dt><dd>yes</dd>' : '') +
+      '</div>';
+    aHtml += '<p>' + esc(assurance.summary) + '</p>';
+    aHtml += '<table><thead><tr><th>Settlement stage</th><th>State</th><th>Confirmed</th>' +
+      '<th>Detail</th></tr></thead><tbody>' + aRows + '</tbody></table>';
+    if ((assurance.limitations || []).length) {
+      aHtml += '<ul>';
+      assurance.limitations.forEach(l => { aHtml += '<li>' + esc(l) + '</li>'; });
+      aHtml += '</ul>';
+    }
+    html += panel('Settlement assurance', aHtml);
+  }
+
   let stageRows = '<table><thead><tr><th>Stage</th><th>State</th><th>Explanation</th></tr></thead><tbody>';
   stages.forEach(s => {
     stageRows += '<tr class="stage-row"><td>' + esc(s.stage) + '</td><td>' + pill(s.state) +
