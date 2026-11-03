@@ -149,6 +149,10 @@ def test_console_is_accessible_and_responsive():
     assert "status s-" in html
     # Reduced motion is respected.
     assert "prefers-reduced-motion" in html
+    # Long identifiers must wrap rather than scroll the page sideways on a
+    # narrow viewport (verified in a real 375px browser; a CSS-only guard here).
+    assert "overflow-wrap: anywhere" in html
+    assert "word-break: break-word" in html
 
 
 def test_console_requests_only_same_origin_endpoints():

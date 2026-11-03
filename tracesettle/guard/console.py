@@ -127,6 +127,11 @@ CONSOLE_HTML = """<!DOCTYPE html>
   ul.plain { list-style: none; margin: 0; padding: 0; }
   ul.plain li { border-bottom: 1px solid var(--line); padding: 10px 0; }
   ul.plain li:last-child { border-bottom: none; }
+  /* Long unbroken values (addresses, hashes) must wrap, or the page scrolls
+     sideways on a narrow viewport. Applies to every text container. */
+  .card, .panel, .kv dd, ul.plain li, td, th, p, li, dd, .status { overflow-wrap: anywhere; word-break: break-word; }
+  table { display: block; overflow-x: auto; }
+  @media (max-width: 560px) { main { padding-left: 12px; padding-right: 12px; } .bar { padding-left: 12px; padding-right: 12px; } }
   .muted { color: var(--muted); }
   .small { font-size: 12px; }
   .stack { display: flex; flex-direction: column; gap: 10px; }
