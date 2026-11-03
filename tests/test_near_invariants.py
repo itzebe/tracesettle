@@ -16,7 +16,7 @@ FIXTURE_DIR = pathlib.Path(__file__).resolve().parent.parent / "tracesettle" / "
 
 def test_near_invariants_are_registered():
     near = [name for name in inv.INVARIANTS if name.startswith("near_")]
-    assert len(near) == 6
+    assert len(near) == 7
     assert all(name in inv.INVARIANT_DESCRIPTIONS for name in near)
 
 
@@ -106,3 +106,25 @@ def test_near_policy_selection_invariant_fails_if_a_client_fixture_is_honoured(m
     result = inv._near_policy_selection_is_not_client_controlled()
     assert result.holds is False
     assert "client supplied" in result.detail
+
+
+def test_near_terminal_states_invariant_notices_a_reported_failure_as_failed(monkeypatch):
+    """Mutation check: if a reported failure read as FAILED, the invariant must fail."""
+    from tracesettle.near import settlement as settlement_mod
+    from tracesettle.near.settlement import AssuranceLevel, NearSettlementAssurance
+
+    real = settlement_mod.settlement_assurance_from_result
+
+    def permissive(result, **kwargs):
+        out = real(result, **kwargs)
+        return NearSettlementAssurance(
+            outcome=out.outcome,
+            level=AssuranceLevel.FAILED,
+            provider_claimed_success=out.provider_claimed_success,
+            independently_verified=out.independently_verified,
+            stages=out.stages,
+        )
+
+    monkeypatch.setattr(settlement_mod, "settlement_assurance_from_result", permissive)
+    result = inv._near_terminal_states_are_evidence_distinguished()
+    assert result.holds is False

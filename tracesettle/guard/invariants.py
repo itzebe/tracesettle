@@ -903,6 +903,57 @@ def _near_partial_settlement_is_never_verified():
     )
 
 
+def _near_terminal_states_are_evidence_distinguished():
+    """A reported failure/refund is never presented as FAILED/REFUNDED.
+
+    The mission forbids representing an upstream failure as a definitive
+    settlement failure, and forbids presenting a refund as a successful
+    settlement. This checks both directions: a merely reported failure or refund
+    must not reach a terminal verified level, and a confirmed refund must be
+    REFUNDED rather than VERIFIED.
+    """
+    from ..model import OverallOutcome, ReconciliationResult, Stage, StageAssessment, StageState
+    from ..near.settlement import AssuranceLevel, settlement_assurance_from_result
+
+    reported_failure = ReconciliationResult(
+        stages=(
+            StageAssessment(stage=Stage.NEAR_SETTLEMENT, state=StageState.REPORTED, summary="claim"),
+        ),
+        last_confirmed_stage=None,
+        outcome=OverallOutcome.FAILED_REPORTED_UNVERIFIED,
+        summary="provider says failed",
+    )
+    reported_level = settlement_assurance_from_result(reported_failure).level
+    if reported_level is AssuranceLevel.FAILED:
+        return InvariantResult(
+            "near_terminal_states_are_evidence_distinguished",
+            False,
+            "a merely reported failure was presented as a definitive FAILED state",
+        )
+
+    confirmed_refund = ReconciliationResult(
+        stages=(
+            StageAssessment(stage=Stage.REFUND, state=StageState.CONFIRMED, summary="payout"),
+        ),
+        last_confirmed_stage=Stage.REFUND,
+        outcome=OverallOutcome.REFUND_VERIFIED,
+        summary="refund confirmed",
+    )
+    refund_level = settlement_assurance_from_result(confirmed_refund).level
+    if refund_level is not AssuranceLevel.REFUNDED:
+        return InvariantResult(
+            "near_terminal_states_are_evidence_distinguished",
+            False,
+            "a confirmed refund was not classified REFUNDED",
+        )
+
+    return InvariantResult(
+        "near_terminal_states_are_evidence_distinguished",
+        True,
+        "a reported failure stays unverified and a confirmed refund is REFUNDED, never a successful settlement",
+    )
+
+
 INVARIANTS: dict[str, Callable[[], InvariantResult]] = {
     "non_allow_never_authorizes": _non_allow_never_authorizes,
     "refusal_never_reaches_the_executor": _refusal_never_reaches_the_executor,
@@ -932,6 +983,9 @@ INVARIANTS: dict[str, Callable[[], InvariantResult]] = {
         _near_provider_success_is_never_verified_without_evidence
     ),
     "near_partial_settlement_is_never_verified": _near_partial_settlement_is_never_verified,
+    "near_terminal_states_are_evidence_distinguished": (
+        _near_terminal_states_are_evidence_distinguished
+    ),
 }
 
 #: Human-readable statement of each guarantee, for the console and the docs.
@@ -958,6 +1012,7 @@ INVARIANT_DESCRIPTIONS: dict[str, str] = {
     "near_function_call_key_cannot_transfer_near": "A NEAR function-call key is never treated as able to transfer NEAR or attach NEAR tokens to a call.",
     "near_provider_success_is_never_verified_without_evidence": "A provider success status never yields an independently-verified settlement level without decisive on-chain evidence.",
     "near_partial_settlement_is_never_verified": "A destination that received less than the quote's expected output is classified PARTIAL and is never independently verified.",
+    "near_terminal_states_are_evidence_distinguished": "A reported failure or refund never reads as a definitive FAILED/REFUNDED state, and a confirmed refund is REFUNDED rather than a verified settlement.",
 }
 
 

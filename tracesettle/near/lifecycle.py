@@ -572,6 +572,21 @@ class NearIntentsLifecycle:
         data["quote_expiry"] = _intents.quote_expiry(quote) if quote else None
         data["quote_approved"] = bool(record.quote_approved_at)
         data["events"] = self._store.events(intent_id, owner=owner)
+        # The lifecycle label is a pure function of the stored provider status and
+        # evidence. Re-derive it on read so a record written by an older label
+        # mapping is presented under the current, correct semantics rather than a
+        # stale one (e.g. a deposit-status label from before a semantics fix).
+        if record.provider_status:
+            prior = record.lifecycle or {}
+            view = _intents.lifecycle_view(
+                record.provider_status,
+                destination_tx_hashes=tuple(prior.get("destination_tx_hashes") or ()),
+                origin_tx_hashes=tuple(prior.get("origin_tx_hashes") or ()),
+                refunded_amount=prior.get("refunded_amount"),
+                amount_out=prior.get("amount_out"),
+            )
+            data["state"] = view.label
+            data["lifecycle"] = view.to_dict()
         return data
 
     def list(self, *, owner: str, limit: int = 50) -> list[dict[str, Any]]:

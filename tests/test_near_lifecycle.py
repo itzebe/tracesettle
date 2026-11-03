@@ -302,6 +302,31 @@ def test_lifecycle_survives_a_restart(opener, store, tmp_path):
         reopened.close()
 
 
+def test_a_stale_stored_label_is_re_derived_on_read(opener, store):
+    """A record written before a label-semantics fix must not keep the stale label.
+
+    The lifecycle label is a pure function of the stored provider status and
+    evidence, so ``get`` re-derives it. This guards the PENDING_DEPOSIT fix: an
+    intent stored with the old ``DEPOSIT_SUBMITTED`` state must read back as
+    ``AWAITING_DEPOSIT`` once the mapping is corrected.
+    """
+    lc, _ = _lifecycle(opener, store)
+    created = lc.create_and_authorize(
+        owner="treasury-agent", payload=_intent_payload(), policy_read=None, access_key=None,
+        created_at=CREATED_AT,
+    )
+    intent_id = created["intent_id"]
+    # Simulate a record persisted under the old, incorrect mapping.
+    store.apply_provider_status(
+        intent_id, owner="treasury-agent", provider_status="PENDING_DEPOSIT",
+        provider_updated_at=None, observed_at=CREATED_AT,
+        lifecycle={"label": "DEPOSIT_SUBMITTED", "deposit_seen": True},
+    )
+    record = lc.get(owner="treasury-agent", intent_id=intent_id)
+    assert record["state"] == "AWAITING_DEPOSIT"
+    assert record["lifecycle"]["deposit_seen"] is False
+
+
 def test_owner_isolation(opener, store):
     lc, _ = _lifecycle(opener, store)
     created = lc.create_and_authorize(

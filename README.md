@@ -88,7 +88,7 @@ Amounts are exact `Decimal`s: a limit of `0.3` admits `0.3` and refuses
 `0.30000000000000004`. Severity is compared by an explicit rank, never by the
 severity's string value (`"MEDIUM"` sorts after `"HIGH"` alphabetically).
 
-Twenty-two structural guarantees are checked by *running the real code*, on demand, at
+Twenty-three structural guarantees are checked by *running the real code*, on demand, at
 `GET /api/guard/invariants` — including `refusal_never_reaches_the_executor` and
 `authorization_is_single_use`. Each checker is also mutation-tested: the guarded
 behaviour is deliberately broken and the checker must notice. A checker that
@@ -170,19 +170,23 @@ independently proven?" has a first-class answer rather than being left to the
 reader to infer from stage states. It maps the engine's stages onto the NEAR
 settlement path (deposit address, source-chain transaction, deposit confirmation,
 intent execution, destination transaction, destination receipt, refund) and
-reports one of `VERIFIED`, `PARTIAL`, `REPORTED_ONLY`, `CONTRADICTORY`,
-`UNAVAILABLE`, or `UNKNOWN`.
+reports one of `VERIFIED`, `REFUNDED`, `FAILED`, `PARTIAL`, `PENDING`,
+`REPORTED_ONLY`, `CONTRADICTORY`, `UNAVAILABLE`, or `UNKNOWN`.
 
 **A provider's success status is a `REPORTED` claim and never raises the level.**
 If the provider says `SUCCESS` but no decisive on-chain evidence confirms it, the
 assurance level is not `VERIFIED` — the report says so explicitly, and the
 Markdown document, the main page and the operations console all render the view.
-When the destination delivery *is* independently confirmed but the received amount
-is below the quote's expected output, the level is `PARTIAL` (never `VERIFIED`),
-and both the expected and observed amounts plus the shortfall are disclosed. A
-shortfall against an *unconfirmed* delivery is not classified as partial; the
-difference is disclosed as a limitation instead. Amounts never create a
-confirmation.
+The three terminal states are distinguished by their evidence: a refund confirmed
+on-chain is `REFUNDED` (never presented as a successful settlement), a failure
+established by decisive evidence is `FAILED` (a merely *reported* failure stays
+unverified), and a confirmed deposit whose swap is still progressing is `PENDING`
+(not `UNKNOWN`). When the destination delivery *is* independently confirmed but the
+received amount is below the quote's expected output, the level is `PARTIAL` (never
+`VERIFIED`), and both the expected and observed amounts plus the shortfall are
+disclosed. A shortfall against an *unconfirmed* delivery is not classified as
+partial; the difference is disclosed as a limitation instead. Amounts never create
+a confirmation.
 The same capability is exercised end to end in `tests/test_near_acceptance.py`,
 which drives the real server and the real report builder, so it cannot regress
 into an unused library.
@@ -229,7 +233,7 @@ settle → assurance flow:
 
 The lifecycle never signs, submits, or moves funds: it obtains a deposit address,
 hands it to the operator, and observes the outcome. `tests/test_near_lifecycle.py`
-(24 tests) and the lifecycle acceptance tests in `tests/test_near_api.py` drive the
+(29 tests) and the lifecycle acceptance tests in `tests/test_near_api.py` drive the
 real server and the real lifecycle code. The console walks the same six steps in
 the **Intents Lifecycle** tab, gating the deposit form behind the approve/reject
 controls.
@@ -329,11 +333,11 @@ a bare interpreter.
 **1. Run the tests.**
 
 ```sh
-python -m pytest tests/ --collect-only -q   # 947 tests collected
-python -m pytest tests/ -q                  # 923 passed, 24 skipped
+python -m pytest tests/ --collect-only -q   # 960 tests collected
+python -m pytest tests/ -q                  # 936 passed, 24 skipped
 ```
-→ `923 passed, 24 skipped`. The skips are the PostgreSQL integration
-tests; set `TRACESETTLE_TEST_PG_DSN` to a real server to run them (947 pass).
+→ `936 passed, 24 skipped`. The skips are the PostgreSQL integration
+tests; set `TRACESETTLE_TEST_PG_DSN` to a real server to run them (960 pass).
 
 **2. Prove the enforcement boundary: a permitted request executes, a suspicious
 one cannot.**
@@ -386,7 +390,7 @@ curl -sS -X POST http://127.0.0.1:8080/api/guard/sign \
 curl -sS http://127.0.0.1:8080/api/guard/invariants \
   | python3 -c 'import sys,json;d=json.load(sys.stdin);print("all hold:",d["all_hold"]);[print(" ",i["name"]) for i in d["invariants"]]'
 ```
-→ `all hold: True` and the twenty-two invariant names, including the six NEAR
+→ `all hold: True` and the twenty-three invariant names, including the seven NEAR
 ones (`near_policy_must_be_in_force`, `near_native_scope_gap_is_always_stated`,
 `near_function_call_key_cannot_transfer_near`,
 `near_provider_success_is_never_verified_without_evidence`,
@@ -707,7 +711,7 @@ transaction request ──▶ │ guard/rules.py      7 controls, all run  │
                         │                     validate, then execute │
                         │ guard/audit.py      hash-chained records  │
                         │ guard/monitor.py    counters + incidents  │
-                        │ guard/invariants.py 22 checked guarantees │
+                        │ guard/invariants.py 23 checked guarantees │
                         └────────────────────┬─────────────────────┘
                                              │ ALLOW + authorization
                                              ▼
@@ -778,7 +782,7 @@ identical decisions.
 | `tracesettle/guard/service.py` | Orchestration: controls → authorization → monitor → audit. |
 | `tracesettle/guard/state.py` | Durable state: `GuardStateStore` (SQLite), backend-aware `open_state_store`. |
 | `tracesettle/guard/state_pg.py` | Optional PostgreSQL backend: shared nonces, counters, revocations, idempotency. |
-| `tracesettle/guard/invariants.py` | The twenty-two structural guarantees, checked by execution. |
+| `tracesettle/guard/invariants.py` | The twenty-three structural guarantees, checked by execution. |
 | `tracesettle/guard/api.py` | Guard HTTP routing and JSON serialization. |
 | `tracesettle/guard/console.py` | The security operations console page. |
 | `docs/TRANSACTION_SECURITY.md` | The security layer in full, including what it does not do. |
@@ -787,7 +791,7 @@ identical decisions.
 | `.github/workflows/ci.yml` | CI: tests, static analysis, Docker build + runtime, demo determinism. |
 | `demo/demonstrate.py` | Read-only walkthrough (live, or `--offline` replay of captures). |
 | `demo/replay_opener.py` | Offline transport that replays `evidence/raw/` through the real code. |
-| `tests/` | 947 tests (24 PostgreSQL tests skip without `TRACESETTLE_TEST_PG_DSN`). `evidence/raw/` fixtures are real captures; `tests/fixtures/synthetic/` are clearly labelled synthetic. |
+| `tests/` | 960 tests (24 PostgreSQL tests skip without `TRACESETTLE_TEST_PG_DSN`). `evidence/raw/` fixtures are real captures; `tests/fixtures/synthetic/` are clearly labelled synthetic. |
 | `PHASE1_FEASIBILITY.md` | Phase 1 feasibility and API verification. |
 | `submission/` | Hackathon artifacts: API payload shape, technical summary, demo post draft, publication checklist. |
 | `docs/official/` | NEAR documentation captured during Phase 1. |
@@ -879,7 +883,7 @@ variable and all documented in `docs/TRANSACTION_SECURITY.md`:
   replay-nonce store all have explicit caps, so a flood cannot exhaust memory.
   When durable state is configured, spent nonces and the limit counters live in
   SQLite instead, so they survive a restart (see **Durable state** below).
-- **Structural invariants, checked by execution.** Twenty-two guarantees at
+- **Structural invariants, checked by execution.** Twenty-three guarantees at
   `GET /api/guard/invariants`, each mutation-tested so a checker that cannot fail
   is treated as a defect.
 - **Honest audit claim.** In-place modification of an audit record is detectable;
@@ -1086,7 +1090,7 @@ immutable commit SHA (not a moving tag), and cancels superseded runs.
 ## Tests
 
 ```sh
-python3 -m pytest tests/ -q          # 923 passed, 24 skipped (947 with a server)
+python3 -m pytest tests/ -q          # 936 passed, 24 skipped (960 with a server)
 python3 -m pytest tests/test_guard_authorization.py -q
 python3 -m pytest tests/test_guard_invariants.py -q
 python3 -m pytest tests/test_guard_end_to_end.py -q
