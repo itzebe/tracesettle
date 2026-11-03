@@ -271,3 +271,95 @@ def test_assurance_dict_is_serializable():
     data = assurance.to_dict()
     assert data["level"] == "UNKNOWN"
     assert isinstance(data["stages"], list)
+
+
+# --- amount-based partial settlement ----------------------------------------
+
+
+def _delivered_result():
+    return _result(
+        OverallOutcome.SETTLED_VERIFIED,
+        [
+            (Stage.SOURCE_CHAIN_DEPOSIT, StageState.CONFIRMED),
+            (Stage.BRIDGE_DEPOSIT_CREDIT, StageState.CONFIRMED),
+            (Stage.NEAR_SETTLEMENT, StageState.CONFIRMED),
+            (Stage.DESTINATION_CHAIN_DELIVERY, StageState.CONFIRMED),
+        ],
+    )
+
+
+def test_a_confirmed_shortfall_is_partial_and_not_verified():
+    assurance = settlement_assurance_from_result(
+        _delivered_result(), expected_amount_out="1000000", observed_amount_out="990000"
+    )
+    assert assurance.level is AssuranceLevel.PARTIAL
+    assert assurance.independently_verified is False
+    assert assurance.partial_settlement is True
+    assert assurance.shortfall == "10000"
+    assert assurance.expected_amount_out == "1000000"
+    assert assurance.observed_amount_out == "990000"
+
+
+def test_a_full_delivery_stays_verified():
+    assurance = settlement_assurance_from_result(
+        _delivered_result(), expected_amount_out="1000000", observed_amount_out="1000000"
+    )
+    assert assurance.level is AssuranceLevel.VERIFIED
+    assert assurance.independently_verified is True
+    assert assurance.shortfall == "0"
+
+
+def test_an_over_delivery_is_not_a_shortfall():
+    assurance = settlement_assurance_from_result(
+        _delivered_result(), expected_amount_out="1000000", observed_amount_out="1000001"
+    )
+    assert assurance.level is AssuranceLevel.VERIFIED
+    assert assurance.shortfall == "0"
+
+
+def test_a_shortfall_without_a_confirmed_delivery_is_not_partial():
+    """A lower amount against an unconfirmed delivery is unverified, not partial."""
+    result = _result(
+        OverallOutcome.SETTLED_REPORTED_ONLY,
+        [
+            (Stage.NEAR_SETTLEMENT, StageState.REPORTED),
+            (Stage.DESTINATION_CHAIN_DELIVERY, StageState.REPORTED),
+        ],
+    )
+    assurance = settlement_assurance_from_result(
+        result, expected_amount_out="1000000", observed_amount_out="900000"
+    )
+    assert assurance.level is not AssuranceLevel.PARTIAL
+    assert assurance.independently_verified is False
+    assert any("not independently confirmed" in limitation for limitation in assurance.limitations)
+
+
+def test_a_malformed_amount_is_never_turned_into_a_numeric_claim():
+    for expected, observed in [("abc", "100"), ("100", "x"), ("0", "100"), ("100", None)]:
+        assurance = settlement_assurance_from_result(
+            _delivered_result(), expected_amount_out=expected, observed_amount_out=observed
+        )
+        assert assurance.shortfall is None
+        assert assurance.expected_amount_out is None
+
+
+def test_a_contradiction_is_not_masked_by_a_shortfall():
+    from tracesettle.model import Contradiction
+
+    result = ReconciliationResult(
+        stages=(
+            StageAssessment(
+                stage=Stage.DESTINATION_CHAIN_DELIVERY,
+                state=StageState.CONFIRMED,
+                summary="confirmed",
+            ),
+        ),
+        last_confirmed_stage=None,
+        outcome=OverallOutcome.CONTRADICTORY,
+        summary="conflict",
+        contradictions=(Contradiction(description="sources disagree", evidence_ids=("ev-1",)),),
+    )
+    assurance = settlement_assurance_from_result(
+        result, expected_amount_out="1000000", observed_amount_out="900000"
+    )
+    assert assurance.level is AssuranceLevel.CONTRADICTORY

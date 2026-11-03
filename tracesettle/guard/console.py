@@ -170,6 +170,7 @@ CONSOLE_HTML = """<!DOCTYPE html>
     <li role="presentation"><button role="tab" id="tab-guard" aria-controls="panel-guard" aria-selected="false">Transaction Guard</button></li>
     <li role="presentation"><button role="tab" id="tab-lab" aria-controls="panel-lab" aria-selected="false">Attack Simulations</button></li>
     <li role="presentation"><button role="tab" id="tab-near" aria-controls="panel-near" aria-selected="false">NEAR Agent Security</button></li>
+    <li role="presentation"><button role="tab" id="tab-intents" aria-controls="panel-intents" aria-selected="false">Intents Lifecycle</button></li>
     <li role="presentation"><button role="tab" id="tab-investigations" aria-controls="panel-investigations" aria-selected="false">Investigations</button></li>
     <li role="presentation"><button role="tab" id="tab-incidents" aria-controls="panel-incidents" aria-selected="false">Security Incidents</button></li>
     <li role="presentation"><button role="tab" id="tab-policies" aria-controls="panel-policies" aria-selected="false">Policies &amp; Controls</button></li>
@@ -291,6 +292,73 @@ CONSOLE_HTML = """<!DOCTYPE html>
         <button class="act" type="button" id="near-eval-attack">Evaluate an unapproved destination</button>
       </div>
       <div id="near-eval-output"></div>
+    </div>
+  </section>
+
+  <section role="tabpanel" id="panel-intents" aria-labelledby="tab-intents">
+    <h1>Intents Lifecycle</h1>
+    <p class="lede">One NEAR Intents transaction, from authorization to settlement assurance.
+      Each step inspects the real parameters, records its evidence durably, and is honest about
+      what it does and does not establish. Nothing here signs, broadcasts, or holds a key: the
+      only step that moves money is your own wallet funding the deposit address, which this
+      product shows but never performs.</p>
+    <div class="note sim">Provider endpoints are public and read-only. A live quote issues a
+      deposit address; a dry quote does not. A provider success message is a reported claim, never
+      proof of settlement.</div>
+
+    <div class="panel">
+      <h2>1. Create and authorize</h2>
+      <p class="small">The guard evaluates the actual parameters against the server-resolved policy
+        and the access-key scope. Only ALLOW issues a transaction-bound authorization.</p>
+      <form id="intents-create" autocomplete="off">
+        <div class="row">
+          <div class="field" style="flex:1 1 160px"><label for="i-service">Service</label>
+            <input type="text" id="i-service" value="treasury-agent"></div>
+          <div class="field" style="flex:1 1 140px"><label for="i-op">Operation</label>
+            <input type="text" id="i-op" value="SETTLEMENT"></div>
+          <div class="field" style="flex:0 1 90px"><label for="i-chain">Chain</label>
+            <input type="text" id="i-chain" value="eth"></div>
+          <div class="field" style="flex:0 1 100px"><label for="i-asset">Asset</label>
+            <input type="text" id="i-asset" value="USDC"></div>
+          <div class="field" style="flex:0 1 130px"><label for="i-amount">Amount (base units)</label>
+            <input type="text" id="i-amount" value="1000000"></div>
+        </div>
+        <div class="row">
+          <div class="field" style="flex:2 1 320px"><label for="i-origin">Origin asset id</label>
+            <input type="text" id="i-origin" value="nep141:eth-0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48.omft.near"></div>
+          <div class="field" style="flex:2 1 320px"><label for="i-dest">Destination asset id</label>
+            <input type="text" id="i-dest" value="nep141:base-0x833589fcd6edb6e08f4c7c32d4f71b54bda02913.omft.near"></div>
+        </div>
+        <div class="row">
+          <div class="field" style="flex:2 1 320px"><label for="i-recipient">Recipient</label>
+            <input type="text" id="i-recipient" value="0x4e6d3A556e485188E9C9a528bc72c88BD92BD735"></div>
+          <div class="field" style="flex:0 0 auto"><button class="act primary" type="submit" id="i-submit">Authorize</button></div>
+        </div>
+      </form>
+      <div id="intents-create-output" aria-live="polite"></div>
+    </div>
+
+    <div class="panel">
+      <h2>2. Quote, deposit, status, assurance</h2>
+      <p class="small">Actions run against the intent created above. A live quote is refused unless
+        the stored decision permits signing.</p>
+      <div class="actions" style="margin-bottom:12px">
+        <button class="act" type="button" id="i-dry-quote">Request dry quote</button>
+        <button class="act" type="button" id="i-live-quote">Request live quote</button>
+        <button class="act" type="button" id="i-status">Refresh status</button>
+        <button class="act" type="button" id="i-assurance">Run settlement assurance</button>
+        <button class="act" type="button" id="i-list">List my intents</button>
+      </div>
+      <div id="intents-step-output" aria-live="polite"></div>
+    </div>
+
+    <div class="panel">
+      <h2>Provider assets</h2>
+      <p class="small">The live supported-asset list from the provider (read-only).</p>
+      <div class="actions" style="margin-bottom:12px">
+        <button class="act" type="button" id="i-tokens">Load assets</button>
+      </div>
+      <div id="intents-tokens"></div>
     </div>
   </section>
 
@@ -421,6 +489,7 @@ function showTab(name) {
     overview: loadOverview, guard: () => {}, lab: loadLab, investigations: () => {},
     incidents: () => loadIncidents("OPEN"), policies: loadPolicies, integrations: loadIntegrations,
     near: loadNear,
+    intents: loadIntents,
     audit: loadAudit, settings: loadSettings,
   };
   if (loaders[name]) { loaders[name](); }
@@ -599,7 +668,7 @@ async function loadNear() {
       const s = scope.scope[name];
       const applicable = (s.applicable_controls || []).map(esc).join(", ") || "none";
       const gap = (s.non_applicable_controls || []).map(esc).join(", ") || "none";
-      return '<tr><td>' + esc(name) + "</td><td class=\"small\">" + applicable +
+      return '<tr><td>' + esc(name) + '</td><td class="small">' + applicable +
         '</td><td class="small">' + gap + "</td></tr>";
     }).join("");
     scopeEl.innerHTML = '<div class="note sim">' + esc(scope.note) + "</div>" +
@@ -641,7 +710,7 @@ async function runNearAttacks() {
         return '<div class="card"><h3>' + esc(r.scenario_id) + ". " + esc(r.title) + "</h3>" +
           '<div class="kv small"><dt>Expected</dt><dd class="small">' + esc(r.expected) + "</dd>" +
           "<dt>Observed</dt><dd>" + status(r.observed) + "</dd>" +
-          "<dt>Detail</dt><dd class=\"small\">" + esc(r.detail) + "</dd></div>" +
+          '<dt>Detail</dt><dd class="small">' + esc(r.detail) + "</dd></div>" +
           '<div class="small ' + cls + '">' + (r.passed ? "PASS" : "FAIL") + "</div></div>";
       }).join("") +
       '<div class="note ' + (data.all_passed ? "ok" : "bad") + '">' +
@@ -674,6 +743,97 @@ async function evalNear(approved) {
   } catch (err) { out.innerHTML = '<div class="note bad">' + esc(err.message) + "</div>"; }
 }
 
+/* ---- NEAR Intents lifecycle ---- */
+let IN = { intentId: null };
+
+async function loadIntents() {
+  const out = document.getElementById("intents-create-output");
+  out.innerHTML = "";
+  const list = await api("GET", "/api/guard/near/lifecycle");
+  document.getElementById("i-submit").onclick = createIntent;
+  document.getElementById("intents-create").onsubmit = (e) => { e.preventDefault(); createIntent(); };
+  document.getElementById("i-dry-quote").onclick = () => stepIntent("quote", { dry: true });
+  document.getElementById("i-live-quote").onclick = () => stepIntent("quote", { dry: false });
+  document.getElementById("i-status").onclick = () => stepIntent("status", {});
+  document.getElementById("i-assurance").onclick = () => stepIntent("assurance", {});
+  document.getElementById("i-list").onclick = listIntents;
+  document.getElementById("i-tokens").onclick = loadTokens;
+  if (list && list.intents && list.intents.length) {
+    out.innerHTML = '<div class="note">' + esc(list.intents.length) +
+      " intent(s) recorded for the local owner. Create a new one below.</div>";
+  }
+}
+
+function intentFormPayload() {
+  return {
+    service_id: document.getElementById("i-service").value,
+    operation: document.getElementById("i-op").value,
+    chain: document.getElementById("i-chain").value,
+    asset: document.getElementById("i-asset").value,
+    amount: document.getElementById("i-amount").value,
+    origin_asset: document.getElementById("i-origin").value,
+    destination_asset: document.getElementById("i-dest").value,
+    recipient: document.getElementById("i-recipient").value,
+    refund_to: document.getElementById("i-recipient").value,
+    scope: "INTENTS",
+  };
+}
+
+async function createIntent() {
+  const out = document.getElementById("intents-create-output");
+  out.innerHTML = loading("Authorizing…");
+  try {
+    const data = await api("POST", "/api/guard/near/lifecycle", {
+      transaction: intentFormPayload(),
+    });
+    IN.intentId = data.intent_id;
+    const d = data.decision || {};
+    out.innerHTML = '<div class="card"><h3>Intent ' + esc(data.intent_id) + "</h3>" +
+      '<div class="kv"><dt>Outcome</dt><dd>' + status(d.outcome) +
+      "</dd><dt>Permits signing</dt><dd>" + esc(data.permits_signing) +
+      "</dd><dt>State</dt><dd>" + esc(data.state) +
+      '</dd><dt>Summary</dt><dd class="small">' + esc(d.summary || "") + "</dd></div></div>";
+  } catch (err) { out.innerHTML = '<div class="note bad">' + esc(err.message) + "</div>"; }
+}
+
+async function stepIntent(action, body) {
+  const out = document.getElementById("intents-step-output");
+  if (!IN.intentId) { out.innerHTML = '<div class="note bad">Create an intent first.</div>'; return; }
+  out.innerHTML = loading("Running " + action + "…");
+  try {
+    const data = await api("POST", "/api/guard/near/lifecycle/" + IN.intentId + "/" + action, body || {});
+    out.innerHTML = '<div class="card"><h3>' + esc(action) + "</h3>" +
+      '<pre class="small">' + esc(JSON.stringify(data, null, 2)) + "</pre></div>";
+  } catch (err) { out.innerHTML = '<div class="note bad">' + esc(err.message) + "</div>"; }
+}
+
+async function listIntents() {
+  const out = document.getElementById("intents-step-output");
+  out.innerHTML = loading("Loading…");
+  try {
+    const data = await api("POST", "/api/guard/near/lifecycle/list", {});
+    const rows = (data.intents || []).map((i) =>
+      '<tr><td class="small">' + esc(i.intent_id) + "</td><td>" + esc(i.state) +
+      '</td><td class="small">' + esc(i.provider_status || "—") + "</td></tr>").join("");
+    out.innerHTML = '<div class="panel"><h3>Intents (' + esc(data.owner) + ")</h3>" +
+      '<table class="table"><thead><tr><th>Id</th><th>State</th><th>Provider status</th></tr></thead>' +
+      "<tbody>" + (rows || '<tr><td colspan="3">none</td></tr>') + "</tbody></table></div>";
+  } catch (err) { out.innerHTML = '<div class="note bad">' + esc(err.message) + "</div>"; }
+}
+
+async function loadTokens() {
+  const el = document.getElementById("intents-tokens");
+  el.innerHTML = loading("Loading assets…");
+  try {
+    const data = await api("GET", "/api/guard/near/lifecycle/tokens");
+    el.innerHTML = '<div class="note">' + esc(data.message) + "</div>" +
+      '<table class="table"><thead><tr><th>Asset id</th><th>Chain</th><th>Symbol</th></tr></thead><tbody>' +
+      (data.assets || []).slice(0, 40).map((a) => '<tr><td class="small">' + esc(a.asset_id) +
+        "</td><td>" + esc(a.blockchain) + "</td><td>" + esc(a.symbol) + "</td></tr>").join("") +
+      "</tbody></table>";
+  } catch (err) { el.innerHTML = '<div class="note bad">' + esc(err.message) + "</div>"; }
+}
+
 async function loadLab() {
   const el = document.getElementById("lab-scenarios");
   el.innerHTML = loading("Loading scenarios…");
@@ -682,9 +842,9 @@ async function loadLab() {
     document.getElementById("lab-output").innerHTML =
       '<div class="note sim">' + esc(data.note) + "</div>";
     el.innerHTML = '<div class="grid two">' + data.scenarios.map((s) =>
-      '<div class="card"><h2>' + esc(s.title) + "</h2><p class=\"small\">" + esc(s.narrative) +
+      '<div class="card"><h2>' + esc(s.title) + '</h2><p class="small">' + esc(s.narrative) +
       '</p><div class="kv small"><dt>Expected</dt><dd>' + status(s.expected_decision) +
-      "</dd></div><div class=\"actions\"><button class=\"act primary\" type=\"button\" " +
+      '</dd></div><div class="actions"><button class="act primary" type="button" ' +
       'data-scenario="' + esc(s.id) + '">Run simulation</button></div></div>').join("") + "</div>";
     el.querySelectorAll("button[data-scenario]").forEach((b) => {
       b.addEventListener("click", () => runScenario(b.getAttribute("data-scenario"), data.scenarios));
@@ -846,11 +1006,11 @@ async function loadIncidents(filter) {
 function renderIncidentList(el, incidents, compact) {
   if (!incidents.length) { el.innerHTML = empty("No incidents in this view."); return; }
   el.innerHTML = "<table><thead><tr><th>Severity</th><th>Status</th><th>Incident</th>" +
-    (compact ? "" : "<th class=\"hide-sm\">Service</th><th class=\"hide-sm\">Occurrences</th><th>Updated</th>") +
+    (compact ? "" : '<th class="hide-sm">Service</th><th class="hide-sm">Occurrences</th><th>Updated</th>') +
     "</tr></thead><tbody>" + incidents.map((i) => {
       let row = "<tr><td>" + sev(i.severity) + "</td><td>" + status(i.status) + "</td><td>" +
-        "<div>" + esc(i.title) + "</div><div class=\"small muted\"><code>" + esc(i.code) +
-        "</code> · " + esc(i.incident_id) + "</div><div class=\"small\">" + esc(i.detail) + "</div>" +
+        "<div>" + esc(i.title) + '</div><div class="small muted"><code>' + esc(i.code) +
+        "</code> · " + esc(i.incident_id) + '</div><div class="small">' + esc(i.detail) + "</div>" +
         (compact ? "" : incidentActions(i)) + "</td>";
       if (!compact) {
         row += '<td class="hide-sm">' + esc(i.service_id || "") + '</td><td class="hide-sm">' +
@@ -932,7 +1092,7 @@ async function loadIntegrations() {
     el.innerHTML = '<p class="small">A signing integration calls the guard, receives an ' +
       "authorization only for an ALLOW decision, then validates it before signing. The reference " +
       "signer shipped here is a working adapter; a real signer keeps the same validation and " +
-      "replaces only the simulated executor.</p><div class=\"kv\">" +
+      'replaces only the simulated executor.</p><div class="kv">' +
       "<dt>Endpoint</dt><dd><code>POST /api/guard/evaluate</code> then <code>POST /api/guard/sign</code></dd>" +
       "<dt>Authorization TTL</dt><dd>" + esc(m.authorization.ttl_seconds) + " seconds</dd>" +
       "<dt>Key identifier</dt><dd><code>" + esc(m.authorization.key_id) + "</code></dd>" +
@@ -996,7 +1156,7 @@ async function loadSettings() {
       "<dt>Authorization key</dt><dd><code>" + esc(m.authorization.key_id) + "</code> — " +
         (m.authorization.ephemeral_key ? "ephemeral" : "configured") + "</dd>" +
       "<dt>Audit records</dt><dd>" + esc(m.audit.length) + "</dd>" +
-      "<dt>Audit head digest</dt><dd><code class=\"mono\">" + esc(m.audit.head_digest) + "</code></dd>" +
+      '<dt>Audit head digest</dt><dd><code class="mono">' + esc(m.audit.head_digest) + "</code></dd>" +
       "<dt>Open incidents</dt><dd>" + esc(m.counts.open_incidents || 0) + "</dd></div>" +
       '<p class="small muted">The authorization signing key is never displayed. Configure one with ' +
       "<code>TRACESETTLE_GUARD_AUTH_KEY</code> (hex or base64, at least 32 bytes) to keep " +

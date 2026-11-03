@@ -16,7 +16,7 @@ FIXTURE_DIR = pathlib.Path(__file__).resolve().parent.parent / "tracesettle" / "
 
 def test_near_invariants_are_registered():
     near = [name for name in inv.INVARIANTS if name.startswith("near_")]
-    assert len(near) == 5
+    assert len(near) == 6
     assert all(name in inv.INVARIANT_DESCRIPTIONS for name in near)
 
 
@@ -72,6 +72,20 @@ def test_near_settlement_invariant_notices_a_false_verification(monkeypatch):
 def test_near_invariants_hold_unmutated():
     for name in [n for n in inv.INVARIANTS if n.startswith("near_")]:
         assert inv.INVARIANTS[name]().holds is True
+
+
+def test_near_partial_settlement_invariant_notices_a_false_verification(monkeypatch):
+    """Mutation: if the amount comparison were dropped, the invariant must fail.
+
+    Neutralizing the shortfall computation reproduces the original defect (a
+    confirmed delivery of less than expected reported as VERIFIED). The invariant
+    must notice.
+    """
+    from tracesettle.near import settlement as settlement_mod
+
+    monkeypatch.setattr(settlement_mod, "_amount_shortfall", lambda expected, observed: (None, None))
+    result = inv.INVARIANTS["near_partial_settlement_is_never_verified"]()
+    assert result.holds is False
 
 
 def test_near_policy_selection_invariant_fails_if_a_client_fixture_is_honoured(monkeypatch):

@@ -19,6 +19,7 @@ from __future__ import annotations
 import hmac
 import json
 import logging
+import os
 import signal
 import socket
 import sys
@@ -52,7 +53,13 @@ _AUTH_REFUSED = object()
 #: The guard POST routes that carry a service identity and therefore require
 #: per-service authentication when a credential registry is configured.
 _SERVICE_OPERATION_PATHS = frozenset(
-    {"/api/guard/evaluate", "/api/guard/sign", "/api/guard/near/agent-evaluate"}
+    {
+        "/api/guard/evaluate",
+        "/api/guard/sign",
+        "/api/guard/near/agent-evaluate",
+        "/api/guard/near/lifecycle",
+        "/api/guard/near/lifecycle/list",
+    }
 )
 
 #: Distinguishes "no registry argument was supplied" (load from configuration)
@@ -508,7 +515,7 @@ class Handler(BaseHTTPRequestHandler):
         # identity; the administrative routes (incident status) are gated by the
         # API key alone, keeping the two authentication planes separate.
         authenticated: str | None = None
-        if path in _SERVICE_OPERATION_PATHS:
+        if path in _SERVICE_OPERATION_PATHS or path.startswith("/api/guard/near/lifecycle/"):
             authenticated = self._authenticate_service()
             if authenticated is _AUTH_REFUSED:
                 return
@@ -715,6 +722,37 @@ def _build_guard_service() -> GuardService:
     return GuardService(policy=policy, audit=audit, authority=authority, state_store=state_store)
 
 
+def _build_lifecycle(guard_service: GuardService, *, upstream_cache: TtlCache | None = None) -> Any:
+    """Build the NEAR Intents lifecycle, or ``None`` when it is not enabled.
+
+    The lifecycle can issue a live (fundable) quote, so it is an explicit
+    operator decision: it is built only when ``TRACESETTLE_NEAR_LIFECYCLE`` is
+    on. It needs a durable store; when ``TRACESETTLE_INTENTS_DB`` is unset it
+    falls back to an in-process store so the loopback demo works, and that
+    fallback is reported honestly by the settings endpoint.
+
+    A configured database that cannot be opened is a hard failure: a security
+    record must not silently fall back to a weaker default.
+    """
+    if not config.NEAR_LIFECYCLE_ENABLED:
+        return None
+    from .intents_store import IntentStore
+    from .near.lifecycle import NearIntentsLifecycle
+
+    if config.INTENTS_DB:
+        store = IntentStore(config.INTENTS_DB)
+    else:
+        import tempfile
+
+        store = IntentStore(os.path.join(tempfile.mkdtemp(prefix="tracesettle-intents-"), "intents.db"))
+    client = HttpClient(
+        timeout=config.REQUEST_TIMEOUT_SECONDS,
+        max_attempts=config.MAX_ATTEMPTS,
+        cache=upstream_cache,
+    )
+    return NearIntentsLifecycle(guard_service=guard_service, http_client=client, store=store)
+
+
 def _load_service_registry() -> Any:
     """Build the per-service credential registry from configuration, or ``None``.
 
@@ -743,6 +781,7 @@ class InvestigationServer(ThreadingHTTPServer):
         upstream_cache: TtlCache | None = None,
         guard_service: GuardService | None = None,
         guard_limiter: TokenBucketLimiter | None = None,
+        lifecycle: Any = _UNSET,
         service_registry: Any = _UNSET,
     ):
         super().__init__(address, Handler)
@@ -768,7 +807,12 @@ class InvestigationServer(ThreadingHTTPServer):
             config.UPSTREAM_CACHE_TTL_SECONDS, max_entries=config.UPSTREAM_CACHE_MAX_ENTRIES
         )
         self.guard_service = guard_service or _build_guard_service()
-        self.guard_api = GuardAPI(self.guard_service)
+        self.lifecycle = (
+            _build_lifecycle(self.guard_service, upstream_cache=self.upstream_cache)
+            if lifecycle is _UNSET
+            else lifecycle
+        )
+        self.guard_api = GuardAPI(self.guard_service, lifecycle=self.lifecycle)
         self.guard_limiter = guard_limiter or TokenBucketLimiter(
             config.GUARD_RATE_LIMIT_PER_MINUTE, config.GUARD_RATE_LIMIT_BURST
         )

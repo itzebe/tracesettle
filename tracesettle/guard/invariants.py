@@ -866,6 +866,43 @@ def _near_provider_success_is_never_verified_without_evidence():
     )
 
 
+def _near_partial_settlement_is_never_verified():
+    """A confirmed delivery that received less than expected is never VERIFIED."""
+    from ..model import OverallOutcome, ReconciliationResult, Stage, StageAssessment, StageState
+    from ..near.settlement import AssuranceLevel, settlement_assurance_from_result
+
+    result = ReconciliationResult(
+        stages=(
+            StageAssessment(
+                stage=Stage.DESTINATION_CHAIN_DELIVERY, state=StageState.CONFIRMED, summary="ok"
+            ),
+        ),
+        last_confirmed_stage=Stage.DESTINATION_CHAIN_DELIVERY,
+        outcome=OverallOutcome.SETTLED_VERIFIED,
+        summary="delivered",
+    )
+    assurance = settlement_assurance_from_result(
+        result, expected_amount_out="1000000", observed_amount_out="990000"
+    )
+    if assurance.level is AssuranceLevel.VERIFIED or assurance.independently_verified:
+        return InvariantResult(
+            "near_partial_settlement_is_never_verified",
+            False,
+            "a confirmed shortfall was reported as fully verified",
+        )
+    if assurance.level is not AssuranceLevel.PARTIAL:
+        return InvariantResult(
+            "near_partial_settlement_is_never_verified",
+            False,
+            "a confirmed shortfall was not classified as PARTIAL",
+        )
+    return InvariantResult(
+        "near_partial_settlement_is_never_verified",
+        True,
+        "a confirmed shortfall is classified PARTIAL and never independently verified",
+    )
+
+
 INVARIANTS: dict[str, Callable[[], InvariantResult]] = {
     "non_allow_never_authorizes": _non_allow_never_authorizes,
     "refusal_never_reaches_the_executor": _refusal_never_reaches_the_executor,
@@ -894,6 +931,7 @@ INVARIANTS: dict[str, Callable[[], InvariantResult]] = {
     "near_provider_success_is_never_verified_without_evidence": (
         _near_provider_success_is_never_verified_without_evidence
     ),
+    "near_partial_settlement_is_never_verified": _near_partial_settlement_is_never_verified,
 }
 
 #: Human-readable statement of each guarantee, for the console and the docs.
@@ -919,6 +957,7 @@ INVARIANT_DESCRIPTIONS: dict[str, str] = {
     "near_native_scope_gap_is_always_stated": "A native NEAR/EVM/Solana request is never described as protected by the Intents destinations, budget, timelock, schedule or owner approval.",
     "near_function_call_key_cannot_transfer_near": "A NEAR function-call key is never treated as able to transfer NEAR or attach NEAR tokens to a call.",
     "near_provider_success_is_never_verified_without_evidence": "A provider success status never yields an independently-verified settlement level without decisive on-chain evidence.",
+    "near_partial_settlement_is_never_verified": "A destination that received less than the quote's expected output is classified PARTIAL and is never independently verified.",
 }
 
 

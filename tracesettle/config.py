@@ -15,6 +15,12 @@ from dataclasses import dataclass
 
 ONECLICK_BASE = os.environ.get("TRACESETTLE_ONECLICK_BASE", "https://1click.chaindefuser.com")
 ONECLICK_STATUS_PATH = "/v0/status"
+#: The documented public 1Click endpoints used by the live lifecycle client.
+#: Source: the vendored OpenAPI documents (``info.version 0.1.10``) under
+#: ``docs/official/api-reference_oneclick_*.md``. No endpoint is invented.
+ONECLICK_TOKENS_PATH = "/v0/tokens"
+ONECLICK_QUOTE_PATH = "/v0/quote"
+ONECLICK_DEPOSIT_SUBMIT_PATH = "/v0/deposit/submit"
 
 SOLVER_RELAY_URL = os.environ.get(
     "TRACESETTLE_SOLVER_RELAY_URL", "https://solver-relay-v2.chaindefuser.com/rpc"
@@ -295,6 +301,20 @@ NEAR_ALLOW_CLIENT_POLICY_SELECTION = (
         "yes",
         "on",
     }
+)
+
+#: Path to the durable NEAR Intents lifecycle database (SQLite). Unset means the
+#: lifecycle keeps no durable record, which is the loopback default; a public
+#: deployment that offers the lifecycle must set it so investigations survive a
+#: restart. The file holds no signing material.
+INTENTS_DB = os.environ.get("TRACESETTLE_INTENTS_DB") or None
+
+#: Whether the NEAR Intents lifecycle routes are enabled at all. Off by default:
+#: the lifecycle can issue a live quote (a fundable deposit address) and so is an
+#: explicit operator decision, not something a public bind turns on silently.
+NEAR_LIFECYCLE_ENABLED = (
+    os.environ.get("TRACESETTLE_NEAR_LIFECYCLE", "").strip().lower()
+    in {"1", "true", "yes", "on"}
 )
 
 # ---------------------------------------------------------------------------

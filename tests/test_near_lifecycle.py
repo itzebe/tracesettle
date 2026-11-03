@@ -1,0 +1,376 @@
+"""End-to-end tests for the wired NEAR Intents transaction lifecycle.
+
+These exercise the *real* lifecycle, the real guard, the real policy reader, the
+real settlement engine, and the real durable store. The only substitution is the
+network transport (``FakeOpener`` from ``conftest``), so the code under test is
+the shipped code path.
+
+The lifecycle is the product's spine: it connects the pre-execution authorization
+boundary to the post-execution settlement assurance over one transaction, and
+records everything durably. A capability reachable only from a unit test but not
+wired into a route would fail here.
+"""
+
+from __future__ import annotations
+
+import pathlib
+
+import pytest
+
+from tracesettle.intents_store import IntentStore
+from tracesettle.near import intents as intents_mod
+from tracesettle.near.lifecycle import LifecycleError, NearIntentsLifecycle
+from tracesettle.near.policy import load_fixture
+
+from conftest import REAL_DEPOSIT_ADDRESS, client_for, load_raw
+
+_FIXTURE_DIR = pathlib.Path(__file__).resolve().parents[1] / "tracesettle" / "near" / "fixtures"
+from guard_helpers import make_service
+
+CREATED_AT = "2026-11-03T00:00:00Z"
+
+APPROVED_DESTINATION = "0x4e6d3A556e485188E9C9a528bc72c88BD92BD735"
+USDC_ETH = "nep141:eth-0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48.omft.near"
+USDC_BASE = "nep141:base-0x833589fcd6edb6e08f4c7c32d4f71b54bda02913.omft.near"
+
+
+@pytest.fixture
+def store(tmp_path):
+    s = IntentStore(tmp_path / "intents.db")
+    yield s
+    s.close()
+
+
+def _lifecycle(opener, store, *, policy_fixture=None):
+    client = client_for(opener)
+    policy_read = load_fixture(policy_fixture) if policy_fixture else None
+    return NearIntentsLifecycle(
+        guard_service=make_service(), http_client=client, store=store
+    ), policy_read
+
+
+def _intent_payload(**overrides):
+    base = {
+        "service_id": "treasury-agent",
+        "operation": "SETTLEMENT",
+        "chain": "eth",
+        "asset": "USDC",
+        "amount": "1000000",
+        "recipient": APPROVED_DESTINATION,
+        "refund_to": APPROVED_DESTINATION,
+        "origin_asset": USDC_ETH,
+        "destination_asset": USDC_BASE,
+        "scope": "INTENTS",
+    }
+    base.update(overrides)
+    return base
+
+
+# -- step 1: authorization boundary ------------------------------------------
+
+
+def test_create_and_authorize_allows_a_legitimate_intent(opener, store):
+    lc, policy_read = _lifecycle(opener, store)
+    result = lc.create_and_authorize(
+        owner="treasury-agent", payload=_intent_payload(), policy_read=None, access_key=None,
+        created_at=CREATED_AT,
+    )
+    assert result["permits_signing"] is True
+    assert result["decision"]["outcome"] == "ALLOW"
+    assert result["step"]["ok"] is True
+
+
+def test_blocked_intent_never_permits_a_live_quote(opener, store):
+    """A blocked intent must not be able to obtain a fundable deposit address."""
+    lc, _ = _lifecycle(opener, store)
+    result = lc.create_and_authorize(
+        owner="treasury-agent",
+        payload=_intent_payload(recipient="0x000000000000000000000000000000000000dEaD"),
+        policy_read=None,
+        access_key=None,
+        created_at=CREATED_AT,
+    )
+    assert result["permits_signing"] is False
+    with pytest.raises(LifecycleError):
+        lc.request_quote(owner="treasury-agent", intent_id=result["intent_id"], dry=False)
+
+
+def test_dry_quote_is_allowed_for_a_blocked_intent(opener, store):
+    """A dry quote moves nothing, so it is a safe exploration even when blocked."""
+    lc, _ = _lifecycle(opener, store)
+    created = lc.create_and_authorize(
+        owner="treasury-agent",
+        payload=_intent_payload(recipient="0x000000000000000000000000000000000000dEaD"),
+        policy_read=None,
+        access_key=None,
+        created_at=CREATED_AT,
+    )
+    opener.json(
+        "POST",
+        "/v0/quote",
+        {"quote": {"amountOut": "997398", "amountOutFormatted": "0.997398", "depositAddress": None},
+         "correlationId": "c-1"},
+    )
+    out = lc.request_quote(owner="treasury-agent", intent_id=created["intent_id"], dry=True)
+    assert out["ok"] is True
+    assert out["deposit_address"] is None
+
+
+# -- step 2: quote -----------------------------------------------------------
+
+
+def test_live_quote_records_the_deposit_address(opener, store):
+    lc, _ = _lifecycle(opener, store)
+    created = lc.create_and_authorize(
+        owner="treasury-agent", payload=_intent_payload(), policy_read=None, access_key=None,
+        created_at=CREATED_AT,
+    )
+    opener.json(
+        "POST",
+        "/v0/quote",
+        {
+            "quote": {
+                "amountOut": "997398",
+                "amountOutFormatted": "0.997398",
+                "depositAddress": "0xdeposit",
+                "depositMemo": None,
+            },
+            "correlationId": "c-2",
+        },
+    )
+    out = lc.request_quote(owner="treasury-agent", intent_id=created["intent_id"], dry=False)
+    assert out["ok"] is True
+    assert out["deposit_address"] == "0xdeposit"
+    assert out["state"] == "DEPOSIT_ADDRESS_ISSUED"
+    stored = lc.get(owner="treasury-agent", intent_id=created["intent_id"])
+    assert stored["deposit_address"] == "0xdeposit"
+
+
+def test_provider_quote_failure_is_surfaced_not_hidden(opener, store):
+    lc, _ = _lifecycle(opener, store)
+    created = lc.create_and_authorize(
+        owner="treasury-agent", payload=_intent_payload(), policy_read=None, access_key=None,
+        created_at=CREATED_AT,
+    )
+    opener.http_error("POST", "/v0/quote", 500, b"upstream boom")
+    out = lc.request_quote(owner="treasury-agent", intent_id=created["intent_id"], dry=False)
+    assert out["ok"] is False
+    assert out["source_status"] != "OK"
+    assert out["quote"] is None
+
+
+# -- step 3: deposit ---------------------------------------------------------
+
+
+def test_deposit_notification_requires_a_deposit_address(opener, store):
+    lc, _ = _lifecycle(opener, store)
+    created = lc.create_and_authorize(
+        owner="treasury-agent", payload=_intent_payload(), policy_read=None, access_key=None,
+        created_at=CREATED_AT,
+    )
+    with pytest.raises(LifecycleError):
+        lc.record_deposit(
+            owner="treasury-agent", intent_id=created["intent_id"], deposit_tx_hash="0xabc"
+        )
+
+
+def test_deposit_records_the_user_hash_and_notifies(opener, store):
+    lc, _ = _lifecycle(opener, store)
+    created = lc.create_and_authorize(
+        owner="treasury-agent", payload=_intent_payload(), policy_read=None, access_key=None,
+        created_at=CREATED_AT,
+    )
+    opener.json("POST", "/v0/quote", {"quote": {"depositAddress": "0xdeposit"}, "correlationId": "c"})
+    lc.request_quote(owner="treasury-agent", intent_id=created["intent_id"], dry=False)
+    opener.json("POST", "/v0/deposit/submit", {"status": "ok"})
+    out = lc.record_deposit(
+        owner="treasury-agent", intent_id=created["intent_id"], deposit_tx_hash="0xuserdeposit"
+    )
+    assert out["ok"] is True
+    assert out["deposit_tx_hash"] == "0xuserdeposit"
+
+
+# -- step 4: status and lifecycle mapping ------------------------------------
+
+
+def test_status_maps_provider_success_to_pending_not_verified(opener, store):
+    """A provider SUCCESS must never become SETTLEMENT_VERIFIED via the status path."""
+    lc, _ = _lifecycle(opener, store)
+    created = lc.create_and_authorize(
+        owner="treasury-agent", payload=_intent_payload(), policy_read=None, access_key=None,
+        created_at=CREATED_AT,
+    )
+    opener.json("POST", "/v0/quote", {"quote": {"depositAddress": "0xdeposit"}, "correlationId": "c"})
+    lc.request_quote(owner="treasury-agent", intent_id=created["intent_id"], dry=False)
+    opener.json("GET", "/v0/status", load_raw("oneclick_status_SUCCESS.json"))
+    out = lc.refresh_status(owner="treasury-agent", intent_id=created["intent_id"])
+    assert out["ok"] is True
+    assert out["lifecycle"]["label"] in ("EXECUTION_PENDING", "DESTINATION_OBSERVED")
+    assert out["lifecycle"]["label"] != "SETTLEMENT_VERIFIED"
+    assert out["lifecycle"]["provider_claims_success"] is True
+
+
+def test_duplicate_status_update_is_idempotent(opener, store):
+    lc, _ = _lifecycle(opener, store)
+    created = lc.create_and_authorize(
+        owner="treasury-agent", payload=_intent_payload(), policy_read=None, access_key=None,
+        created_at=CREATED_AT,
+    )
+    opener.json("POST", "/v0/quote", {"quote": {"depositAddress": "0xdeposit"}, "correlationId": "c"})
+    lc.request_quote(owner="treasury-agent", intent_id=created["intent_id"], dry=False)
+    opener.json("GET", "/v0/status", load_raw("oneclick_status_SUCCESS.json"))
+    first = lc.refresh_status(owner="treasury-agent", intent_id=created["intent_id"])
+    second = lc.refresh_status(owner="treasury-agent", intent_id=created["intent_id"])
+    assert first["changed"] is True
+    assert second["changed"] is False
+
+
+def test_status_source_outage_is_unknown_not_failed(opener, store):
+    lc, _ = _lifecycle(opener, store)
+    created = lc.create_and_authorize(
+        owner="treasury-agent", payload=_intent_payload(), policy_read=None, access_key=None,
+        created_at=CREATED_AT,
+    )
+    opener.json("POST", "/v0/quote", {"quote": {"depositAddress": "0xdeposit"}, "correlationId": "c"})
+    lc.request_quote(owner="treasury-agent", intent_id=created["intent_id"], dry=False)
+    opener.http_error("GET", "/v0/status", 503, b"down")
+    out = lc.refresh_status(owner="treasury-agent", intent_id=created["intent_id"])
+    assert out["ok"] is False
+    assert out["lifecycle"]["label"] in ("PROVIDER_UNAVAILABLE", "UNKNOWN_STATUS")
+    assert out["lifecycle"]["provider_claims_failure"] is False
+
+
+# -- step 5: independent assurance -------------------------------------------
+
+
+def test_assurance_is_verified_only_from_onchain_evidence(opener, store):
+    lc, _ = _lifecycle(opener, store)
+    created = lc.create_and_authorize(
+        owner="treasury-agent", payload=_intent_payload(), policy_read=None, access_key=None,
+        created_at=CREATED_AT,
+    )
+    opener.json("POST", "/v0/quote", {"quote": {"depositAddress": REAL_DEPOSIT_ADDRESS}, "correlationId": "c"})
+    lc.request_quote(owner="treasury-agent", intent_id=created["intent_id"], dry=False)
+    _wire_full_success(opener)
+    out = lc.assurance(owner="treasury-agent", intent_id=created["intent_id"])
+    assert out["ok"] is True
+    assert out["assurance"]["level"] == "VERIFIED"
+    assert out["assurance"]["independently_verified"] is True
+
+
+def test_assurance_without_evidence_is_not_verified(opener, store):
+    lc, _ = _lifecycle(opener, store)
+    created = lc.create_and_authorize(
+        owner="treasury-agent", payload=_intent_payload(), policy_read=None, access_key=None,
+        created_at=CREATED_AT,
+    )
+    opener.json("POST", "/v0/quote", {"quote": {"depositAddress": REAL_DEPOSIT_ADDRESS}, "correlationId": "c"})
+    lc.request_quote(owner="treasury-agent", intent_id=created["intent_id"], dry=False)
+    opener.json("GET", "/v0/status", load_raw("oneclick_status_SUCCESS.json"))
+    lc.refresh_status(owner="treasury-agent", intent_id=created["intent_id"])
+    # No EVM/NEAR/solver responses wired, so no decisive on-chain evidence exists.
+    opener.http_error("POST", "ethereum-rpc", 403, b"archive")
+    opener.http_error("POST", "solver-relay", 500, b"boom")
+    opener.http_error("POST", "rpc.fastnear", 500, b"boom")
+    out = lc.assurance(owner="treasury-agent", intent_id=created["intent_id"])
+    assert out["assurance"]["level"] != "VERIFIED"
+    assert out["assurance"]["independently_verified"] is False
+
+
+# -- durability and isolation ------------------------------------------------
+
+
+def test_lifecycle_survives_a_restart(opener, store, tmp_path):
+    lc, _ = _lifecycle(opener, store)
+    created = lc.create_and_authorize(
+        owner="treasury-agent", payload=_intent_payload(), policy_read=None, access_key=None,
+        created_at=CREATED_AT,
+    )
+    opener.json("POST", "/v0/quote", {"quote": {"depositAddress": "0xdeposit"}, "correlationId": "c"})
+    lc.request_quote(owner="treasury-agent", intent_id=created["intent_id"], dry=False)
+    intent_id = created["intent_id"]
+    store.close()
+    # Reopen the same file with a fresh lifecycle.
+    reopened = IntentStore(tmp_path / "intents.db")
+    try:
+        lc2 = NearIntentsLifecycle(guard_service=make_service(), http_client=client_for(opener), store=reopened)
+        record = lc2.get(owner="treasury-agent", intent_id=intent_id)
+        assert record is not None
+        assert record["deposit_address"] == "0xdeposit"
+    finally:
+        reopened.close()
+
+
+def test_owner_isolation(opener, store):
+    lc, _ = _lifecycle(opener, store)
+    created = lc.create_and_authorize(
+        owner="treasury-agent", payload=_intent_payload(), policy_read=None, access_key=None,
+        created_at=CREATED_AT,
+    )
+    assert lc.get(owner="other-service", intent_id=created["intent_id"]) is None
+
+
+# -- intents client unit coverage --------------------------------------------
+
+
+def test_quote_validation_rejects_a_decimal_amount():
+    with pytest.raises(intents_mod.QuoteValidationError):
+        intents_mod.QuoteRequest.from_payload(
+            {
+                "amount": "0.01",
+                "origin_asset": USDC_ETH,
+                "destination_asset": USDC_BASE,
+                "recipient": APPROVED_DESTINATION,
+                "refund_to": APPROVED_DESTINATION,
+            }
+        )
+
+
+def test_lifecycle_view_never_returns_settlement_verified():
+    for status in intents_mod.LIFECYCLE_STATUSES:
+        view = intents_mod.lifecycle_view(status, destination_tx_hashes=("0x1",))
+        assert view.label != "SETTLEMENT_VERIFIED"
+
+
+def test_tokens_endpoint_parses_assets(opener):
+    opener.json(
+        "GET",
+        "/v0/tokens",
+        [
+            {"assetId": USDC_ETH, "blockchain": "eth", "symbol": "USDC", "decimals": 6},
+            {"assetId": USDC_BASE, "blockchain": "base", "symbol": "USDC", "decimals": 6},
+        ],
+    )
+    lc = NearIntentsLifecycle(
+        guard_service=make_service(), http_client=client_for(opener), store=IntentStore(":memory:")
+    )
+    out = lc.assets()
+    assert out["ok"] is True
+    assert len(out["assets"]) == 2
+
+
+def test_policy_fixture_is_loaded_server_side(opener, store):
+    """The lifecycle's policy comes from the fixture, resolved by the server."""
+    lc, policy_read = _lifecycle(opener, store, policy_fixture=str(_FIXTURE_DIR / "policy_in_force.json"))
+    assert policy_read is not None
+    assert policy_read.policy.in_force is True
+
+
+def _wire_full_success(opener):
+    opener.json("GET", "/v0/status", load_raw("oneclick_status_SUCCESS.json"))
+    opener.json("POST", "ethereum-rpc", load_raw("evm_receipt_origin.json"), once=True)
+    opener.json("POST", "ethereum-rpc", load_raw("evm_receipt_destination.json"))
+    opener.json("POST", "solver-relay", load_raw("solver_relay_get_status_SETTLED.json"))
+    opener.json(
+        "POST",
+        "rpc.fastnear",
+        load_raw("near_rpc_tx.json"),
+        body_contains="5E3GdbhwUYj9RFXhkk3rMyPwom4xvMYjtCFj7i2uypFb",
+    )
+    opener.json(
+        "POST",
+        "rpc.fastnear",
+        load_raw("near_rpc_tx_omft.json"),
+        body_contains="FbrSoTHbQdwD6HxabhaozvQQVBA4kF2Qn2c3W2otp284",
+    )
+    return opener

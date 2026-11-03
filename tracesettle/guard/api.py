@@ -49,8 +49,12 @@ def _int_param(params: dict[str, str], name: str, default: int, *, low: int, hig
 class GuardAPI:
     """Routes guard requests to the service and serializes the results."""
 
-    def __init__(self, service: GuardService) -> None:
+    def __init__(self, service: GuardService, lifecycle: Any = None) -> None:
         self.service = service
+        #: The optional NEAR Intents lifecycle. Built only when the operator has
+        #: enabled it and configured a durable store, so a deployment that does
+        #: not offer the lifecycle pays nothing and exposes no route.
+        self.lifecycle = lifecycle
 
     def dispatch(
         self,
@@ -162,6 +166,13 @@ class GuardAPI:
             return ApiResponse(200, self._near_policy_scope())
         if path == "/api/guard/near/settlement-demo":
             return ApiResponse(200, self._near_settlement_demo())
+        if path == "/api/guard/near/lifecycle":
+            return self._lifecycle_list(params)
+        if path == "/api/guard/near/lifecycle/tokens":
+            return self._lifecycle_tokens()
+        if path.startswith("/api/guard/near/lifecycle/"):
+            intent_id = path[len("/api/guard/near/lifecycle/") :].strip("/")
+            return self._lifecycle_get(intent_id)
         if path == "/api/guard/invariants":
             from .invariants import INVARIANT_DESCRIPTIONS, check_all
 
@@ -293,6 +304,12 @@ class GuardAPI:
             if not self._identity_matches(body, authenticated_service_id):
                 return ApiResponse(403, {"error": "service identity does not match the credential"})
             return self._near_agent_evaluate(body)
+        if path == "/api/guard/near/lifecycle":
+            return self._lifecycle_create(body, authenticated_service_id)
+        if path == "/api/guard/near/lifecycle/list":
+            return self._lifecycle_list_owned(body, authenticated_service_id)
+        if path.startswith("/api/guard/near/lifecycle/"):
+            return self._lifecycle_action(path, body, authenticated_service_id)
         if path.startswith("/api/guard/incidents/") and path.endswith("/status"):
             incident_id = path[len("/api/guard/incidents/") : -len("/status")].strip("/")
             return self._incident_status(incident_id, body)
@@ -371,6 +388,147 @@ class GuardAPI:
             200,
             decision.to_dict(include_authorization=bool(body.get("return_authorization", False))),
         )
+
+    # -- NEAR Intents lifecycle --------------------------------------------
+
+    def _lifecycle_owner(self, authenticated_service_id: str | None, body: Any) -> str | None:
+        """The owner a lifecycle record belongs to.
+
+        When service authentication is enabled the owner is the authenticated
+        identity, never a body field, so one service can never read another's
+        investigations. When it is disabled (loopback) the caller's declared
+        ``owner`` or ``service_id`` is used, defaulting to ``local``.
+        """
+        if authenticated_service_id is not None:
+            return authenticated_service_id
+        if isinstance(body, dict):
+            declared = body.get("owner") or body.get("service_id")
+            if isinstance(declared, str) and declared.strip():
+                return declared.strip()
+        return "local"
+
+    def _require_lifecycle(self) -> ApiResponse | None:
+        if self.lifecycle is None:
+            return ApiResponse(
+                404,
+                {
+                    "error": "the NEAR Intents lifecycle is not enabled",
+                    "hint": "set TRACESETTLE_NEAR_LIFECYCLE=1 and TRACESETTLE_INTENTS_DB=<path>",
+                },
+            )
+        return None
+
+    def _lifecycle_list(self, params: dict[str, str]) -> ApiResponse:
+        refused = self._require_lifecycle()
+        if refused is not None:
+            return refused
+        # A GET carries no credential, so it is scoped to the ``local`` owner and
+        # a query parameter cannot widen it. An authenticated service lists its
+        # own records with ``POST /api/guard/near/lifecycle/list``.
+        limit = _int_param(params, "limit", 50, low=1, high=MAX_LIMIT)
+        return ApiResponse(200, {"owner": "local", "intents": self.lifecycle.list(owner="local", limit=limit)})
+
+    def _lifecycle_list_owned(self, body: Any, authenticated_service_id: str | None) -> ApiResponse:
+        refused = self._require_lifecycle()
+        if refused is not None:
+            return refused
+        owner = self._lifecycle_owner(authenticated_service_id, body)
+        limit = 50
+        if isinstance(body, dict) and body.get("limit") is not None:
+            try:
+                limit = int(body["limit"])
+            except (TypeError, ValueError):
+                return _bad_request("field 'limit' must be an integer")
+            if limit < 1 or limit > MAX_LIMIT:
+                return _bad_request(f"field 'limit' must be between 1 and {MAX_LIMIT}")
+        return ApiResponse(200, {"owner": owner, "intents": self.lifecycle.list(owner=owner, limit=limit)})
+
+    def _lifecycle_tokens(self) -> ApiResponse:
+        refused = self._require_lifecycle()
+        if refused is not None:
+            return refused
+        data = self.lifecycle.assets()
+        return ApiResponse(200, data)
+
+    def _lifecycle_get(self, intent_id: str) -> ApiResponse:
+        refused = self._require_lifecycle()
+        if refused is not None:
+            return refused
+        # A read has no body, so it is scoped to the ``local`` owner; a service
+        # identity that wants its own records uses the POST actions with a credential.
+        record = self.lifecycle.get(owner="local", intent_id=intent_id)
+        if record is None:
+            return ApiResponse(404, {"error": "no such intent"})
+        return ApiResponse(200, {"intent": record})
+
+    def _lifecycle_create(self, body: Any, authenticated_service_id: str | None) -> ApiResponse:
+        refused = self._require_lifecycle()
+        if refused is not None:
+            return refused
+        if not isinstance(body, dict):
+            return _bad_request("request body must be a JSON object")
+        owner = self._lifecycle_owner(authenticated_service_id, body)
+        transaction = body.get("transaction")
+        if not isinstance(transaction, dict):
+            return _bad_request("field 'transaction' must be a JSON object")
+        if not self._identity_matches(body, authenticated_service_id) and not self._identity_matches(
+            transaction, authenticated_service_id
+        ):
+            return ApiResponse(403, {"error": "service identity does not match the credential"})
+        try:
+            result = self.lifecycle.create_and_authorize(
+                owner=owner,
+                payload=transaction,
+                policy_read=self._near_policy_read(body),
+                access_key=self._near_access_key(body),
+            )
+        except Exception as exc:  # noqa: BLE001 - LifecycleError and validation both carry safe text
+            return _bad_request(str(exc))
+        return ApiResponse(200, result)
+
+    def _lifecycle_action(self, path: str, body: Any, authenticated_service_id: str | None) -> ApiResponse:
+        refused = self._require_lifecycle()
+        if refused is not None:
+            return refused
+        if not isinstance(body, dict):
+            return _bad_request("request body must be a JSON object")
+        rest = path[len("/api/guard/near/lifecycle/") :].strip("/")
+        if "/" not in rest:
+            return ApiResponse(404, {"error": "not found"})
+        intent_id, action = rest.rsplit("/", 1)
+        owner = self._lifecycle_owner(authenticated_service_id, body)
+        try:
+            if action == "quote":
+                return ApiResponse(
+                    200,
+                    self.lifecycle.request_quote(
+                        owner=owner, intent_id=intent_id, dry=bool(body.get("dry", False))
+                    ),
+                )
+            if action == "deposit":
+                return ApiResponse(
+                    200,
+                    self.lifecycle.record_deposit(
+                        owner=owner,
+                        intent_id=intent_id,
+                        deposit_tx_hash=str(body.get("deposit_tx_hash") or ""),
+                        near_sender_account=(
+                            str(body["near_sender_account"]) if body.get("near_sender_account") else None
+                        ),
+                    ),
+                )
+            if action == "status":
+                return ApiResponse(200, self.lifecycle.refresh_status(owner=owner, intent_id=intent_id))
+            if action == "assurance":
+                return ApiResponse(200, self.lifecycle.assurance(owner=owner, intent_id=intent_id))
+            if action == "get":
+                record = self.lifecycle.get(owner=owner, intent_id=intent_id)
+                if record is None:
+                    return ApiResponse(404, {"error": "no such intent"})
+                return ApiResponse(200, {"intent": record})
+        except Exception as exc:  # noqa: BLE001 - safe message
+            return _bad_request(str(exc))
+        return ApiResponse(404, {"error": "not found"})
 
     def _near_policy_read(self, body: Any) -> Any:
         """Resolve the policy read from the *server's* configuration.

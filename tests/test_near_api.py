@@ -72,6 +72,10 @@ def _tx(destination: str = APPROVED, **overrides) -> dict:
         "destination": destination,
         "scope": "INTENTS",
         "policy_action": "withdraw",
+        # Intents lifecycle fields (ignored by agent-evaluate).
+        "origin_asset": "nep141:base-0x833589fcd6edb6e08f4c7c32d4f71b54bda02913.omft.near",
+        "destination_asset": "nep141:base-0x833589fcd6edb6e08f4c7c32d4f71b54bda02913.omft.near",
+        "refund_to": destination,
     }
     base.update(overrides)
     return base
@@ -302,3 +306,99 @@ def test_near_settlement_demo_reports_a_provider_claim_as_unverified():
     assert assurance["independently_verified"] is False
     assert assurance["level"] in {"UNKNOWN", "UNAVAILABLE"}
     assert "REPORTED claim" in response.payload["note"]
+
+
+# --- NEAR Intents lifecycle surface -----------------------------------------
+
+
+def _lifecycle_api(tmp_path):
+    from tracesettle.intents_store import IntentStore
+    from tracesettle.near.lifecycle import NearIntentsLifecycle
+
+    from conftest import FakeOpener, client_for
+
+    opener = FakeOpener()
+    store = IntentStore(tmp_path / "intents.db")
+    lifecycle = NearIntentsLifecycle(
+        guard_service=_service(), http_client=client_for(opener), store=store
+    )
+    return GuardAPI(_service(), lifecycle=lifecycle), lifecycle, opener
+
+
+def test_lifecycle_routes_are_absent_when_not_enabled():
+    """A deployment without the lifecycle must not expose the routes."""
+    api = _api()
+    for method, path, body in [
+        ("GET", "/api/guard/near/lifecycle", None),
+        ("GET", "/api/guard/near/lifecycle/tokens", None),
+        ("POST", "/api/guard/near/lifecycle", {"transaction": {}}),
+        ("POST", "/api/guard/near/lifecycle/list", {}),
+    ]:
+        response = api.dispatch(method, path, {}, body)
+        assert response.status == 404
+        assert "not enabled" in response.payload["error"]
+
+
+def test_lifecycle_create_then_list_and_get(tmp_path):
+    api, _, _ = _lifecycle_api(tmp_path)
+    created = api.dispatch(
+        "POST",
+        "/api/guard/near/lifecycle",
+        {},
+        {"transaction": _tx(amount="1000", operation="WITHDRAWAL", chain="base", asset="USDC")},
+    )
+    assert created.status == 200
+    intent_id = created.payload["intent_id"]
+    assert created.payload["permits_signing"] is True
+
+    listed = api.dispatch("POST", "/api/guard/near/lifecycle/list", {}, {})
+    assert listed.status == 200
+    assert any(i["intent_id"] == intent_id for i in listed.payload["intents"])
+
+    fetched = api.dispatch("GET", f"/api/guard/near/lifecycle/{intent_id}", {}, None)
+    assert fetched.status == 200
+    assert fetched.payload["intent"]["intent_id"] == intent_id
+
+
+def test_lifecycle_live_quote_refused_without_authorization(tmp_path):
+    api, _, _ = _lifecycle_api(tmp_path)
+    created = api.dispatch(
+        "POST",
+        "/api/guard/near/lifecycle",
+        {},
+        {"transaction": _tx(destination=ATTACKER, amount="1000000")},
+    )
+    assert created.status == 200
+    assert created.payload["permits_signing"] is False
+    intent_id = created.payload["intent_id"]
+    live = api.dispatch("POST", f"/api/guard/near/lifecycle/{intent_id}/quote", {}, {"dry": False})
+    assert live.status == 400
+    assert "does not permit signing" in live.payload["error"]
+
+
+def test_lifecycle_owner_isolation_over_the_api(tmp_path):
+    api, _, _ = _lifecycle_api(tmp_path)
+    created = api.dispatch(
+        "POST",
+        "/api/guard/near/lifecycle",
+        {},
+        {"owner": "alice", "transaction": _tx(amount="1000", operation="WITHDRAWAL")},
+    )
+    intent_id = created.payload["intent_id"]
+    # A different owner cannot read it.
+    other = api.dispatch("POST", f"/api/guard/near/lifecycle/{intent_id}/get", {}, {"owner": "bob"})
+    assert other.status == 404
+    mine = api.dispatch("POST", f"/api/guard/near/lifecycle/{intent_id}/get", {}, {"owner": "alice"})
+    assert mine.status == 200
+
+
+def test_lifecycle_identity_binding_rejects_a_mismatched_credential(tmp_path):
+    api, _, _ = _lifecycle_api(tmp_path)
+    response = api.dispatch(
+        "POST",
+        "/api/guard/near/lifecycle",
+        {},
+        {"transaction": _tx(service_id="treasury-agent")},
+        authenticated_service_id="some-other-service",
+    )
+    assert response.status == 403

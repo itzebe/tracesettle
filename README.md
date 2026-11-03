@@ -141,16 +141,51 @@ independently proven?" has a first-class answer rather than being left to the
 reader to infer from stage states. It maps the engine's stages onto the NEAR
 settlement path (deposit address, source-chain transaction, deposit confirmation,
 intent execution, destination transaction, destination receipt, refund) and
-reports one of `VERIFIED`, `REPORTED_ONLY`, `CONTRADICTORY`, `UNAVAILABLE`, or
-`UNKNOWN`.
+reports one of `VERIFIED`, `PARTIAL`, `REPORTED_ONLY`, `CONTRADICTORY`,
+`UNAVAILABLE`, or `UNKNOWN`.
 
 **A provider's success status is a `REPORTED` claim and never raises the level.**
 If the provider says `SUCCESS` but no decisive on-chain evidence confirms it, the
 assurance level is not `VERIFIED` — the report says so explicitly, and the
 Markdown document, the main page and the operations console all render the view.
+When the destination delivery *is* independently confirmed but the received amount
+is below the quote's expected output, the level is `PARTIAL` (never `VERIFIED`),
+and both the expected and observed amounts plus the shortfall are disclosed. A
+shortfall against an *unconfirmed* delivery is not classified as partial; the
+difference is disclosed as a limitation instead. Amounts never create a
+confirmation.
 The same capability is exercised end to end in `tests/test_near_acceptance.py`,
 which drives the real server and the real report builder, so it cannot regress
 into an unused library.
+
+### NEAR Intents lifecycle
+
+The shipped application wires the NEAR capabilities into a real, end-to-end
+lifecycle rather than leaving them as library code. When enabled by the operator
+(`TRACESETTLE_NEAR_LIFECYCLE=1`; off by default, because a live quote yields a
+fundable deposit address), the server exposes a create → authorize → quote →
+settle → assurance flow:
+
+1. **Create + authorize.** `POST /api/guard/near/lifecycle` takes a proposed
+   transaction, runs the guard and the NEAR policy/access-key controls on the
+   **actual** parameters, and only proceeds to a quote when the outcome is
+   `ALLOW`. The operator's policy is resolved server-side; a client cannot choose
+   the policy it is judged against.
+2. **Quote.** On `ALLOW` the lifecycle requests a live 1Click quote
+   (`POST /v0/quote`, `dry: false`) to obtain a deposit address, and records the
+   intent with its deposit address and expected output amount.
+3. **Get / list.** `POST /api/guard/near/lifecycle/{intent_id}/get`,
+   `/lifecycle/list`, and `/lifecycle/tokens` read the durable intent record
+   (SQLite via `TRACESETTLE_INTENTS_DB`) and the provider asset list. Intent
+   records are owner-scoped: a request can only read an intent it owns.
+4. **Settle + assurance.** When the swap settles, the same evidence pipeline that
+   powers investigations produces the settlement-assurance view (above), so a
+   provider `SUCCESS` is never confused with verified receipt.
+
+The lifecycle never signs, submits, or moves funds: it obtains a deposit address
+and observes it. `tests/test_near_lifecycle.py` (18 tests) and the lifecycle
+acceptance tests in `tests/test_near_api.py` drive the real server and the real
+lifecycle code.
 
 ### NEAR agent protection
 
@@ -200,11 +235,12 @@ refusal is provable: the executor is never called unless the outcome was `ALLOW`
 | H | Native tx wrongly assumed protected by an Intents-only policy | policy-scope rejection |
 | I | Provider reports success without independent evidence | `UNKNOWN` / `UNAVAILABLE` |
 
-Five NEAR-specific structural guarantees join the invariant set, each
+Six NEAR-specific structural guarantees join the invariant set, each
 mutation-tested: `near_policy_must_be_in_force`,
 `near_native_scope_gap_is_always_stated`,
 `near_function_call_key_cannot_transfer_near`,
-`near_provider_success_is_never_verified_without_evidence`, and
+`near_provider_success_is_never_verified_without_evidence`,
+`near_partial_settlement_is_never_verified`, and
 `near_policy_selection_is_not_client_controlled`.
 
 ## Try it: do X → see Y
@@ -229,11 +265,11 @@ a bare interpreter.
 **1. Run the tests.**
 
 ```sh
-python -m pytest tests/ --collect-only -q   # 739 tests collected
-python -m pytest tests/ -q                  # 716 passed, 23 skipped
+python -m pytest tests/ --collect-only -q   # 924 tests collected
+python -m pytest tests/ -q                  # 900 passed, 24 skipped
 ```
-→ `716 passed, 23 skipped`. The skips are the PostgreSQL integration
-tests; set `TRACESETTLE_TEST_PG_DSN` to a real server to run them (739 pass).
+→ `900 passed, 24 skipped`. The skips are the PostgreSQL integration
+tests; set `TRACESETTLE_TEST_PG_DSN` to a real server to run them (924 pass).
 
 **2. Prove the enforcement boundary: a permitted request executes, a suspicious
 one cannot.**
@@ -286,10 +322,11 @@ curl -sS -X POST http://127.0.0.1:8080/api/guard/sign \
 curl -sS http://127.0.0.1:8080/api/guard/invariants \
   | python3 -c 'import sys,json;d=json.load(sys.stdin);print("all hold:",d["all_hold"]);[print(" ",i["name"]) for i in d["invariants"]]'
 ```
-→ `all hold: True` and the twenty-one invariant names, including the five NEAR
+→ `all hold: True` and the twenty-two invariant names, including the six NEAR
 ones (`near_policy_must_be_in_force`, `near_native_scope_gap_is_always_stated`,
 `near_function_call_key_cannot_transfer_near`,
 `near_provider_success_is_never_verified_without_evidence`,
+`near_partial_settlement_is_never_verified`,
 `near_policy_selection_is_not_client_controlled`).
 
 **4. Investigate a real, known-good swap from the command line.**
@@ -542,7 +579,7 @@ transaction request ──▶ │ guard/rules.py      7 controls, all run  │
                         │                     validate, then execute │
                         │ guard/audit.py      hash-chained records  │
                         │ guard/monitor.py    counters + incidents  │
-                        │ guard/invariants.py 21 checked guarantees │
+                        │ guard/invariants.py 22 checked guarantees │
                         └────────────────────┬─────────────────────┘
                                              │ ALLOW + authorization
                                              ▼
@@ -611,7 +648,7 @@ identical decisions.
 | `tracesettle/guard/service.py` | Orchestration: controls → authorization → monitor → audit. |
 | `tracesettle/guard/state.py` | Durable state: `GuardStateStore` (SQLite), backend-aware `open_state_store`. |
 | `tracesettle/guard/state_pg.py` | Optional PostgreSQL backend: shared nonces, counters, revocations, idempotency. |
-| `tracesettle/guard/invariants.py` | The twenty-one structural guarantees, checked by execution. |
+| `tracesettle/guard/invariants.py` | The twenty-two structural guarantees, checked by execution. |
 | `tracesettle/guard/api.py` | Guard HTTP routing and JSON serialization. |
 | `tracesettle/guard/console.py` | The security operations console page. |
 | `docs/TRANSACTION_SECURITY.md` | The security layer in full, including what it does not do. |
@@ -620,7 +657,7 @@ identical decisions.
 | `.github/workflows/ci.yml` | CI: tests, static analysis, Docker build + runtime, demo determinism. |
 | `demo/demonstrate.py` | Read-only walkthrough (live, or `--offline` replay of captures). |
 | `demo/replay_opener.py` | Offline transport that replays `evidence/raw/` through the real code. |
-| `tests/` | 868 tests (24 PostgreSQL tests skip without `TRACESETTLE_TEST_PG_DSN`). `evidence/raw/` fixtures are real captures; `tests/fixtures/synthetic/` are clearly labelled synthetic. |
+| `tests/` | 924 tests (24 PostgreSQL tests skip without `TRACESETTLE_TEST_PG_DSN`). `evidence/raw/` fixtures are real captures; `tests/fixtures/synthetic/` are clearly labelled synthetic. |
 | `PHASE1_FEASIBILITY.md` | Phase 1 feasibility and API verification. |
 | `submission/` | Hackathon artifacts: API payload shape, technical summary, demo post draft, publication checklist. |
 | `docs/official/` | NEAR documentation captured during Phase 1. |
@@ -628,7 +665,9 @@ identical decisions.
 
 tracesettle/near/          NEAR agent protection: policy scope, access-key
                           analysis, the agent authorization wrapper, the attack
-                          scenarios, the settlement assurance view, TEE research
+                          scenarios, the settlement assurance view, the Intents
+                          lifecycle (create → authorize → quote → settle), TEE research
+
 ## Runtime dependencies
 
 **None.** TRACESETTLE imports only the Python standard library at runtime
@@ -709,7 +748,7 @@ variable and all documented in `docs/TRANSACTION_SECURITY.md`:
   replay-nonce store all have explicit caps, so a flood cannot exhaust memory.
   When durable state is configured, spent nonces and the limit counters live in
   SQLite instead, so they survive a restart (see **Durable state** below).
-- **Structural invariants, checked by execution.** Twenty-one guarantees at
+- **Structural invariants, checked by execution.** Twenty-two guarantees at
   `GET /api/guard/invariants`, each mutation-tested so a checker that cannot fail
   is treated as a defect.
 - **Honest audit claim.** In-place modification of an audit record is detectable;
@@ -916,7 +955,7 @@ immutable commit SHA (not a moving tag), and cancels superseded runs.
 ## Tests
 
 ```sh
-python3 -m pytest tests/ -q          # 868 passed, 24 skipped (892 with a server)
+python3 -m pytest tests/ -q          # 900 passed, 24 skipped (924 with a server)
 python3 -m pytest tests/test_guard_authorization.py -q
 python3 -m pytest tests/test_guard_invariants.py -q
 python3 -m pytest tests/test_guard_end_to_end.py -q
@@ -976,7 +1015,7 @@ Intents), a function-call key that cannot transfer NEAR, a full-access key that
 forces review, the five outcomes, determinism, an invalid amount failing safe to
 `UNKNOWN`, a client-supplied approval flag never honoured, and the settlement
 assurance rule that a provider success claim is never independently verified
-without decisive evidence. Each of the five NEAR invariants is mutation-tested.
+without decisive evidence. Each of the six NEAR invariants is mutation-tested.
 
 ## Read-only guarantee
 

@@ -22,6 +22,14 @@ guard-state.db-shm
 *.state.db-wal
 *.state.db-shm
 
+# Durable NEAR Intents lifecycle database (intent records; no signing material).
+intents.db
+intents.db-wal
+intents.db-shm
+*.intents.db
+*.intents.db-wal
+*.intents.db-shm
+
 # Python
 __pycache__/
 *.py[cod]

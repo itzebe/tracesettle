@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import enum
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from ..model import OverallOutcome, ReconciliationResult, Stage, StageState, Verification
@@ -45,6 +46,10 @@ class AssuranceLevel(str, enum.Enum):
     REPORTED_ONLY = "REPORTED_ONLY"
     #: Independent evidence conflicts materially.
     CONTRADICTORY = "CONTRADICTORY"
+    #: The destination received less than the quote's expected output: money
+    #: moved, but not the full amount. Distinct from UNKNOWN so a shortfall is
+    #: never presented as a plain unknown or as full settlement.
+    PARTIAL = "PARTIAL"
     #: The sources needed could not be queried, so settlement cannot be assessed.
     UNAVAILABLE = "UNAVAILABLE"
     #: Evidence was insufficient to decide (an incomplete search, or no evidence).
@@ -95,6 +100,16 @@ class NearSettlementAssurance:
     stages: tuple[StageAssurance, ...] = ()
     conflicting_evidence: tuple[str, ...] = ()
     partial_settlement: bool = False
+    #: The quote's expected destination amount (smallest unit), when known.
+    expected_amount_out: str | None = None
+    #: The independently observed destination amount (smallest unit), when known.
+    observed_amount_out: str | None = None
+    #: ``observed - expected`` when both are known and observed is lower; a
+    #: non-negative decimal string. ``None`` when the comparison cannot be made.
+    shortfall: str | None = None
+    #: ``shortfall / expected`` as an exact decimal string, for disclosure only.
+    #: Never used to *decide* the level; the level is decided by confirmed stages.
+    shortfall_fraction: str | None = None
     summary: str = ""
     limitations: tuple[str, ...] = ()
     engine: dict[str, Any] = field(default_factory=dict)
@@ -106,6 +121,10 @@ class NearSettlementAssurance:
             "provider_claimed_success": self.provider_claimed_success,
             "independently_verified": self.independently_verified,
             "partial_settlement": self.partial_settlement,
+            "expected_amount_out": self.expected_amount_out,
+            "observed_amount_out": self.observed_amount_out,
+            "shortfall": self.shortfall,
+            "shortfall_fraction": self.shortfall_fraction,
             "stages": [s.to_dict() for s in self.stages],
             "conflicting_evidence": list(self.conflicting_evidence),
             "summary": self.summary,
@@ -131,6 +150,8 @@ def settlement_assurance_from_result(
     result: ReconciliationResult,
     *,
     provider_reported_success: bool = False,
+    expected_amount_out: str | None = None,
+    observed_amount_out: str | None = None,
 ) -> NearSettlementAssurance:
     """Build a :class:`NearSettlementAssurance` from a reconciliation result.
 
@@ -138,6 +159,14 @@ def settlement_assurance_from_result(
     service claimed (for example, a 1Click ``SUCCESS`` status). It is used only
     to phrase the summary and to distinguish "the provider says so" from "we
     verified it"; it never raises the assurance level.
+
+    ``expected_amount_out`` and ``observed_amount_out`` are decimal strings in
+    the destination asset's smallest unit. When both are known and the observed
+    amount is strictly lower, the difference is reported as a shortfall. A
+    shortfall makes the level ``PARTIAL`` only when the engine independently
+    confirmed the destination delivery: if the delivery is not confirmed, the
+    level stays UNKNOWN/REPORTED_ONLY and the shortfall is disclosed as a
+    limitation instead. Amounts never *create* a confirmation.
     """
     stages = tuple(
         StageAssurance(
@@ -170,6 +199,23 @@ def settlement_assurance_from_result(
     partial = _is_partial(result)
     conflicts = tuple(c.description for c in result.contradictions)
 
+    # Amount comparison. A shortfall is only meaningful when the delivery itself
+    # is independently confirmed; a lower observed amount against an unconfirmed
+    # delivery is not "partial settlement", it is simply unverified.
+    delivery_confirmed = _state_of(result, Stage.DESTINATION_CHAIN_DELIVERY) is StageState.CONFIRMED
+    shortfall, fraction = _amount_shortfall(expected_amount_out, observed_amount_out)
+    amount_known = shortfall is not None
+    amount_short = amount_known and shortfall != "0"
+    amount_partial = (
+        amount_short and delivery_confirmed and level is not AssuranceLevel.CONTRADICTORY
+    )
+    if amount_partial:
+        level = AssuranceLevel.PARTIAL
+        # A shortfall means the settlement is not whole, so it is not "verified"
+        # in the sense this flag promises. The delivery itself is confirmed, but
+        # the outcome is partial, and the two must not be conflated.
+        verified = False
+
     limitations: list[str] = [
         "A provider success status is a REPORTED claim, not independent settlement proof.",
     ]
@@ -182,8 +228,19 @@ def settlement_assurance_from_result(
         limitations.append(
             "Partial settlement: the destination stage is not confirmed while an earlier stage is."
         )
+    if amount_short and not delivery_confirmed:
+        limitations.append(
+            f"A destination amount of {observed_amount_out} against an expected "
+            f"{expected_amount_out} is {shortfall} lower, but the delivery is not independently "
+            "confirmed, so the difference is disclosed rather than classified."
+        )
+    if amount_partial:
+        limitations.append(
+            f"Partial settlement: the destination received {observed_amount_out}, "
+            f"{shortfall} below the quote's expected {expected_amount_out}."
+        )
 
-    summary = _summary(level, outcome, verified, provider_reported_success, partial)
+    summary = _summary(level, outcome, verified, provider_reported_success, partial, amount_partial)
     return NearSettlementAssurance(
         outcome=outcome,
         level=level,
@@ -191,11 +248,42 @@ def settlement_assurance_from_result(
         independently_verified=verified,
         stages=stages,
         conflicting_evidence=conflicts,
-        partial_settlement=partial,
+        partial_settlement=partial or amount_partial,
+        expected_amount_out=expected_amount_out if amount_known else None,
+        observed_amount_out=observed_amount_out if amount_known else None,
+        shortfall=shortfall,
+        shortfall_fraction=fraction,
         summary=summary,
         limitations=tuple(limitations),
         engine=result.to_dict(),
     )
+
+
+def _amount_shortfall(
+    expected: str | None, observed: str | None
+) -> tuple[str | None, str | None]:
+    """``(shortfall, fraction)`` when ``observed`` is strictly below ``expected``.
+
+    Both inputs are integer strings in the asset's smallest unit. Returns
+    ``(None, None)`` when the comparison cannot be made safely (a missing or
+    non-integer value, or a zero/negative expectation), so a malformed amount is
+    never turned into a numeric claim. The arithmetic is exact ``Decimal``; it is
+    never used with a float.
+    """
+    if expected is None or observed is None:
+        return (None, None)
+    try:
+        exp = Decimal(str(expected).strip())
+        obs = Decimal(str(observed).strip())
+    except (InvalidOperation, ValueError):
+        return (None, None)
+    if exp <= 0 or obs < 0:
+        return (None, None)
+    if obs >= exp:
+        return ("0", "0")
+    shortfall = exp - obs
+    fraction = (shortfall / exp).quantize(Decimal("0.0001"))
+    return (str(shortfall), str(fraction))
 
 
 def _state_of(result: ReconciliationResult, stage: Stage) -> StageState:
@@ -227,9 +315,12 @@ def _summary(
     verified: bool,
     provider_reported_success: bool,
     partial: bool,
+    amount_partial: bool = False,
 ) -> str:
     if level is AssuranceLevel.VERIFIED:
         return "Independently verified: the decisive NEAR settlement stages are confirmed."
+    if level is AssuranceLevel.PARTIAL:
+        return "Partial: the destination is independently confirmed but received less than the quote's expected output."
     if level is AssuranceLevel.REPORTED_ONLY:
         return (
             "Reported only: the provider claims success, but at least one decisive stage is not "

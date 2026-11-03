@@ -18,6 +18,8 @@ import urllib.error
 import urllib.request
 from contextlib import contextmanager
 
+import pytest
+
 from tracesettle import config
 from tracesettle.ratelimit import TokenBucketLimiter
 from tracesettle.ui import InvestigationServer
@@ -173,6 +175,50 @@ def test_console_does_not_fabricate_a_live_badge():
         _, body, _ = _request("GET", base + "/console")
     html = _html(body)
     assert ">LIVE<" not in html
+
+
+def test_console_script_is_valid_javascript():
+    """The console's inline script must parse as JavaScript.
+
+    A syntax error anywhere in the script makes the whole page non-functional
+    (no panel ever loads), yet every string-substring assertion still passes. A
+    real parse is the only check that catches a broken string literal.
+    """
+    import re
+
+    from tracesettle.guard.console import CONSOLE_HTML
+
+    scripts = re.findall(r"<script[^>]*>(.*?)</script>", CONSOLE_HTML, re.S)
+    assert scripts, "the console must ship an inline script"
+    for index, script in enumerate(scripts):
+        assert _js_parses(script), f"inline script {index} does not parse"
+
+
+def _js_parses(script: str) -> bool:
+    """True when ``node --check`` accepts ``script``.
+
+    ``node`` is a dev/CI tool, not a runtime dependency; when it is absent the
+    check is skipped rather than reported as passing.
+    """
+    import shutil
+    import subprocess
+    import tempfile
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not available to validate the console script")
+    with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as handle:
+        handle.write(script)
+        path = handle.name
+    try:
+        completed = subprocess.run(
+            [node, "--check", path], capture_output=True, text=True, timeout=30
+        )
+        return completed.returncode == 0
+    finally:
+        import os
+
+        os.unlink(path)
 
 
 def test_legacy_investigation_page_links_to_the_console():
