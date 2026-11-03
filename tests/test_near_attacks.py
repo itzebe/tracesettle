@@ -317,6 +317,88 @@ def test_an_over_delivery_is_not_a_shortfall():
     assert assurance.shortfall == "0"
 
 
+def test_a_confirmed_refund_is_refunded_not_verified():
+    result = _result(
+        OverallOutcome.REFUND_VERIFIED,
+        [
+            (Stage.SOURCE_CHAIN_DEPOSIT, StageState.CONFIRMED),
+            (Stage.REFUND, StageState.CONFIRMED),
+        ],
+    )
+    assurance = settlement_assurance_from_result(result)
+    assert assurance.level is AssuranceLevel.REFUNDED
+    assert assurance.independently_verified is False
+
+
+def test_a_reported_refund_without_a_payout_is_not_refunded():
+    """A reported refund is not proof funds came back."""
+    result = _result(
+        OverallOutcome.REFUND_REPORTED_UNVERIFIED,
+        [
+            (Stage.SOURCE_CHAIN_DEPOSIT, StageState.CONFIRMED),
+            (Stage.REFUND, StageState.REPORTED),
+        ],
+    )
+    assurance = settlement_assurance_from_result(result, provider_reported_success=False)
+    assert assurance.level is AssuranceLevel.REPORTED_ONLY
+    assert assurance.level is not AssuranceLevel.REFUNDED
+
+
+def test_a_verified_failure_is_failed():
+    result = _result(
+        OverallOutcome.FAILED_VERIFIED,
+        [
+            (Stage.SOURCE_CHAIN_DEPOSIT, StageState.CONFIRMED),
+            (Stage.NEAR_SETTLEMENT, StageState.CONFIRMED),
+        ],
+    )
+    assurance = settlement_assurance_from_result(result)
+    assert assurance.level is AssuranceLevel.FAILED
+
+
+def test_a_reported_failure_without_evidence_is_not_failed():
+    """An RPC outage or a bare provider failure claim must never read as FAILED."""
+    result = _result(
+        OverallOutcome.FAILED_REPORTED_UNVERIFIED,
+        [(Stage.NEAR_SETTLEMENT, StageState.REPORTED)],
+    )
+    assurance = settlement_assurance_from_result(result, provider_reported_success=False)
+    assert assurance.level is not AssuranceLevel.FAILED
+
+
+def test_a_confirmed_deposit_in_flight_is_pending():
+    result = _result(
+        OverallOutcome.UNKNOWN,
+        [
+            (Stage.SOURCE_CHAIN_DEPOSIT, StageState.CONFIRMED),
+            (Stage.BRIDGE_DEPOSIT_CREDIT, StageState.CONFIRMED),
+            (Stage.DESTINATION_CHAIN_DELIVERY, StageState.MISSING),
+        ],
+    )
+    assurance = settlement_assurance_from_result(result)
+    assert assurance.level is AssuranceLevel.PENDING
+    assert assurance.independently_verified is False
+
+
+def test_pending_requires_a_confirmed_deposit():
+    """No confirmed deposit credit means we cannot call it pending."""
+    result = _result(
+        OverallOutcome.UNKNOWN,
+        [
+            (Stage.SOURCE_CHAIN_DEPOSIT, StageState.REPORTED),
+            (Stage.BRIDGE_DEPOSIT_CREDIT, StageState.MISSING),
+        ],
+    )
+    assurance = settlement_assurance_from_result(result)
+    assert assurance.level is not AssuranceLevel.PENDING
+
+
+def test_every_assurance_level_is_reachable():
+    """The seven mission states plus the finer distinctions must all be defined."""
+    names = {level.value for level in AssuranceLevel}
+    assert {"VERIFIED", "PENDING", "FAILED", "REFUNDED", "PARTIAL", "UNKNOWN", "UNAVAILABLE"} <= names
+
+
 def test_a_shortfall_without_a_confirmed_delivery_is_not_partial():
     """A lower amount against an unconfirmed delivery is unverified, not partial."""
     result = _result(

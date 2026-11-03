@@ -92,10 +92,12 @@ CONSOLE_HTML = """<!DOCTYPE html>
     letter-spacing: .04em; text-transform: uppercase; padding: 2px 8px; border-radius: 999px;
     border: 1px solid currentColor; }
   .status::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
-  .s-ALLOW, .s-CONFIRMED, .s-EXECUTED, .s-OK, .s-RESOLVED, .s-VALID { color: var(--ok); }
-  .s-REQUIRE_APPROVAL, .s-REPORTED, .s-ACKNOWLEDGED { color: var(--warn); }
-  .s-HOLD, .s-UNKNOWN, .s-INCOMPLETE, .s-OPEN, .s-NO_EXPIRY_STATED, .s-QUOTE_EXPIRED { color: var(--hold); }
+  .s-ALLOW, .s-CONFIRMED, .s-EXECUTED, .s-OK, .s-RESOLVED, .s-VALID, .s-VERIFIED { color: var(--ok); }
+  .s-REQUIRE_APPROVAL, .s-REPORTED, .s-ACKNOWLEDGED, .s-PARTIAL, .s-REPORTED_ONLY { color: var(--warn); }
+  .s-HOLD, .s-UNKNOWN, .s-INCOMPLETE, .s-OPEN, .s-NO_EXPIRY_STATED, .s-QUOTE_EXPIRED,
+  .s-PENDING, .s-AWAITING_DEPOSIT, .s-DEPOSIT_SUBMITTED { color: var(--hold); }
   .s-BLOCK, .s-REFUSED, .s-CONTRADICTORY, .s-UNAVAILABLE, .s-FAILED { color: var(--bad); }
+  .s-REFUNDED, .s-DEPOSIT_DETECTED, .s-DEPOSIT_INCOMPLETE, .s-DESTINATION_OBSERVED { color: var(--info); }
   .s-SIMULATED, .s-NOTICE { color: var(--sim); }
   .s-MISSING { color: var(--muted); }
   .sev-LOW { color: var(--info); } .sev-MEDIUM { color: var(--warn); }
@@ -968,17 +970,35 @@ function renderAssurance(data) {
   const level = a.level || "UNKNOWN";
   const verified = a.independently_verified === true;
   const stages = a.stages || [];
-  const headline = verified
-    ? "Independently verified from on-chain evidence."
-    : "Not independently verified — the provider's report alone does not establish receipt.";
+  const headlines = {
+    VERIFIED: "Independently verified from on-chain evidence.",
+    REFUNDED: "Refund independently confirmed on-chain — the funds came back, not to the destination.",
+    FAILED: "Failed: decisive evidence independently establishes the transaction did not complete.",
+    PARTIAL: "Partial: the destination is confirmed but received less than the quote expected.",
+    PENDING: "Pending: the deposit is confirmed and the swap is still progressing.",
+    REPORTED_ONLY: "Reported only — the provider's claim is not independently confirmed.",
+    CONTRADICTORY: "Contradictory: independent sources disagree; the conflict is preserved.",
+    UNAVAILABLE: "Unavailable: the evidence sources could not be reached, so no conclusion is made.",
+    UNKNOWN: "Unknown: the available evidence does not establish the outcome.",
+  };
+  const headline = headlines[level] ||
+    "Not independently verified — the provider's report alone does not establish receipt.";
   return '<div class="card"><h3>Settlement assurance</h3>' +
     '<div class="kv"><dt>Level</dt><dd>' + status(level) + "</dd>" +
     "<dt>Independently verified</dt><dd>" + (verified ? "Yes" : "No") + "</dd></div>" +
     '<p class="small ' + (verified ? "muted" : "") + '">' + esc(headline) + "</p>" +
+    (a.summary ? '<p class="small muted">' + esc(a.summary) + "</p>" : "") +
+    (a.conflicting_evidence && a.conflicting_evidence.length
+      ? '<div class="note bad">Conflicting evidence: ' +
+        a.conflicting_evidence.map(esc).join("; ") + "</div>" : "") +
+    (a.shortfall && a.shortfall !== "0"
+      ? '<div class="note">Shortfall vs the quote: ' + esc(a.shortfall) + " base units.</div>" : "") +
     (stages.length ? "<table><thead><tr><th>Stage</th><th>State</th><th>Basis</th></tr></thead><tbody>" +
-      stages.map((x) => "<tr><td>" + esc(x.stage || x.name || "") + "</td><td>" +
+      stages.map((x) => "<tr><td>" + esc(x.name || x.stage || "") + "</td><td>" +
         status(x.state || x.classification || "UNKNOWN") + '</td><td class="small">' +
-        esc(x.basis || x.detail || "") + "</td></tr>").join("") + "</tbody></table>" : "") +
+        esc(x.detail || x.basis || "") + "</td></tr>").join("") + "</tbody></table>" : "") +
+    (a.limitations && a.limitations.length
+      ? '<ul class="small muted">' + a.limitations.map((l) => "<li>" + esc(l) + "</li>").join("") + "</ul>" : "") +
     "</div>";
 }
 

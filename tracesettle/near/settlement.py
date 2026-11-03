@@ -50,6 +50,15 @@ class AssuranceLevel(str, enum.Enum):
     #: moved, but not the full amount. Distinct from UNKNOWN so a shortfall is
     #: never presented as a plain unknown or as full settlement.
     PARTIAL = "PARTIAL"
+    #: A refund is independently established (the engine confirmed the payout).
+    REFUNDED = "REFUNDED"
+    #: A failure is independently established from decisive evidence. A mere
+    #: provider-reported failure is NOT this; it stays UNKNOWN/REPORTED_ONLY.
+    FAILED = "FAILED"
+    #: The lifecycle is still progressing: the deposit is known to be in flight
+    #: and no terminal state has been established yet. Distinct from UNKNOWN
+    #: ("we cannot tell") because the evidence says the swap is actively running.
+    PENDING = "PENDING"
     #: The sources needed could not be queried, so settlement cannot be assessed.
     UNAVAILABLE = "UNAVAILABLE"
     #: Evidence was insufficient to decide (an incomplete search, or no evidence).
@@ -135,9 +144,15 @@ class NearSettlementAssurance:
 
 #: Overall outcomes in which the engine has independently confirmed the money
 #: arrived (or was refunded).
-_VERIFIED_OUTCOMES = frozenset(
-    {OverallOutcome.SETTLED_VERIFIED, OverallOutcome.REFUND_VERIFIED}
-)
+_VERIFIED_OUTCOMES = frozenset({OverallOutcome.SETTLED_VERIFIED})
+#: The refund was independently confirmed on-chain.
+_REFUND_VERIFIED_OUTCOMES = frozenset({OverallOutcome.REFUND_VERIFIED})
+#: A failure is independently established from decisive evidence.
+_FAILED_VERIFIED_OUTCOMES = frozenset({OverallOutcome.FAILED_VERIFIED})
+#: The provider asserts a failure but no decisive evidence establishes it.
+_FAILED_REPORTED_OUTCOMES = frozenset({OverallOutcome.FAILED_REPORTED_UNVERIFIED})
+#: The provider reports a refund but no on-chain payout is confirmed.
+_REFUND_REPORTED_OUTCOMES = frozenset({OverallOutcome.REFUND_REPORTED_UNVERIFIED})
 #: Overall outcomes that assert a provider success claim without independent proof.
 _REPORTED_OUTCOMES = frozenset(
     {OverallOutcome.SETTLED_REPORTED_ONLY, OverallOutcome.DELIVERY_UNVERIFIED}
@@ -185,6 +200,19 @@ def settlement_assurance_from_result(
         level = AssuranceLevel.CONTRADICTORY
     elif outcome in _VERIFIED_OUTCOMES:
         level = AssuranceLevel.VERIFIED
+    elif outcome in _REFUND_VERIFIED_OUTCOMES:
+        # An independently confirmed refund: the money is established to have
+        # come back. This is a terminal, verified state in its own right, and it
+        # must never be presented as a successful settlement.
+        level = AssuranceLevel.REFUNDED
+    elif outcome in _FAILED_VERIFIED_OUTCOMES:
+        # A failure established by decisive evidence. Distinct from a merely
+        # reported failure, which stays unverified.
+        level = AssuranceLevel.FAILED
+    elif outcome in _FAILED_REPORTED_OUTCOMES or outcome in _REFUND_REPORTED_OUTCOMES:
+        # The provider asserts a terminal failure/refund, but no decisive
+        # evidence establishes it. It is reported, not proven.
+        level = AssuranceLevel.REPORTED_ONLY
     elif outcome in _REPORTED_OUTCOMES:
         level = AssuranceLevel.REPORTED_ONLY
     elif outcome is OverallOutcome.NOT_FOUND or outcome is OverallOutcome.UNSUPPORTED:
@@ -194,6 +222,18 @@ def settlement_assurance_from_result(
     else:
         # FAILED_* and anything else: the money is not established as delivered.
         level = AssuranceLevel.UNKNOWN
+
+    # A deposit that is independently confirmed to exist while the settlement is
+    # not yet terminal is *pending*, not unknown: the evidence shows the swap is
+    # actively progressing. This never applies to a contradictory result, and it
+    # never applies once a terminal level has been reached.
+    if (
+        level in (AssuranceLevel.UNKNOWN, AssuranceLevel.REPORTED_ONLY)
+        and outcome is not OverallOutcome.CONTRADICTORY
+        and _state_of(result, Stage.BRIDGE_DEPOSIT_CREDIT) is StageState.CONFIRMED
+        and _state_of(result, Stage.DESTINATION_CHAIN_DELIVERY) is not StageState.CONFIRMED
+    ):
+        level = AssuranceLevel.PENDING
 
     verified = level is AssuranceLevel.VERIFIED
     partial = _is_partial(result)
@@ -319,8 +359,14 @@ def _summary(
 ) -> str:
     if level is AssuranceLevel.VERIFIED:
         return "Independently verified: the decisive NEAR settlement stages are confirmed."
+    if level is AssuranceLevel.REFUNDED:
+        return "Refunded: an on-chain refund payout is independently confirmed."
+    if level is AssuranceLevel.FAILED:
+        return "Failed: decisive evidence independently establishes the transaction failed."
     if level is AssuranceLevel.PARTIAL:
         return "Partial: the destination is independently confirmed but received less than the quote's expected output."
+    if level is AssuranceLevel.PENDING:
+        return "Pending: the deposit is independently confirmed and the swap is still progressing."
     if level is AssuranceLevel.REPORTED_ONLY:
         return (
             "Reported only: the provider claims success, but at least one decisive stage is not "

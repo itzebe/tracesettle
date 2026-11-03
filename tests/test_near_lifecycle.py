@@ -333,6 +333,35 @@ def test_lifecycle_view_never_returns_settlement_verified():
         assert view.label != "SETTLEMENT_VERIFIED"
 
 
+def test_pending_deposit_is_not_reported_as_a_deposit():
+    """PENDING_DEPOSIT means "awaiting your deposit" — no funds have arrived.
+
+    The official 1Click status table defines PENDING_DEPOSIT as "Awaiting your
+    token deposit". Reporting it as a submitted or detected deposit would be a
+    false-success state, so it must map to AWAITING_DEPOSIT with
+    ``deposit_seen`` false.
+    """
+    view = intents_mod.lifecycle_view("PENDING_DEPOSIT")
+    assert view.label == "AWAITING_DEPOSIT"
+    assert view.deposit_seen is False
+    assert view.provider_claims_success is False
+    assert any("awaiting" in lim.lower() for lim in view.limitations)
+
+
+def test_incomplete_deposit_is_a_shortfall_not_a_deposit():
+    view = intents_mod.lifecycle_view("INCOMPLETE_DEPOSIT")
+    assert view.label == "DEPOSIT_INCOMPLETE"
+    assert view.deposit_seen is False
+    assert any("below" in lim.lower() or "shortfall" in lim.lower() for lim in view.limitations)
+
+
+def test_known_deposit_tx_is_the_only_status_that_marks_a_deposit_seen():
+    assert intents_mod.lifecycle_view("KNOWN_DEPOSIT_TX").deposit_seen is True
+    assert intents_mod.lifecycle_view("KNOWN_DEPOSIT_TX").label == "DEPOSIT_DETECTED"
+    for status in ("PENDING_DEPOSIT", "INCOMPLETE_DEPOSIT"):
+        assert intents_mod.lifecycle_view(status).deposit_seen is False
+
+
 def test_tokens_endpoint_parses_assets(opener):
     opener.json(
         "GET",

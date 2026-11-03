@@ -47,8 +47,9 @@ RECIPIENT_TYPES = ("DESTINATION_CHAIN", "INTENTS", "CONFIDENTIAL_INTENTS")
 REFUND_TYPES = ("ORIGIN_CHAIN", "INTENTS", "CONFIDENTIAL_INTENTS")
 SWAP_TYPES = ("EXACT_INPUT", "EXACT_OUTPUT", "FLEX_INPUT", "ANY_INPUT")
 
-#: The documented status lifecycle, in order. Used to reject an unrecognised
-#: status rather than guess at it.
+#: The documented status lifecycle. Used to reject an unrecognised status rather
+#: than guess at it. The set is exactly the seven statuses the official status
+#: table defines; order is not significant.
 LIFECYCLE_STATUSES = (
     "KNOWN_DEPOSIT_TX",
     "PENDING_DEPOSIT",
@@ -67,8 +68,10 @@ LIFECYCLE_LABELS: dict[str, str] = {
     "AUTHORIZATION_REQUIRED": "Authorization required",
     "AUTHORIZATION_GRANTED": "Authorization granted",
     "DEPOSIT_ADDRESS_ISSUED": "Deposit address issued",
+    "AWAITING_DEPOSIT": "Awaiting your deposit",
     "DEPOSIT_SUBMITTED": "Deposit submitted",
     "DEPOSIT_DETECTED": "Deposit detected",
+    "DEPOSIT_INCOMPLETE": "Deposit below required amount",
     "EXECUTION_PENDING": "Execution pending",
     "DESTINATION_OBSERVED": "Destination transaction observed",
     "SETTLEMENT_VERIFIED": "Settlement independently verified",
@@ -569,8 +572,17 @@ def _opt_str(value: Any) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-#: The provider statuses that mean a deposit has been seen (or is being seen).
-DEPOSIT_SEEN_STATUSES = ("KNOWN_DEPOSIT_TX", "PENDING_DEPOSIT", "INCOMPLETE_DEPOSIT")
+#: Statuses whose name literally contains "deposit" but which do **not** mean a
+#: deposit has been observed. The official status table defines
+#: ``PENDING_DEPOSIT`` as "Awaiting your token deposit" — the deposit address is
+#: issued and no funds have arrived. ``INCOMPLETE_DEPOSIT`` is a *shortfall*: some
+#: funds arrived but below the required amount. Neither is a completed deposit.
+#: Only ``KNOWN_DEPOSIT_TX`` ("Deposit transaction detected") means a deposit was
+#: observed.
+AWAITING_DEPOSIT_STATUSES = ("PENDING_DEPOSIT",)
+INCOMPLETE_DEPOSIT_STATUSES = ("INCOMPLETE_DEPOSIT",)
+#: Statuses that establish a deposit transaction was observed on the origin chain.
+DEPOSIT_SEEN_STATUSES = ("KNOWN_DEPOSIT_TX",)
 
 
 @dataclass(frozen=True)
@@ -667,8 +679,22 @@ def lifecycle_view(
         )
 
     deposit_seen = status in DEPOSIT_SEEN_STATUSES or status in ("PROCESSING", "SUCCESS", "REFUNDED")
-    if status in DEPOSIT_SEEN_STATUSES:
-        label = "DEPOSIT_DETECTED" if status != "PENDING_DEPOSIT" else "DEPOSIT_SUBMITTED"
+    if status in AWAITING_DEPOSIT_STATUSES:
+        # "Awaiting your token deposit": the address is issued, no funds have
+        # arrived. This must never read as a submitted or detected deposit.
+        label = "AWAITING_DEPOSIT"
+        limitations.append(
+            "The provider reports PENDING_DEPOSIT, which means it is awaiting your deposit; "
+            "no deposit transaction has been observed yet."
+        )
+    elif status in INCOMPLETE_DEPOSIT_STATUSES:
+        label = "DEPOSIT_INCOMPLETE"
+        limitations.append(
+            "The provider reports INCOMPLETE_DEPOSIT: the deposit received is below the required "
+            "amount. A shortfall is not a completed deposit."
+        )
+    elif status == "KNOWN_DEPOSIT_TX":
+        label = "DEPOSIT_DETECTED"
     elif status == "PROCESSING":
         label = "EXECUTION_PENDING"
     elif status == "SUCCESS":
