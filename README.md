@@ -199,22 +199,30 @@ settle → assurance flow:
    transaction, runs the guard and the NEAR policy/access-key controls on the
    **actual** parameters, and only proceeds to a quote when the outcome is
    `ALLOW`. The operator's policy is resolved server-side; a client cannot choose
-   the policy it is judged against.
+   the policy it is judged against. A top-level `idempotency_key` makes a retried
+   or double-submitted create resolve to one intent.
 2. **Quote.** On `ALLOW` the lifecycle requests a live 1Click quote
    (`POST /v0/quote`, `dry: false`) to obtain a deposit address, and records the
    intent with its deposit address and expected output amount.
-3. **Get / list.** `POST /api/guard/near/lifecycle/{intent_id}/get`,
+3. **Deposit handoff.** The console shows the deposit address, any memo, the
+   quoted fees, and the quote expiry, so the operator can fund the address from
+   their **own** wallet. `POST /api/guard/near/lifecycle/{intent_id}/deposit`
+   records the deposit transaction hash the operator supplies and asks the
+   provider to pre-verify it. This step moves nothing: the tool never signs,
+   sends, or holds funds.
+4. **Get / list.** `POST /api/guard/near/lifecycle/{intent_id}/get`,
    `/lifecycle/list`, and `/lifecycle/tokens` read the durable intent record
    (SQLite via `TRACESETTLE_INTENTS_DB`) and the provider asset list. Intent
    records are owner-scoped: a request can only read an intent it owns.
-4. **Settle + assurance.** When the swap settles, the same evidence pipeline that
+5. **Settle + assurance.** When the swap settles, the same evidence pipeline that
    powers investigations produces the settlement-assurance view (above), so a
    provider `SUCCESS` is never confused with verified receipt.
 
-The lifecycle never signs, submits, or moves funds: it obtains a deposit address
-and observes it. `tests/test_near_lifecycle.py` (18 tests) and the lifecycle
-acceptance tests in `tests/test_near_api.py` drive the real server and the real
-lifecycle code.
+The lifecycle never signs, submits, or moves funds: it obtains a deposit address,
+hands it to the operator, and observes the outcome. `tests/test_near_lifecycle.py`
+(18 tests) and the lifecycle acceptance tests in `tests/test_near_api.py` drive the
+real server and the real lifecycle code. The console walks the same five steps in
+the **Intents Lifecycle** tab.
 
 ### NEAR agent protection
 
@@ -294,11 +302,11 @@ a bare interpreter.
 **1. Run the tests.**
 
 ```sh
-python -m pytest tests/ --collect-only -q   # 924 tests collected
-python -m pytest tests/ -q                  # 900 passed, 24 skipped
+python -m pytest tests/ --collect-only -q   # 929 tests collected
+python -m pytest tests/ -q                  # 905 passed, 24 skipped
 ```
-→ `900 passed, 24 skipped`. The skips are the PostgreSQL integration
-tests; set `TRACESETTLE_TEST_PG_DSN` to a real server to run them (924 pass).
+→ `905 passed, 24 skipped`. The skips are the PostgreSQL integration
+tests; set `TRACESETTLE_TEST_PG_DSN` to a real server to run them (929 pass).
 
 **2. Prove the enforcement boundary: a permitted request executes, a suspicious
 one cannot.**
@@ -686,7 +694,7 @@ identical decisions.
 | `.github/workflows/ci.yml` | CI: tests, static analysis, Docker build + runtime, demo determinism. |
 | `demo/demonstrate.py` | Read-only walkthrough (live, or `--offline` replay of captures). |
 | `demo/replay_opener.py` | Offline transport that replays `evidence/raw/` through the real code. |
-| `tests/` | 924 tests (24 PostgreSQL tests skip without `TRACESETTLE_TEST_PG_DSN`). `evidence/raw/` fixtures are real captures; `tests/fixtures/synthetic/` are clearly labelled synthetic. |
+| `tests/` | 929 tests (24 PostgreSQL tests skip without `TRACESETTLE_TEST_PG_DSN`). `evidence/raw/` fixtures are real captures; `tests/fixtures/synthetic/` are clearly labelled synthetic. |
 | `PHASE1_FEASIBILITY.md` | Phase 1 feasibility and API verification. |
 | `submission/` | Hackathon artifacts: API payload shape, technical summary, demo post draft, publication checklist. |
 | `docs/official/` | NEAR documentation captured during Phase 1. |
@@ -984,7 +992,7 @@ immutable commit SHA (not a moving tag), and cancels superseded runs.
 ## Tests
 
 ```sh
-python3 -m pytest tests/ -q          # 900 passed, 24 skipped (924 with a server)
+python3 -m pytest tests/ -q          # 905 passed, 24 skipped (929 with a server)
 python3 -m pytest tests/test_guard_authorization.py -q
 python3 -m pytest tests/test_guard_invariants.py -q
 python3 -m pytest tests/test_guard_end_to_end.py -q

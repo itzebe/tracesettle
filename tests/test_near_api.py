@@ -402,3 +402,39 @@ def test_lifecycle_identity_binding_rejects_a_mismatched_credential(tmp_path):
         authenticated_service_id="some-other-service",
     )
     assert response.status == 403
+
+
+def test_lifecycle_top_level_idempotency_key_dedupes_a_resend(tmp_path):
+    """A retried create with the same key resolves to one intent.
+
+    The console derives this key from the transaction parameters, so a double
+    submit or a resend cannot create a second transaction record.
+    """
+    api, _, _ = _lifecycle_api(tmp_path)
+    body = {"transaction": _tx(amount="1000", operation="WITHDRAWAL"), "idempotency_key": "ui-abc123"}
+    first = api.dispatch("POST", "/api/guard/near/lifecycle", {}, body)
+    second = api.dispatch("POST", "/api/guard/near/lifecycle", {}, body)
+    assert first.status == 200 and second.status == 200
+    assert first.payload["intent_id"] == second.payload["intent_id"]
+    assert first.payload["created"] is True
+    assert second.payload["created"] is False
+    listed = api.dispatch("POST", "/api/guard/near/lifecycle/list", {}, {})
+    matching = [i for i in listed.payload["intents"] if i["intent_id"] == first.payload["intent_id"]]
+    assert len(matching) == 1
+
+
+def test_lifecycle_transaction_level_key_wins_over_the_top_level_key(tmp_path):
+    api, _, _ = _lifecycle_api(tmp_path)
+    tx = _tx(amount="1000", operation="WITHDRAWAL", idempotency_key="tx-level")
+    created = api.dispatch(
+        "POST", "/api/guard/near/lifecycle", {}, {"transaction": tx, "idempotency_key": "top-level"}
+    )
+    assert created.status == 200
+    # A later call with only the top-level key must not collide with the tx-level key.
+    other = api.dispatch(
+        "POST",
+        "/api/guard/near/lifecycle",
+        {},
+        {"transaction": _tx(amount="1000", operation="WITHDRAWAL"), "idempotency_key": "top-level"},
+    )
+    assert other.payload["intent_id"] != created.payload["intent_id"]

@@ -475,6 +475,13 @@ class GuardAPI:
             transaction, authenticated_service_id
         ):
             return ApiResponse(403, {"error": "service identity does not match the credential"})
+        # A top-level ``idempotency_key`` is accepted so a caller can make a retried
+        # or double-submitted create idempotent without duplicating the field inside
+        # the transaction. An explicit transaction-level key wins.
+        idem = body.get("idempotency_key")
+        if idem and not transaction.get("idempotency_key"):
+            transaction = dict(transaction)
+            transaction["idempotency_key"] = str(idem)
         try:
             result = self.lifecycle.create_and_authorize(
                 owner=owner,

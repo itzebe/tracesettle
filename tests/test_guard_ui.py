@@ -465,3 +465,47 @@ def test_console_near_demo_destinations_match_the_real_default_policy():
     assert "0x4e6d3a556e485188e9c9a528bc72c88bd92bd735" in approved
     # The attack demo address must not be approved by the policy.
     assert "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef" not in approved
+
+
+def test_console_lifecycle_submit_is_not_double_bound():
+    """A single submit must not create two intents.
+
+    The bug: the Authorize button had both an ``onclick`` and the form an
+    ``onsubmit``, so one click fired two POSTs and created two intent records.
+    The button must be bound once, through the form only.
+    """
+    from tracesettle.guard.console import CONSOLE_HTML
+
+    # The button must not carry its own click handler for creating an intent.
+    assert 'getElementById("i-submit").onclick' not in CONSOLE_HTML
+    assert 'getElementById("intents-create").onsubmit' in CONSOLE_HTML
+    # An in-flight guard and a derived idempotency key make a resend idempotent.
+    assert "IN.busy" in CONSOLE_HTML
+    assert "payloadKey" in CONSOLE_HTML
+    assert "idempotency_key" in CONSOLE_HTML
+
+
+def test_console_lifecycle_has_a_wallet_handoff_and_deposit_step():
+    """The user journey must expose the wallet handoff and the deposit record step."""
+    from tracesettle.guard.console import CONSOLE_HTML
+
+    assert "Fund this deposit address" in CONSOLE_HTML
+    assert 'id="i-deposit-hash"' in CONSOLE_HTML
+    assert 'id="i-deposit"' in CONSOLE_HTML
+    assert 'id="i-handoff"' in CONSOLE_HTML
+    # The handoff states plainly that the transfer is the user's own. The JS
+    # source splits the sentence across two concatenated string literals, so
+    # assert both fragments rather than the joined prose.
+    assert "never signs, " in CONSOLE_HTML
+    assert "sends, or holds funds" in CONSOLE_HTML
+    # Quote fees/expiry are shown to the user.
+    assert "Minimum received" in CONSOLE_HTML
+    assert "Quote expires" in CONSOLE_HTML
+
+
+def test_console_declares_an_inline_favicon():
+    """No external origin, and no 404 for a missing favicon."""
+    from tracesettle.guard.console import CONSOLE_HTML
+
+    assert 'rel="icon"' in CONSOLE_HTML
+    assert "data:image/svg+xml" in CONSOLE_HTML

@@ -22,6 +22,7 @@ CONSOLE_HTML = """<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>TRACESETTLE — Security Operations Console</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230b0e14'/%3E%3Cpath d='M9 11h14M16 11v11' stroke='%236ea8fe' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E">
 <style>
   :root {
     --bg: #0b0e14; --panel: #121722; --panel-2: #0e131c; --line: #232b3a;
@@ -344,17 +345,43 @@ CONSOLE_HTML = """<!DOCTYPE html>
     </div>
 
     <div class="panel">
-      <h2>2. Quote, deposit, status, assurance</h2>
+      <h2>2. Quote and deposit handoff</h2>
       <p class="small">Actions run against the intent created above. A live quote is refused unless
-        the stored decision permits signing.</p>
+        the stored decision permits signing. A live quote issues a deposit address you fund from
+        your own wallet; this product never signs or sends that transfer.</p>
       <div class="actions" style="margin-bottom:12px">
         <button class="act" type="button" id="i-dry-quote">Request dry quote</button>
         <button class="act" type="button" id="i-live-quote">Request live quote</button>
-        <button class="act" type="button" id="i-status">Refresh status</button>
-        <button class="act" type="button" id="i-assurance">Run settlement assurance</button>
         <button class="act" type="button" id="i-list">List my intents</button>
       </div>
       <div id="intents-step-output" aria-live="polite"></div>
+      <div id="i-handoff"></div>
+      <div id="i-deposit-form-wrap" hidden>
+        <hr style="border:0;border-top:1px solid var(--line);margin:14px 0">
+        <label for="i-deposit-hash">Deposit transaction hash (from your wallet)</label>
+        <div class="row" style="margin-top:6px">
+          <div class="field" style="flex:2 1 320px">
+            <input type="text" id="i-deposit-hash" placeholder="0x… (EVM) or a chain transaction hash" maxlength="200" autocomplete="off">
+          </div>
+          <div class="field" style="flex:0 0 auto">
+            <button class="act primary" type="button" id="i-deposit">Record deposit</button>
+          </div>
+        </div>
+        <p class="small muted" style="margin:6px 0 0">Recording the hash is optional and read-only: it tells the
+          provider a deposit was sent so it can pre-verify it. It moves nothing.</p>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>3. Monitor and verify settlement</h2>
+      <p class="small">Read the provider's status, then run the independent settlement assurance.
+        A provider success message is a reported claim; only decisive on-chain evidence raises the
+        assurance level.</p>
+      <div class="actions" style="margin-bottom:12px">
+        <button class="act" type="button" id="i-status">Refresh status</button>
+        <button class="act" type="button" id="i-assurance">Run settlement assurance</button>
+      </div>
+      <div id="intents-assurance-output" aria-live="polite"></div>
     </div>
 
     <div class="panel">
@@ -749,20 +776,23 @@ async function evalNear(approved) {
 }
 
 /* ---- NEAR Intents lifecycle ---- */
-let IN = { intentId: null };
+let IN = { intentId: null, busy: false, idemKey: null };
 
 async function loadIntents() {
   const out = document.getElementById("intents-create-output");
   out.innerHTML = "";
-  const list = await api("GET", "/api/guard/near/lifecycle");
-  document.getElementById("i-submit").onclick = createIntent;
+  // The submit control is bound once, through the form's submit event only.
+  // Binding both an onclick on the button and an onsubmit on the form made a
+  // single click create two intents (two POSTs) — a real duplicate-submission bug.
   document.getElementById("intents-create").onsubmit = (e) => { e.preventDefault(); createIntent(); };
-  document.getElementById("i-dry-quote").onclick = () => stepIntent("quote", { dry: true });
-  document.getElementById("i-live-quote").onclick = () => stepIntent("quote", { dry: false });
-  document.getElementById("i-status").onclick = () => stepIntent("status", {});
-  document.getElementById("i-assurance").onclick = () => stepIntent("assurance", {});
+  const list = await api("GET", "/api/guard/near/lifecycle");
+  document.getElementById("i-dry-quote").onclick = () => stepIntent("quote", { dry: true }, "intents-step-output");
+  document.getElementById("i-live-quote").onclick = () => stepIntent("quote", { dry: false }, "intents-step-output");
+  document.getElementById("i-status").onclick = () => stepIntent("status", {}, "intents-assurance-output");
+  document.getElementById("i-assurance").onclick = () => stepIntent("assurance", {}, "intents-assurance-output");
   document.getElementById("i-list").onclick = listIntents;
   document.getElementById("i-tokens").onclick = loadTokens;
+  document.getElementById("i-deposit").onclick = recordDeposit;
   if (list && list.intents && list.intents.length) {
     out.innerHTML = '<div class="note">' + esc(list.intents.length) +
       " intent(s) recorded for the local owner. Create a new one below.</div>";
@@ -786,10 +816,20 @@ function intentFormPayload() {
 
 async function createIntent() {
   const out = document.getElementById("intents-create-output");
+  const submit = document.getElementById("i-submit");
+  if (IN.busy) return;
+  IN.busy = true;
+  if (submit) submit.disabled = true;
+  // The idempotency key is derived from the exact transaction parameters, so a
+  // double click, a retry, or a resend of the *same* transaction resolves to one
+  // intent on the server. Changing any field is a new transaction with a new key.
+  const payload = intentFormPayload();
+  IN.idemKey = await payloadKey(payload);
   out.innerHTML = loading("Authorizing…");
   try {
     const data = await api("POST", "/api/guard/near/lifecycle", {
-      transaction: intentFormPayload(),
+      transaction: payload,
+      idempotency_key: IN.idemKey,
     });
     IN.intentId = data.intent_id;
     const d = data.decision || {};
@@ -797,19 +837,96 @@ async function createIntent() {
       '<div class="kv"><dt>Outcome</dt><dd>' + status(d.outcome) +
       "</dd><dt>Permits signing</dt><dd>" + esc(data.permits_signing) +
       "</dd><dt>State</dt><dd>" + esc(data.state) +
-      '</dd><dt>Summary</dt><dd class="small">' + esc(d.summary || "") + "</dd></div></div>";
+      '</dd><dt>Summary</dt><dd class="small">' + esc(d.summary || "") + "</dd></div></div>" +
+      (data.created === false ? '<div class="note">This is the same transaction as an existing intent; no duplicate was created.</div>' : "");
   } catch (err) { out.innerHTML = '<div class="note bad">' + esc(err.message) + "</div>"; }
+  finally { IN.busy = false; if (submit) submit.disabled = false; }
 }
 
-async function stepIntent(action, body) {
-  const out = document.getElementById("intents-step-output");
+async function payloadKey(payload) {
+  const canonical = JSON.stringify(payload, Object.keys(payload).sort());
+  try {
+    const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(canonical));
+    return "ui-" + Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("").slice(0, 32);
+  } catch (e) {
+    // crypto.subtle needs a secure context; the loopback console is one, but fall
+    // back to a deterministic string so a non-secure context still deduplicates.
+    let h = 0;
+    for (let i = 0; i < canonical.length; i++) { h = (h * 31 + canonical.charCodeAt(i)) | 0; }
+    return "ui-fallback-" + (h >>> 0).toString(16);
+  }
+}
+
+async function stepIntent(action, body, targetId) {
+  const out = document.getElementById(targetId || "intents-step-output");
   if (!IN.intentId) { out.innerHTML = '<div class="note bad">Create an intent first.</div>'; return; }
+  if (IN.busy) return;
+  IN.busy = true;
   out.innerHTML = loading("Running " + action + "…");
   try {
     const data = await api("POST", "/api/guard/near/lifecycle/" + IN.intentId + "/" + action, body || {});
-    out.innerHTML = '<div class="card"><h3>' + esc(action) + "</h3>" +
+    if (action === "quote" && data.ok && data.deposit_address) {
+      renderHandoff(data);
+      out.innerHTML = '<div class="card"><h3>Live quote</h3>' +
+        '<pre class="small">' + esc(JSON.stringify(data, null, 2)) + "</pre></div>";
+    } else {
+      out.innerHTML = '<div class="card"><h3>' + esc(action) + "</h3>" +
+        '<pre class="small">' + esc(JSON.stringify(data, null, 2)) + "</pre></div>";
+    }
+  } catch (err) { out.innerHTML = '<div class="note bad">' + esc(err.message) + "</div>"; }
+  finally { IN.busy = false; }
+}
+
+/* ---- wallet handoff: the user funds the deposit address themselves ---- */
+function renderHandoff(data) {
+  const host = document.getElementById("i-handoff");
+  const wrap = document.getElementById("i-deposit-form-wrap");
+  const q = data.quote || {};
+  const fees = [
+    ["Amount in", q.amount_in_formatted != null ? q.amount_in_formatted : "—"],
+    ["Expected amount out", q.amount_out_formatted != null ? q.amount_out_formatted : "—"],
+    ["Minimum received", q.min_amount_out != null ? q.min_amount_out : "—"],
+    ["Withdraw fee (base units)", q.withdraw_fee != null ? q.withdraw_fee : "—"],
+    ["Refund fee (base units)", q.refund_fee != null ? q.refund_fee : "—"],
+    ["Estimated time", q.time_estimate != null ? (q.time_estimate + " s") : "—"],
+    ["Quote expires", q.deadline != null ? q.deadline : "not stated by the provider"],
+  ].map(function (r) { return "<dt>" + esc(r[0]) + "</dt><dd>" + esc(r[1]) + "</dd>"; }).join("");
+  host.innerHTML = '<div class="card"><h3>Fund this deposit address</h3>' +
+    '<p class="small">Send the quoted amount from your own wallet to this address. This product never signs, ' +
+    'sends, or holds funds — the transfer is yours.</p>' +
+    '<div class="kv"><dt>Deposit address</dt><dd><code class="mono" id="i-deposit-address">' + esc(data.deposit_address) + "</code> " +
+    '<button class="act" type="button" id="i-copy" style="padding:2px 8px">Copy</button></dd>' +
+    (data.deposit_memo ? '<dt>Deposit memo</dt><dd><code class="mono">' + esc(data.deposit_memo) + "</code></dd>" : "") +
+    "</div>" +
+    '<p class="small muted">Copy the address exactly. After you send the transfer, paste its transaction hash below ' +
+    'so the provider can pre-verify the deposit.</p>' +
+    '<div class="kv">' + fees + "</div></div>";
+  const copy = document.getElementById("i-copy");
+  if (copy) copy.onclick = function () {
+    const text = data.deposit_address;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () { copy.textContent = "Copied"; },
+        function () { copy.textContent = "Select above"; });
+    } else { copy.textContent = "Select above"; }
+  };
+  if (wrap) wrap.hidden = false;
+}
+
+async function recordDeposit() {
+  const out = document.getElementById("intents-step-output");
+  const hashEl = document.getElementById("i-deposit-hash");
+  const hash = (hashEl && hashEl.value || "").trim();
+  if (!IN.intentId) { out.innerHTML = '<div class="note bad">Create an intent and request a live quote first.</div>'; return; }
+  if (!hash) { out.innerHTML = '<div class="note bad">Enter the deposit transaction hash from your wallet.</div>'; return; }
+  if (IN.busy) return;
+  IN.busy = true;
+  out.innerHTML = loading("Recording deposit…");
+  try {
+    const data = await api("POST", "/api/guard/near/lifecycle/" + IN.intentId + "/deposit", { deposit_tx_hash: hash });
+    out.innerHTML = '<div class="card"><h3>Deposit recorded</h3>' +
       '<pre class="small">' + esc(JSON.stringify(data, null, 2)) + "</pre></div>";
   } catch (err) { out.innerHTML = '<div class="note bad">' + esc(err.message) + "</div>"; }
+  finally { IN.busy = false; }
 }
 
 async function listIntents() {
