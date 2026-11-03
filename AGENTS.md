@@ -971,3 +971,38 @@ byte-identical.
   binding on the NEAR route; no key material in any response.
 - **Not done, requires explicit human confirmation:** making the repository
   public, pushing, opening the PR, posting the demo, and sending the submission.
+
+## Console lifecycle journey + duplicate-submit fix (2026-11-03)
+
+Driven from a real browser (Playwright/Chromium) against the shipped server, then
+fixed and regression-tested. Two defects, one new capability.
+
+- **One click created two intents.** `#i-submit` carried both an `onclick` and the
+  form's `onsubmit`, both calling `createIntent()`. The submit is now bound once,
+  through the form only, with an in-flight `IN.busy` guard, a disabled button, and
+  a payload-derived idempotency key. The key is threaded to the server as a
+  top-level `idempotency_key` (`guard/api.py`), which
+  `intents_store.create(..., idempotency_key=...)` already deduplicated on. An
+  explicit transaction-level key still wins over the derived one.
+- **404 on every console load.** The page requested a favicon that did not exist.
+  The console now ships a same-origin inline SVG `<link rel="icon">`; there is
+  still no third-party origin.
+- **New: wallet-handoff / deposit step.** The Intents Lifecycle tab now shows the
+  deposit address, any memo, the quoted fees and the quote expiry, with a copy
+  affordance, plus a field to record the deposit hash through
+  `/lifecycle/{id}/deposit`. `stepIntent(action, body, targetId)` renders each
+  step in its own panel, so quote, handoff, deposit, monitor and assurance are
+  distinct. The tool still never signs, sends, or holds funds.
+- **Tests:** 924 -> **929**. New regression tests cover the idempotency dedup, the
+  transaction-level key precedence, the single submit binding, the handoff and
+  deposit elements, and the inline favicon. `pyflakes` clean; `compileall` OK;
+  offline demo byte-identical (`4864f13c…`).
+- **Publication secret audit (full history, `gitleaks` 8.28.0):** 6 findings, all
+  confirmed false positives — the public USDC contract address (`0xa0b8…eB48`,
+  flagged by the generic-api-key entropy heuristic in three test files), a
+  self-documenting `X-API-Key: totally-invalid-key-123` placeholder used to prove
+  a 401, and the vendored 1Click OpenAPI's own `Authorization: Bearer
+  YOUR_JWT_TOKEN` example. A targeted scan for real credential formats (PATs,
+  cloud keys, JWTs, PEM private keys) over every blob in every ref returned
+  nothing. No real credential exists in the history. The remote URL's token lives
+  only in the untracked `.git/config`.
