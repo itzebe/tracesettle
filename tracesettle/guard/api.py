@@ -49,8 +49,13 @@ def _int_param(params: dict[str, str], name: str, default: int, *, low: int, hig
 class GuardAPI:
     """Routes guard requests to the service and serializes the results."""
 
-    def __init__(self, service: GuardService, lifecycle: Any = None) -> None:
+    def __init__(
+        self, service: GuardService, lifecycle: Any = None, investigation_store: Any = None
+    ) -> None:
         self.service = service
+        #: The optional durable settlement-investigation store. When set, a
+        #: completed investigation is retrievable later, across a restart.
+        self.investigation_store = investigation_store
         #: The optional NEAR Intents lifecycle. Built only when the operator has
         #: enabled it and configured a durable store, so a deployment that does
         #: not offer the lifecycle pays nothing and exposes no route.
@@ -173,6 +178,10 @@ class GuardAPI:
         if path.startswith("/api/guard/near/lifecycle/"):
             intent_id = path[len("/api/guard/near/lifecycle/") :].strip("/")
             return self._lifecycle_get(intent_id)
+        if path == "/api/guard/investigations":
+            return self._investigations_list()
+        if path.startswith("/api/guard/investigations/"):
+            return self._investigation_get(path[len("/api/guard/investigations/"):])
         if path == "/api/guard/invariants":
             from .invariants import INVARIANT_DESCRIPTIONS, check_all
 
@@ -450,6 +459,47 @@ class GuardAPI:
         data = self.lifecycle.assets()
         return ApiResponse(200, data)
 
+    # -- durable settlement-investigation history --------------------------
+
+    def _investigations_list(self) -> ApiResponse:
+        """List the stored investigations for the local owner (read-only)."""
+        if self.investigation_store is None:
+            return ApiResponse(
+                200,
+                {
+                    "enabled": False,
+                    "owner": "local",
+                    "investigations": [],
+                    "note": (
+                        "durable investigation history is not configured; set "
+                        "TRACESETTLE_INVESTIGATIONS_DB to retain reports across a restart"
+                    ),
+                },
+            )
+        return ApiResponse(
+            200,
+            {
+                "enabled": True,
+                "owner": "local",
+                "investigations": self.investigation_store.list_for_owner("local"),
+            },
+        )
+
+    def _investigation_get(self, investigation_id: str) -> ApiResponse:
+        """Return one stored investigation report, with its evidence intact."""
+        if self.investigation_store is None:
+            return ApiResponse(
+                404,
+                {"error": "durable investigation history is not configured"},
+            )
+        investigation_id = investigation_id.strip("/")
+        if not investigation_id or len(investigation_id) > 200:
+            return _bad_request("invalid investigation id")
+        report = self.investigation_store.get(investigation_id, owner="local")
+        if report is None:
+            return ApiResponse(404, {"error": "no such investigation"})
+        return ApiResponse(200, {"investigation": report})
+
     def _lifecycle_get(self, intent_id: str) -> ApiResponse:
         refused = self._require_lifecycle()
         if refused is not None:
@@ -510,6 +560,13 @@ class GuardAPI:
                     200,
                     self.lifecycle.request_quote(
                         owner=owner, intent_id=intent_id, dry=bool(body.get("dry", False))
+                    ),
+                )
+            if action == "approve":
+                return ApiResponse(
+                    200,
+                    self.lifecycle.approve_quote(
+                        owner=owner, intent_id=intent_id, approve=bool(body.get("approve", True))
                     ),
                 )
             if action == "deposit":

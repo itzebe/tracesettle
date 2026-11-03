@@ -509,3 +509,63 @@ def test_console_declares_an_inline_favicon():
 
     assert 'rel="icon"' in CONSOLE_HTML
     assert "data:image/svg+xml" in CONSOLE_HTML
+
+
+# --- durable settlement-investigation history -----------------------------
+
+
+def test_history_is_disabled_when_no_store_is_configured():
+    with running_server() as base:
+        status, body, _ = _request("GET", base + "/api/guard/investigations")
+    assert status == 200
+    assert body["enabled"] is False
+    assert body["investigations"] == []
+
+
+def test_a_stored_report_is_retrievable_over_http(tmp_path):
+    from tracesettle.investigation_store import InvestigationStore
+
+    store = InvestigationStore(tmp_path / "investigations.db")
+    store.save(
+        {
+            "investigation_id": "ts-1",
+            "input": {"identifier": "0xB741c00f6D63b6dEd0cCADA1a82bCBADc38A572B"},
+            "outcome": "SETTLED_VERIFIED",
+            "created_at": "2026-11-03T00:00:00Z",
+            "evidence": [{"classification": "CONFIRMED"}],
+        }
+    )
+    try:
+        with running_server(investigation_store=store) as base:
+            status, listing, _ = _request("GET", base + "/api/guard/investigations")
+            assert status == 200
+            assert listing["enabled"] is True
+            assert listing["investigations"][0]["investigation_id"] == "ts-1"
+
+            status, detail, _ = _request("GET", base + "/api/guard/investigations/ts-1")
+            assert status == 200
+            assert detail["investigation"]["outcome"] == "SETTLED_VERIFIED"
+
+            status, _, _ = _request("GET", base + "/api/guard/investigations/nope")
+            assert status == 404
+    finally:
+        store.close()
+
+
+def test_history_is_gated_by_the_api_key_when_one_is_configured(tmp_path):
+    # Guard reads expose operational state, so history is gated by the same API
+    # key as the other guard routes: missing key -> 401, correct key -> 200.
+    from tracesettle.investigation_store import InvestigationStore
+
+    store = InvestigationStore(tmp_path / "investigations.db")
+    try:
+        with running_server(api_key="secret", investigation_store=store) as base:
+            status, _, _ = _request("GET", base + "/api/guard/investigations")
+            assert status == 401
+            status, body, _ = _request(
+                "GET", base + "/api/guard/investigations", key="secret"
+            )
+            assert status == 200
+            assert body["enabled"] is True
+    finally:
+        store.close()

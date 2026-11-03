@@ -676,7 +676,14 @@ class Handler(BaseHTTPRequestHandler):
         inv = investigate(identifier, client)
         result = build_result(inv)
         created_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        return build_report(inv, result, created_at)
+        report = build_report(inv, result, created_at)
+        # Persist the report when durability is configured. A configured store
+        # that cannot record the conclusion is a hard failure: the operator asked
+        # for a retrievable history, so a silent drop would be a false promise.
+        store = getattr(server, "investigation_store", None)
+        if store is not None:
+            store.save(report.to_dict())
+        return report
 
 
 def _build_guard_service() -> GuardService:
@@ -753,6 +760,20 @@ def _build_lifecycle(guard_service: GuardService, *, upstream_cache: TtlCache | 
     return NearIntentsLifecycle(guard_service=guard_service, http_client=client, store=store)
 
 
+def _build_investigation_store() -> Any:
+    """Build the durable investigations store, or ``None`` when unconfigured.
+
+    A configured database that cannot be opened is a hard failure: a recorded
+    conclusion must not silently fail to persist. Unset means investigations are
+    returned but not stored, which is the loopback default.
+    """
+    if not config.INVESTIGATIONS_DB:
+        return None
+    from .investigation_store import InvestigationStore
+
+    return InvestigationStore(config.INVESTIGATIONS_DB)
+
+
 def _load_service_registry() -> Any:
     """Build the per-service credential registry from configuration, or ``None``.
 
@@ -783,6 +804,7 @@ class InvestigationServer(ThreadingHTTPServer):
         guard_limiter: TokenBucketLimiter | None = None,
         lifecycle: Any = _UNSET,
         service_registry: Any = _UNSET,
+        investigation_store: Any = _UNSET,
     ):
         super().__init__(address, Handler)
         self.timeout_seconds = timeout_seconds
@@ -812,7 +834,17 @@ class InvestigationServer(ThreadingHTTPServer):
             if lifecycle is _UNSET
             else lifecycle
         )
-        self.guard_api = GuardAPI(self.guard_service, lifecycle=self.lifecycle)
+        # Durable settlement-investigation history. A configured database that
+        # cannot be opened raises in the builder, so the server refuses to start
+        # rather than silently fail to persist a recorded conclusion.
+        self.investigation_store = (
+            _build_investigation_store() if investigation_store is _UNSET else investigation_store
+        )
+        self.guard_api = GuardAPI(
+            self.guard_service,
+            lifecycle=self.lifecycle,
+            investigation_store=self.investigation_store,
+        )
         self.guard_limiter = guard_limiter or TokenBucketLimiter(
             config.GUARD_RATE_LIMIT_PER_MINUTE, config.GUARD_RATE_LIMIT_BURST
         )

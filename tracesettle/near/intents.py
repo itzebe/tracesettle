@@ -237,17 +237,64 @@ class QuoteRequest:
         return self.to_body()
 
 
-def _is_future_iso(value: str) -> bool:
+def _parse_iso(value: str | None) -> _dt.datetime | None:
+    """Parse an ISO-8601 timestamp the provider may return, or ``None``."""
+    if not value or not isinstance(value, str):
+        return None
     text = value.strip()
     if text.endswith("Z"):
         text = text[:-1] + "+00:00"
     try:
         parsed = _dt.datetime.fromisoformat(text)
     except ValueError:
-        return False
+        return None
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=_dt.timezone.utc)
-    return parsed > _dt.datetime.now(_dt.timezone.utc)
+    return parsed
+
+
+def _is_future_iso(value: str) -> bool:
+    parsed = _parse_iso(value)
+    return parsed is not None and parsed > _dt.datetime.now(_dt.timezone.utc)
+
+
+def quote_expiry(quote: "QuoteFields | None", *, now: _dt.datetime | None = None) -> dict[str, Any]:
+    """Whether a quote is still usable, and why.
+
+    A quote is fundable only while it is unexpired. The provider bounds that with
+    ``deadline`` (and ``timeWhenInactive``); whichever it states is enforced. When
+    the provider states **no** expiry, the tool does not invent one — it marks the
+    quote usable but flags ``expiry_known: False`` and says so, rather than
+    silently presenting an unbounded quote as definitely valid.
+
+    Returns ``usable`` (may proceed), ``expiry_known``, ``reason`` (a stable code)
+    and ``detail`` (a human sentence). Pure and deterministic for a given ``now``.
+    """
+    now = now or _dt.datetime.now(_dt.timezone.utc)
+    if quote is None:
+        return {
+            "usable": False, "expiry_known": True, "reason": "NO_QUOTE",
+            "detail": "there is no quote on this intent",
+        }
+
+    stated_raw = quote.deadline or quote.time_when_inactive
+    stated = _parse_iso(stated_raw)
+    if stated is None:
+        return {
+            "usable": True, "expiry_known": False, "reason": "NO_EXPIRY_STATED",
+            "detail": "the provider stated no expiry for this quote; its validity is not established",
+        }
+    if stated <= now:
+        return {
+            "usable": False, "expiry_known": True, "reason": "QUOTE_EXPIRED",
+            "detail": f"the quote expired at {stated_raw}",
+        }
+    return {
+        "usable": True, "expiry_known": True, "reason": "VALID",
+        "detail": f"the quote is valid until {stated_raw}",
+    }
+
+
 
 
 def human_amount(base_amount: str, *, symbol: str | None, decimals: int | None) -> str:
@@ -332,6 +379,27 @@ class QuoteFields:
             "deadline": self.deadline,
             "time_when_inactive": self.time_when_inactive,
         }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> "QuoteFields | None":
+        """Rebuild the fields from a stored ``to_dict``, or ``None`` if absent."""
+        if not isinstance(data, dict):
+            return None
+        estimate = data.get("time_estimate")
+        return cls(
+            deposit_address=data.get("deposit_address"),
+            deposit_memo=data.get("deposit_memo"),
+            amount_in=data.get("amount_in"),
+            amount_in_formatted=data.get("amount_in_formatted"),
+            amount_out=data.get("amount_out"),
+            amount_out_formatted=data.get("amount_out_formatted"),
+            min_amount_out=data.get("min_amount_out"),
+            withdraw_fee=data.get("withdraw_fee"),
+            refund_fee=data.get("refund_fee"),
+            time_estimate=int(estimate) if isinstance(estimate, int) else None,
+            deadline=data.get("deadline"),
+            time_when_inactive=data.get("time_when_inactive"),
+        )
 
 
 @dataclass(frozen=True)

@@ -309,6 +309,13 @@ NEAR_ALLOW_CLIENT_POLICY_SELECTION = (
 #: restart. The file holds no signing material.
 INTENTS_DB = os.environ.get("TRACESETTLE_INTENTS_DB") or None
 
+#: Path to the durable settlement-investigations database (SQLite). Unset means a
+#: completed investigation is returned but not stored, which is the loopback
+#: default. When set, every investigation is persisted so a report produced
+#: before a restart can be retrieved afterward with its evidence intact. The file
+#: holds only public on-chain identifiers and published evidence.
+INVESTIGATIONS_DB = os.environ.get("TRACESETTLE_INVESTIGATIONS_DB") or None
+
 #: Whether the NEAR Intents lifecycle routes are enabled at all. Off by default:
 #: the lifecycle can issue a live quote (a fundable deposit address) and so is an
 #: explicit operator decision, not something a public bind turns on silently.

@@ -94,7 +94,7 @@ CONSOLE_HTML = """<!DOCTYPE html>
   .status::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
   .s-ALLOW, .s-CONFIRMED, .s-EXECUTED, .s-OK, .s-RESOLVED, .s-VALID { color: var(--ok); }
   .s-REQUIRE_APPROVAL, .s-REPORTED, .s-ACKNOWLEDGED { color: var(--warn); }
-  .s-HOLD, .s-UNKNOWN, .s-INCOMPLETE, .s-OPEN { color: var(--hold); }
+  .s-HOLD, .s-UNKNOWN, .s-INCOMPLETE, .s-OPEN, .s-NO_EXPIRY_STATED, .s-QUOTE_EXPIRED { color: var(--hold); }
   .s-BLOCK, .s-REFUSED, .s-CONTRADICTORY, .s-UNAVAILABLE, .s-FAILED { color: var(--bad); }
   .s-SIMULATED, .s-NOTICE { color: var(--sim); }
   .s-MISSING { color: var(--muted); }
@@ -356,6 +356,15 @@ CONSOLE_HTML = """<!DOCTYPE html>
       </div>
       <div id="intents-step-output" aria-live="polite"></div>
       <div id="i-handoff"></div>
+      <div id="i-approve-wrap" hidden>
+        <p class="small">Approve only if the quote above matches what you intend to send. Approval
+          does not move funds; it marks that you accept this exact quote.</p>
+        <div class="actions" style="margin-bottom:12px">
+          <button class="act primary" type="button" id="i-approve">Approve quote</button>
+          <button class="act" type="button" id="i-reject">Reject quote</button>
+        </div>
+        <div id="i-approve-output" aria-live="polite"></div>
+      </div>
       <div id="i-deposit-form-wrap" hidden>
         <hr style="border:0;border-top:1px solid var(--line);margin:14px 0">
         <label for="i-deposit-hash">Deposit transaction hash (from your wallet)</label>
@@ -410,6 +419,15 @@ CONSOLE_HTML = """<!DOCTYPE html>
       </form>
       <p class="small muted" style="margin:10px 0 0">Supported: 1Click deposit addresses (full path)
         and intent hashes (settlement status only). No keys required. Read-only.</p>
+    </div>
+    <div class="panel">
+      <h2>Saved investigations</h2>
+      <p class="small">Reports retained across a restart. Selecting one loads the stored conclusion
+        and its evidence, so a result can be revisited without re-reading live sources.</p>
+      <div class="actions" style="margin-bottom:12px">
+        <button class="act" type="button" id="inv-history-refresh">Refresh history</button>
+      </div>
+      <div id="inv-history"></div>
     </div>
     <div id="inv-result" aria-live="polite"></div>
   </section>
@@ -518,7 +536,7 @@ function showTab(name) {
     s.classList.toggle("active", s.id === "panel-" + name);
   });
   const loaders = {
-    overview: loadOverview, guard: () => {}, lab: loadLab, investigations: () => {},
+    overview: loadOverview, guard: () => {}, lab: loadLab, investigations: loadInvestigationHistory,
     incidents: () => loadIncidents("OPEN"), policies: loadPolicies, integrations: loadIntegrations,
     near: loadNear,
     intents: loadIntents,
@@ -793,6 +811,8 @@ async function loadIntents() {
   document.getElementById("i-list").onclick = listIntents;
   document.getElementById("i-tokens").onclick = loadTokens;
   document.getElementById("i-deposit").onclick = recordDeposit;
+  document.getElementById("i-approve").onclick = () => decideQuote(true);
+  document.getElementById("i-reject").onclick = () => decideQuote(false);
   if (list && list.intents && list.intents.length) {
     out.innerHTML = '<div class="note">' + esc(list.intents.length) +
       " intent(s) recorded for the local owner. Create a new one below.</div>";
@@ -867,8 +887,16 @@ async function stepIntent(action, body, targetId) {
     const data = await api("POST", "/api/guard/near/lifecycle/" + IN.intentId + "/" + action, body || {});
     if (action === "quote" && data.ok && data.deposit_address) {
       renderHandoff(data);
+      const exp = data.expiry || {};
       out.innerHTML = '<div class="card"><h3>Live quote</h3>' +
+        '<p class="small">Review the amounts and the expiry below, then approve or reject.</p>' +
+        '<div class="kv"><dt>Expiry</dt><dd>' + status(exp.usable ? "VALID" : (exp.reason || "BLOCK")) +
+        " " + esc(exp.detail || "") + "</dd></div>" +
         '<pre class="small">' + esc(JSON.stringify(data, null, 2)) + "</pre></div>";
+    } else if (action === "status") {
+      out.innerHTML = renderLifecycleStatus(data);
+    } else if (action === "assurance") {
+      out.innerHTML = renderAssurance(data);
     } else {
       out.innerHTML = '<div class="card"><h3>' + esc(action) + "</h3>" +
         '<pre class="small">' + esc(JSON.stringify(data, null, 2)) + "</pre></div>";
@@ -909,7 +937,67 @@ function renderHandoff(data) {
         function () { copy.textContent = "Select above"; });
     } else { copy.textContent = "Select above"; }
   };
-  if (wrap) wrap.hidden = false;
+  // A live quote must be explicitly approved before a deposit can be recorded.
+  const approveWrap = document.getElementById("i-approve-wrap");
+  if (approveWrap) approveWrap.hidden = false;
+  const depositWrap = document.getElementById("i-deposit-form-wrap");
+  if (depositWrap) depositWrap.hidden = true;
+  if (wrap) wrap.hidden = true;
+}
+
+/* ---- status and assurance: plain language, not raw JSON ---- */
+function renderLifecycleStatus(data) {
+  const s = data.status || data.provider_status || "UNKNOWN";
+  const st = data.state || "";
+  const rows = [];
+  rows.push(["Provider status", status(String(s).toUpperCase())]);
+  if (st) rows.push(["Lifecycle state", status(st)]);
+  if (data.deposit_address) rows.push(["Deposit address", "<code>" + esc(data.deposit_address) + "</code>"]);
+  if (data.deposit_tx_hash) rows.push(["Recorded deposit hash", "<code>" + esc(data.deposit_tx_hash) + "</code>"]);
+  if (data.quote_approved != null) rows.push(["Quote approved", data.quote_approved ? "Yes" : "No"]);
+  if (data.updated_at) rows.push(["Observed", fmtAt(data.updated_at)]);
+  return '<div class="card"><h3>Provider status</h3>' +
+    '<p class="small muted">This is what the provider reports. A provider success is not proof that ' +
+    "funds reached their destination — run Settlement assurance for that.</p>" +
+    '<div class="kv">' + rows.map(([k, v]) => "<dt>" + esc(k) + "</dt><dd>" + v + "</dd>").join("") +
+    "</div></div>";
+}
+
+function renderAssurance(data) {
+  const a = data.assurance || data;
+  const level = a.level || "UNKNOWN";
+  const verified = a.independently_verified === true;
+  const stages = a.stages || [];
+  const headline = verified
+    ? "Independently verified from on-chain evidence."
+    : "Not independently verified — the provider's report alone does not establish receipt.";
+  return '<div class="card"><h3>Settlement assurance</h3>' +
+    '<div class="kv"><dt>Level</dt><dd>' + status(level) + "</dd>" +
+    "<dt>Independently verified</dt><dd>" + (verified ? "Yes" : "No") + "</dd></div>" +
+    '<p class="small ' + (verified ? "muted" : "") + '">' + esc(headline) + "</p>" +
+    (stages.length ? "<table><thead><tr><th>Stage</th><th>State</th><th>Basis</th></tr></thead><tbody>" +
+      stages.map((x) => "<tr><td>" + esc(x.stage || x.name || "") + "</td><td>" +
+        status(x.state || x.classification || "UNKNOWN") + '</td><td class="small">' +
+        esc(x.basis || x.detail || "") + "</td></tr>").join("") + "</tbody></table>" : "") +
+    "</div>";
+}
+
+async function decideQuote(approve) {
+  const out = document.getElementById("i-approve-output");
+  if (!IN.intentId) { out.innerHTML = '<div class="note bad">Create an intent and request a live quote first.</div>'; return; }
+  if (IN.busy) return;
+  IN.busy = true;
+  out.innerHTML = loading(approve ? "Approving…" : "Rejecting…");
+  try {
+    const data = await api("POST", "/api/guard/near/lifecycle/" + IN.intentId + "/approve", { approve: approve });
+    out.innerHTML = '<div class="note ' + (approve ? "ok" : "bad") + '">' +
+      esc(approve ? "Quote approved. You may now fund the deposit address and record the hash."
+        : "Quote rejected. No deposit can be recorded against this quote.") + "</div>";
+    // Only an approved quote reveals the deposit-hash form.
+    const depositWrap = document.getElementById("i-deposit-form-wrap");
+    if (depositWrap) depositWrap.hidden = !approve;
+  } catch (err) { out.innerHTML = '<div class="note bad">' + esc(err.message) + "</div>"; }
+  finally { IN.busy = false; }
 }
 
 async function recordDeposit() {
@@ -1027,6 +1115,42 @@ async function runScenario(id, scenarios) {
 }
 
 /* ---- investigations ---- */
+async function loadInvestigationHistory() {
+  const el = document.getElementById("inv-history");
+  if (!el) return;
+  el.innerHTML = loading("Loading saved investigations…");
+  try {
+    const data = await api("GET", "/api/guard/investigations");
+    if (!data.enabled) {
+      el.innerHTML = '<div class="note">' + esc(data.note || "Durable history is not configured.") + "</div>";
+      return;
+    }
+    const rows = (data.investigations || []);
+    if (!rows.length) { el.innerHTML = empty("No saved investigations yet."); return; }
+    el.innerHTML = "<table><thead><tr><th>Investigation</th><th>Identifier</th><th>Outcome</th>" +
+      "<th>Observed</th><th></th></tr></thead><tbody>" + rows.map((r) =>
+      '<tr><td class="small"><code>' + esc(r.investigation_id) + "</code></td>" +
+      '<td class="small wrap"><code>' + esc(r.identifier) + "</code></td>" +
+      "<td>" + status(r.outcome) + '</td><td class="small">' + fmtAt(r.created_at) + "</td>" +
+      '<td><button class="act" type="button" data-inv-open="' + esc(r.investigation_id) + '">View</button></td></tr>'
+    ).join("") + "</tbody></table>";
+    el.querySelectorAll("button[data-inv-open]").forEach((b) => {
+      b.addEventListener("click", () => openStoredInvestigation(b.getAttribute("data-inv-open")));
+    });
+  } catch (err) { el.innerHTML = '<div class="note bad">' + esc(err.message) + "</div>"; }
+}
+
+async function openStoredInvestigation(investigationId) {
+  const out = document.getElementById("inv-result");
+  out.innerHTML = loading("Loading stored report…");
+  try {
+    const data = await api("GET", "/api/guard/investigations/" + encodeURIComponent(investigationId));
+    out.innerHTML = '<div class="note">Stored report — the conclusion is the one recorded at the ' +
+      "time of the investigation, reconstructed from its recorded evidence.</div>" +
+      renderInvestigation(data.investigation);
+  } catch (err) { out.innerHTML = '<div class="note bad">' + esc(err.message) + "</div>"; }
+}
+
 async function submitInvestigation(ev) {
   ev.preventDefault();
   const id = document.getElementById("inv-id").value.trim();
@@ -1044,6 +1168,7 @@ async function submitInvestigation(ev) {
     S.investigations.unshift({ id: id, outcome: body.data.outcome, at: body.data.created_at });
     S.investigations = S.investigations.slice(0, 8);
     out.innerHTML = renderInvestigation(body.data);
+    loadInvestigationHistory();
   } catch (err) {
     out.innerHTML = '<div class="note bad">' + esc(err.message) + "</div>";
   } finally { btn.disabled = false; }
@@ -1297,6 +1422,7 @@ document.getElementById("apikey").addEventListener("input", (e) => {
 document.getElementById("guard-form").addEventListener("submit", submitGuard);
 document.getElementById("g-reset").addEventListener("click", () => { document.getElementById("guard-form").reset(); });
 document.getElementById("inv-form").addEventListener("submit", submitInvestigation);
+document.getElementById("inv-history-refresh").addEventListener("click", loadInvestigationHistory);
 document.querySelectorAll("button[data-incident-filter]").forEach((b) => {
   b.addEventListener("click", () => loadIncidents(b.getAttribute("data-incident-filter")));
 });

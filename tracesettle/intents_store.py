@@ -112,6 +112,7 @@ class IntentRecord:
     swap_type: str | None = None
     slippage_tolerance: int | None = None
     quote: dict[str, Any] | None = None
+    quote_approved_at: str | None = None
     deposit_address: str | None = None
     deposit_memo: str | None = None
     deposit_tx_hash: str | None = None
@@ -141,6 +142,7 @@ class IntentRecord:
             "swap_type": self.swap_type,
             "slippage_tolerance": self.slippage_tolerance,
             "quote": self.quote,
+            "quote_approved_at": self.quote_approved_at,
             "deposit_address": self.deposit_address,
             "deposit_memo": self.deposit_memo,
             "deposit_tx_hash": self.deposit_tx_hash,
@@ -172,6 +174,7 @@ class IntentRecord:
             swap_type=data.get("swap_type"),
             slippage_tolerance=data.get("slippage_tolerance"),
             quote=data.get("quote"),
+            quote_approved_at=data.get("quote_approved_at"),
             deposit_address=data.get("deposit_address"),
             deposit_memo=data.get("deposit_memo"),
             deposit_tx_hash=data.get("deposit_tx_hash"),
@@ -541,6 +544,7 @@ _RECORD_FIELDS = frozenset(
         "swap_type",
         "slippage_tolerance",
         "quote",
+        "quote_approved_at",
         "deposit_address",
         "deposit_memo",
         "deposit_tx_hash",

@@ -182,6 +182,7 @@ def test_deposit_records_the_user_hash_and_notifies(opener, store):
     )
     opener.json("POST", "/v0/quote", {"quote": {"depositAddress": "0xdeposit"}, "correlationId": "c"})
     lc.request_quote(owner="treasury-agent", intent_id=created["intent_id"], dry=False)
+    lc.approve_quote(owner="treasury-agent", intent_id=created["intent_id"], approve=True)
     opener.json("POST", "/v0/deposit/submit", {"status": "ok"})
     out = lc.record_deposit(
         owner="treasury-agent", intent_id=created["intent_id"], deposit_tx_hash="0xuserdeposit"
@@ -374,3 +375,103 @@ def _wire_full_success(opener):
         body_contains="FbrSoTHbQdwD6HxabhaozvQQVBA4kF2Qn2c3W2otp284",
     )
     return opener
+
+
+# -- quote expiry and explicit approval (P06) --------------------------------
+
+
+def _expired_quote_opener(opener, *, deadline="2020-01-01T00:00:00Z"):
+    opener.json(
+        "POST",
+        "/v0/quote",
+        {
+            "quote": {
+                "depositAddress": "0xdeposit",
+                "deadline": deadline,
+                "amountOut": "997398",
+                "amountOutFormatted": "0.997398",
+            },
+            "correlationId": "c",
+        },
+    )
+
+
+def test_quote_expiry_is_computed_from_the_provider_deadline():
+    from tracesettle.near.intents import QuoteFields, quote_expiry
+
+    future = QuoteFields.from_dict({"deadline": "2999-01-01T00:00:00Z"})
+    assert quote_expiry(future)["usable"] is True
+    assert quote_expiry(future)["reason"] == "VALID"
+
+    past = QuoteFields.from_dict({"deadline": "2020-01-01T00:00:00Z"})
+    result = quote_expiry(past)
+    assert result["usable"] is False
+    assert result["reason"] == "QUOTE_EXPIRED"
+
+
+def test_quote_expiry_reports_unstated_expiry_honestly():
+    from tracesettle.near.intents import QuoteFields, quote_expiry
+
+    result = quote_expiry(QuoteFields.from_dict({}))
+    assert result["usable"] is True
+    assert result["expiry_known"] is False
+    assert result["reason"] == "NO_EXPIRY_STATED"
+
+
+def test_an_expired_quote_cannot_be_approved(opener, store):
+    lc, _ = _lifecycle(opener, store)
+    created = lc.create_and_authorize(
+        owner="treasury-agent", payload=_intent_payload(), policy_read=None, access_key=None,
+        created_at=CREATED_AT,
+    )
+    _expired_quote_opener(opener)
+    quote = lc.request_quote(owner="treasury-agent", intent_id=created["intent_id"], dry=False)
+    assert quote["expiry"]["usable"] is False
+    with pytest.raises(LifecycleError):
+        lc.approve_quote(owner="treasury-agent", intent_id=created["intent_id"], approve=True)
+
+
+def test_a_deposit_requires_an_approved_unexpired_quote(opener, store):
+    lc, _ = _lifecycle(opener, store)
+    created = lc.create_and_authorize(
+        owner="treasury-agent", payload=_intent_payload(), policy_read=None, access_key=None,
+        created_at=CREATED_AT,
+    )
+    _expired_quote_opener(opener)
+    lc.request_quote(owner="treasury-agent", intent_id=created["intent_id"], dry=False)
+    with pytest.raises(LifecycleError):
+        lc.record_deposit(
+            owner="treasury-agent", intent_id=created["intent_id"], deposit_tx_hash="0xabc"
+        )
+
+
+def test_a_fresh_quote_clears_a_previous_approval(opener, store):
+    lc, _ = _lifecycle(opener, store)
+    created = lc.create_and_authorize(
+        owner="treasury-agent", payload=_intent_payload(), policy_read=None, access_key=None,
+        created_at=CREATED_AT,
+    )
+    _expired_quote_opener(opener, deadline="2999-01-01T00:00:00Z")
+    lc.request_quote(owner="treasury-agent", intent_id=created["intent_id"], dry=False)
+    approved = lc.approve_quote(owner="treasury-agent", intent_id=created["intent_id"], approve=True)
+    assert approved["state"] == "QUOTE_APPROVED"
+    assert lc.get(owner="treasury-agent", intent_id=created["intent_id"])["quote_approved"] is True
+    # Re-quoting is a new quote: the prior approval must not carry over.
+    lc.request_quote(owner="treasury-agent", intent_id=created["intent_id"], dry=False)
+    assert lc.get(owner="treasury-agent", intent_id=created["intent_id"])["quote_approved"] is False
+
+
+def test_quote_rejection_is_recorded_and_blocks_the_deposit(opener, store):
+    lc, _ = _lifecycle(opener, store)
+    created = lc.create_and_authorize(
+        owner="treasury-agent", payload=_intent_payload(), policy_read=None, access_key=None,
+        created_at=CREATED_AT,
+    )
+    _expired_quote_opener(opener, deadline="2999-01-01T00:00:00Z")
+    lc.request_quote(owner="treasury-agent", intent_id=created["intent_id"], dry=False)
+    rejected = lc.approve_quote(owner="treasury-agent", intent_id=created["intent_id"], approve=False)
+    assert rejected["state"] == "QUOTE_REJECTED"
+    with pytest.raises(LifecycleError):
+        lc.record_deposit(
+            owner="treasury-agent", intent_id=created["intent_id"], deposit_tx_hash="0xabc"
+        )

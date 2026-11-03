@@ -290,12 +290,16 @@ class NearIntentsLifecycle:
             updated_at=at,
             expect_state=state,
             quote=outcome.to_dict(),
+            # A fresh quote clears any prior approval: approval is bound to the
+            # exact quote the user reviewed, so a re-quote must be re-approved.
+            quote_approved_at=None,
             deposit_address=quote.deposit_address if quote else None,
             deposit_memo=quote.deposit_memo if quote else None,
         )
         self._store.append_event(
             intent_id, owner=owner, at=at, kind="QUOTE", detail=outcome.to_dict()
         )
+        expiry = _intents.quote_expiry(quote)
         return {
             "ok": True,
             "intent_id": intent_id,
@@ -303,7 +307,66 @@ class NearIntentsLifecycle:
             "deposit_address": quote.deposit_address if quote else None,
             "deposit_memo": quote.deposit_memo if quote else None,
             "quote": quote.to_dict() if quote else None,
+            "expiry": expiry,
             "dry": dry,
+        }
+
+    # -- step 2b: the user explicitly approves (or rejects) the quote --------
+
+    def approve_quote(
+        self,
+        *,
+        owner: str,
+        intent_id: str,
+        approve: bool,
+        at: str | None = None,
+    ) -> dict[str, Any]:
+        """Record the user's explicit decision on a live quote.
+
+        Approval is a **user** action, recorded separately from the guard's
+        authorization: the guard decides whether the transaction is permitted,
+        the user decides whether to proceed with *this* quote. Approval requires
+        a live (fundable) quote that is still unexpired, so a stale quote can
+        never be approved. Approval does not fund anything — it only marks the
+        quote the user is willing to fund from their own wallet.
+        """
+        at = at or _utc_now()
+        record = self._store.get(intent_id, owner=owner)
+        if record is None:
+            raise LifecycleError("no such intent for this owner")
+        if not record.deposit_address:
+            raise LifecycleError("there is no live quote to approve; request a live quote first")
+        if not record.decision or not record.decision.get("permits_signing"):
+            raise LifecycleError("the stored decision does not permit signing, so no quote may be approved")
+
+        quote = _intents.QuoteFields.from_dict((record.quote or {}).get("quote"))
+        expiry = _intents.quote_expiry(quote)
+        if approve and not expiry["usable"]:
+            raise LifecycleError(f"the quote cannot be approved: {expiry['detail']}")
+
+        if approve:
+            self._store.update(
+                intent_id, owner=owner, updated_at=at,
+                expect_state="QUOTE_APPROVED", quote_approved_at=at,
+            )
+            label = "QUOTE_APPROVED"
+        else:
+            self._store.update(
+                intent_id, owner=owner, updated_at=at,
+                expect_state="QUOTE_REJECTED", quote_approved_at=None,
+            )
+            label = "QUOTE_REJECTED"
+        self._store.append_event(
+            intent_id, owner=owner, at=at, kind=label,
+            detail={"approved": approve, "expiry_reason": expiry["reason"]},
+        )
+        return {
+            "ok": True,
+            "intent_id": intent_id,
+            "state": label,
+            "approved": approve,
+            "quote_approved_at": at if approve else None,
+            "expiry": expiry,
         }
 
     # -- step 3: record the user's deposit, notify the provider --------------
@@ -329,6 +392,17 @@ class NearIntentsLifecycle:
             raise LifecycleError("no such intent for this owner")
         if not record.deposit_address:
             raise LifecycleError("this intent has no deposit address yet; request a live quote first")
+        if not record.quote_approved_at:
+            raise LifecycleError(
+                "the quote has not been approved; approve the live quote before recording a deposit"
+            )
+        quote = _intents.QuoteFields.from_dict((record.quote or {}).get("quote"))
+        expiry = _intents.quote_expiry(quote)
+        if not expiry["usable"]:
+            raise LifecycleError(
+                f"the quote is no longer usable ({expiry['reason']}); request a fresh live quote before "
+                "recording a deposit against this address"
+            )
         if not isinstance(deposit_tx_hash, str) or not deposit_tx_hash.strip():
             raise LifecycleError("field 'deposit_tx_hash' must be a non-empty string")
         if len(deposit_tx_hash) > 200 or any(ord(c) < 32 for c in deposit_tx_hash):
@@ -494,6 +568,9 @@ class NearIntentsLifecycle:
         if record is None:
             return None
         data = record.to_dict()
+        quote = _intents.QuoteFields.from_dict((record.quote or {}).get("quote"))
+        data["quote_expiry"] = _intents.quote_expiry(quote) if quote else None
+        data["quote_approved"] = bool(record.quote_approved_at)
         data["events"] = self._store.events(intent_id, owner=owner)
         return data
 
