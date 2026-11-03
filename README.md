@@ -233,8 +233,11 @@ settle → assurance flow:
 
 The lifecycle never signs, submits, or moves funds: it obtains a deposit address,
 hands it to the operator, and observes the outcome. `tests/test_near_lifecycle.py`
-(29 tests) and the lifecycle acceptance tests in `tests/test_near_api.py` drive the
-real server and the real lifecycle code. The console walks the same six steps in
+(29 tests) drives the real lifecycle object and the real durable store, and
+`tests/test_near_acceptance.py` drives the **whole journey over a real HTTP
+socket** — create → authorize → live quote → approve → status → assurance — so a
+route wired to the wrong path, gated by the wrong flag, or answered without a body
+fails there rather than in the product. The console walks the same six steps in
 the **Intents Lifecycle** tab, gating the deposit form behind the approve/reject
 controls.
 
@@ -333,11 +336,11 @@ a bare interpreter.
 **1. Run the tests.**
 
 ```sh
-python -m pytest tests/ --collect-only -q   # 962 tests collected
-python -m pytest tests/ -q                  # 938 passed, 24 skipped
+python -m pytest tests/ --collect-only -q   # 965 tests collected
+python -m pytest tests/ -q                  # 941 passed, 24 skipped
 ```
-→ `938 passed, 24 skipped`. The skips are the PostgreSQL integration
-tests; set `TRACESETTLE_TEST_PG_DSN` to a real server to run them (962 pass).
+→ `941 passed, 24 skipped`. The skips are the PostgreSQL integration
+tests; set `TRACESETTLE_TEST_PG_DSN` to a real server to run them (965 pass).
 
 **2. Prove the enforcement boundary: a permitted request executes, a suspicious
 one cannot.**
@@ -791,7 +794,7 @@ identical decisions.
 | `.github/workflows/ci.yml` | CI: tests, static analysis, Docker build + runtime, demo determinism. |
 | `demo/demonstrate.py` | Read-only walkthrough (live, or `--offline` replay of captures). |
 | `demo/replay_opener.py` | Offline transport that replays `evidence/raw/` through the real code. |
-| `tests/` | 962 tests (24 PostgreSQL tests skip without `TRACESETTLE_TEST_PG_DSN`). `evidence/raw/` fixtures are real captures; `tests/fixtures/synthetic/` are clearly labelled synthetic. |
+| `tests/` | 965 tests (24 PostgreSQL tests skip without `TRACESETTLE_TEST_PG_DSN`). `evidence/raw/` fixtures are real captures; `tests/fixtures/synthetic/` are clearly labelled synthetic. |
 | `PHASE1_FEASIBILITY.md` | Phase 1 feasibility and API verification. |
 | `submission/` | Hackathon artifacts: API payload shape, technical summary, demo post draft, publication checklist. |
 | `docs/official/` | NEAR documentation captured during Phase 1. |
@@ -1090,7 +1093,7 @@ immutable commit SHA (not a moving tag), and cancels superseded runs.
 ## Tests
 
 ```sh
-python3 -m pytest tests/ -q          # 938 passed, 24 skipped (962 with a server)
+python3 -m pytest tests/ -q          # 941 passed, 24 skipped (965 with a server)
 python3 -m pytest tests/test_guard_authorization.py -q
 python3 -m pytest tests/test_guard_invariants.py -q
 python3 -m pytest tests/test_guard_end_to_end.py -q
