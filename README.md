@@ -203,26 +203,53 @@ settle → assurance flow:
    or double-submitted create resolve to one intent.
 2. **Quote.** On `ALLOW` the lifecycle requests a live 1Click quote
    (`POST /v0/quote`, `dry: false`) to obtain a deposit address, and records the
-   intent with its deposit address and expected output amount.
-3. **Deposit handoff.** The console shows the deposit address, any memo, the
+   intent with its deposit address, expected output amount, and the quote's
+   expiry. `quote_expiry()` enforces a **stated** deadline (`deadline` or
+   `timeWhenInactive`); when the provider states none it does not invent one — it
+   marks the quote usable but flags `expiry_known: false` and says so.
+3. **Approve.** `POST /api/guard/near/lifecycle/{intent_id}/approve` records the
+   user's explicit decision on the live quote. Approval requires a still-usable
+   quote and a stored decision that permits signing, and it does not move funds —
+   it marks that the user accepts *this exact* quote. A fresh quote clears any
+   prior approval, so approval is always bound to the quote the user reviewed.
+4. **Deposit handoff.** The console shows the deposit address, any memo, the
    quoted fees, and the quote expiry, so the operator can fund the address from
    their **own** wallet. `POST /api/guard/near/lifecycle/{intent_id}/deposit`
    records the deposit transaction hash the operator supplies and asks the
-   provider to pre-verify it. This step moves nothing: the tool never signs,
+   provider to pre-verify it. A deposit is refused until the quote is approved and
+   while the quote is unexpired. This step moves nothing: the tool never signs,
    sends, or holds funds.
-4. **Get / list.** `POST /api/guard/near/lifecycle/{intent_id}/get`,
+5. **Get / list.** `POST /api/guard/near/lifecycle/{intent_id}/get`,
    `/lifecycle/list`, and `/lifecycle/tokens` read the durable intent record
    (SQLite via `TRACESETTLE_INTENTS_DB`) and the provider asset list. Intent
    records are owner-scoped: a request can only read an intent it owns.
-5. **Settle + assurance.** When the swap settles, the same evidence pipeline that
+6. **Settle + assurance.** When the swap settles, the same evidence pipeline that
    powers investigations produces the settlement-assurance view (above), so a
    provider `SUCCESS` is never confused with verified receipt.
 
 The lifecycle never signs, submits, or moves funds: it obtains a deposit address,
 hands it to the operator, and observes the outcome. `tests/test_near_lifecycle.py`
-(18 tests) and the lifecycle acceptance tests in `tests/test_near_api.py` drive the
-real server and the real lifecycle code. The console walks the same five steps in
-the **Intents Lifecycle** tab.
+(24 tests) and the lifecycle acceptance tests in `tests/test_near_api.py` drive the
+real server and the real lifecycle code. The console walks the same six steps in
+the **Intents Lifecycle** tab, gating the deposit form behind the approve/reject
+controls.
+
+### Durable investigation history
+
+A settlement investigation is a conclusion drawn from live sources, and those
+sources drift. When the operator sets `TRACESETTLE_INVESTIGATIONS_DB`, every
+completed investigation is persisted (SQLite) so a report produced before a
+restart can be retrieved afterwards with its evidence intact.
+
+- `GET /api/guard/investigations` lists the stored investigations for the local
+  owner; `GET /api/guard/investigations/{id}` returns one report in full.
+- The stored record is the conclusion **as recorded at the time**, reconstructed
+  from its recorded evidence — it is not re-reconciled against live sources, and
+  the console says so on screen.
+- History is gated by the same API key as the other guard routes when one is
+  configured, and is reported as `enabled: false` when no database is set.
+- A configured database that cannot be opened is a hard failure at start-up: a
+  recorded conclusion must not silently fail to persist.
 
 ### NEAR agent protection
 
@@ -302,11 +329,11 @@ a bare interpreter.
 **1. Run the tests.**
 
 ```sh
-python -m pytest tests/ --collect-only -q   # 929 tests collected
-python -m pytest tests/ -q                  # 905 passed, 24 skipped
+python -m pytest tests/ --collect-only -q   # 947 tests collected
+python -m pytest tests/ -q                  # 923 passed, 24 skipped
 ```
-→ `905 passed, 24 skipped`. The skips are the PostgreSQL integration
-tests; set `TRACESETTLE_TEST_PG_DSN` to a real server to run them (929 pass).
+→ `923 passed, 24 skipped`. The skips are the PostgreSQL integration
+tests; set `TRACESETTLE_TEST_PG_DSN` to a real server to run them (947 pass).
 
 **2. Prove the enforcement boundary: a permitted request executes, a suspicious
 one cannot.**
@@ -544,6 +571,70 @@ curl -sS -X POST http://127.0.0.1:8000/api/guard/near/agent-evaluate \
 → `BLOCK False`. The destination is unapproved, so the wrapper refuses to permit
 signing. Nothing is signed or broadcast in either call.
 
+**16. Walk the NEAR Intents lifecycle: create → quote → approve → deposit.**
+
+This needs the lifecycle enabled and a durable store. It issues a live (fundable)
+quote, so it is an explicit operator decision:
+
+```sh
+TRACESETTLE_NEAR_LIFECYCLE=1 TRACESETTLE_INTENTS_DB=/tmp/intents.db \
+TRACESETTLE_INVESTIGATIONS_DB=/tmp/investigations.db \
+  python3 -m tracesettle serve --host 127.0.0.1 --port 8000
+```
+
+Create and authorize an intent (the guard runs on the real parameters):
+
+```sh
+curl -sS -X POST http://127.0.0.1:8000/api/guard/near/lifecycle \
+  -H 'Content-Type: application/json' \
+  -d '{"transaction":{"service_id":"treasury-agent","operation":"SETTLEMENT",
+       "chain":"eth","asset":"USDC","amount":"1000000","scope":"INTENTS"},
+       "idempotency_key":"demo-1"}' \
+  | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d["intent_id"],d["decision"]["outcome"])'
+```
+→ an intent id and `ALLOW`. A `SETTLEMENT` over the policy limit would return
+`REQUIRE_APPROVAL` or `BLOCK` instead, and no quote would be issued.
+
+Request a live quote, then try to record a deposit **before** approving it:
+
+```sh
+ID=<the intent id>
+curl -sS -X POST http://127.0.0.1:8000/api/guard/near/lifecycle/$ID/quote \
+  -H 'Content-Type: application/json' -d '{"dry":false}' \
+  | python3 -c 'import sys,json;d=json.load(sys.stdin);print("address:",d["deposit_address"]);print("expiry:",d["expiry"]["reason"])'
+curl -sS -X POST http://127.0.0.1:8000/api/guard/near/lifecycle/$ID/deposit \
+  -H 'Content-Type: application/json' -d '{"deposit_tx_hash":"0xabc"}' \
+  | python3 -c 'import sys,json;print(json.load(sys.stdin)["error"])'
+```
+→ the quote prints a deposit address and `expiry: VALID`; the deposit is refused
+with `the quote has not been approved; approve the live quote before recording a
+deposit`.
+
+Approve the quote, and only then record the deposit:
+
+```sh
+curl -sS -X POST http://127.0.0.1:8000/api/guard/near/lifecycle/$ID/approve \
+  -H 'Content-Type: application/json' -d '{"approve":true}' \
+  | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d["state"],d["approved"])'
+```
+→ `QUOTE_APPROVED True`, and the deposit form is now accepted. A fresh quote
+clears the approval, so approval is always bound to the quote you reviewed.
+
+**17. Retrieve a stored investigation after a restart.**
+
+With `TRACESETTLE_INVESTIGATIONS_DB` set (step 16), every completed investigation
+is persisted. After running step 4, list and open the stored report:
+
+```sh
+curl -sS http://127.0.0.1:8000/api/guard/investigations \
+  | python3 -c 'import sys,json;d=json.load(sys.stdin);print("enabled:",d["enabled"]);print("count:",len(d["investigations"]))'
+curl -sS http://127.0.0.1:8000/api/guard/investigations/<investigation_id> \
+  | python3 -c 'import sys,json;d=json.load(sys.stdin)["investigation"];print(d["outcome"],len(d["evidence"]),"evidence items")'
+```
+→ the stored outcome and its full evidence, reconstructed from what was recorded
+at the time. The record is **not** re-reconciled against live sources, and the
+console says so. Restart the server and the report is still there.
+
 ## Supported input and honest limits
 
 | Identifier | What it can do |
@@ -668,6 +759,8 @@ identical decisions.
 | `tracesettle/adapters/` | One adapter per data source (1Click, solver relay, NEAR, EVM, Bitcoin). |
 | `tracesettle/reconcile.py` | Deterministic reconciliation engine. |
 | `tracesettle/investigation.py` | Orchestrator. |
+| `tracesettle/investigation_store.py` | Durable settlement-investigation store (SQLite), so a report survives a restart. |
+| `tracesettle/intents_store.py` | Durable NEAR Intents lifecycle store (SQLite). |
 | `tracesettle/report.py` | Report generation. |
 | `tracesettle/ui.py` | Standard-library web interface, guard routes, console. |
 | `tracesettle/ratelimit.py` | Token buckets for per-IP and per-host limits. |
@@ -694,7 +787,7 @@ identical decisions.
 | `.github/workflows/ci.yml` | CI: tests, static analysis, Docker build + runtime, demo determinism. |
 | `demo/demonstrate.py` | Read-only walkthrough (live, or `--offline` replay of captures). |
 | `demo/replay_opener.py` | Offline transport that replays `evidence/raw/` through the real code. |
-| `tests/` | 929 tests (24 PostgreSQL tests skip without `TRACESETTLE_TEST_PG_DSN`). `evidence/raw/` fixtures are real captures; `tests/fixtures/synthetic/` are clearly labelled synthetic. |
+| `tests/` | 947 tests (24 PostgreSQL tests skip without `TRACESETTLE_TEST_PG_DSN`). `evidence/raw/` fixtures are real captures; `tests/fixtures/synthetic/` are clearly labelled synthetic. |
 | `PHASE1_FEASIBILITY.md` | Phase 1 feasibility and API verification. |
 | `submission/` | Hackathon artifacts: API payload shape, technical summary, demo post draft, publication checklist. |
 | `docs/official/` | NEAR documentation captured during Phase 1. |
@@ -703,7 +796,8 @@ identical decisions.
 tracesettle/near/          NEAR agent protection: policy scope, access-key
                           analysis, the agent authorization wrapper, the attack
                           scenarios, the settlement assurance view, the Intents
-                          lifecycle (create → authorize → quote → settle), TEE research
+                          lifecycle (create → authorize → quote → approve →
+                          deposit → settle), TEE research
 
 ## Runtime dependencies
 
@@ -992,7 +1086,7 @@ immutable commit SHA (not a moving tag), and cancels superseded runs.
 ## Tests
 
 ```sh
-python3 -m pytest tests/ -q          # 905 passed, 24 skipped (929 with a server)
+python3 -m pytest tests/ -q          # 923 passed, 24 skipped (947 with a server)
 python3 -m pytest tests/test_guard_authorization.py -q
 python3 -m pytest tests/test_guard_invariants.py -q
 python3 -m pytest tests/test_guard_end_to_end.py -q
