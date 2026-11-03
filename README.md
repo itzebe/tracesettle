@@ -88,7 +88,7 @@ Amounts are exact `Decimal`s: a limit of `0.3` admits `0.3` and refuses
 `0.30000000000000004`. Severity is compared by an explicit rank, never by the
 severity's string value (`"MEDIUM"` sorts after `"HIGH"` alphabetically).
 
-Twenty-one structural guarantees are checked by *running the real code*, on demand, at
+Twenty-two structural guarantees are checked by *running the real code*, on demand, at
 `GET /api/guard/invariants` — including `refusal_never_reaches_the_executor` and
 `authorization_is_single_use`. Each checker is also mutation-tested: the guarded
 behaviour is deliberately broken and the checker must notice. A checker that
@@ -111,6 +111,35 @@ For each transaction stage TRACESETTLE records evidence, then classifies it:
 Each evidence item also carries a `verification_method` field stating how its
 classification was reached (for example a locally recomputed transaction id, a
 script-level recipient match, or a plain upstream report).
+
+**How strong is a claim?** Separate from the per-stage classification above, every
+capability in this repository is stated with an evidence level. No claim is made at
+a level it was not established at.
+
+| Evidence level | Meaning |
+| --- | --- |
+| Locally verified | Actually executed on this machine against the real code paths; reproducible with the commands in [Tests](#tests). |
+| Simulated | A controlled demonstration with synthetic parameters. The reference executor simulates execution and broadcasts nothing. |
+| Testnet verified | Actually exercised against a public test network. |
+| Mainnet verified | Independently confirmed against a public main network (a public RPC, event log, or explorer). |
+
+Where each capability stands:
+
+- **Transaction security, NEAR policy scope, access-key analysis, the nine attack
+  scenarios:** Locally verified (real code, real assertions) and, for the attack
+  scenarios themselves, Simulated — they are controlled simulations of attacks, not
+  live attacks.
+- **Settlement verification:** Mainnet verified — the reference swap, the refund
+  case, and the origin/bridge/settlement/destination stages are confirmed against
+  public mainnet RPCs and event logs, with raw captures under `evidence/raw/`.
+- **NEAR Intents provider reads (tokens, quote, status):** Mainnet verified
+  read-only against the public provider endpoints. Live provider-*policy*
+  integration is **not** claimed: it is unverified unless an operator configures
+  `TRACESETTLE_NEAR_AGENT_API_URL` and the read succeeds.
+- **TEE:** not integrated and not claimed (see
+  [`docs/TEE_RESEARCH.md`](docs/TEE_RESEARCH.md)).
+- **Signing / broadcasting:** never performed. The executor is simulated, so there
+  is no Testnet or Mainnet evidence for it — by design.
 
 Stages: `SOURCE_CHAIN_DEPOSIT`, `BRIDGE_DEPOSIT_CREDIT`, `NEAR_SETTLEMENT`,
 `DESTINATION_CHAIN_DELIVERY`, and `REFUND`.
