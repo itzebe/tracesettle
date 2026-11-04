@@ -185,6 +185,41 @@ def test_console_loads_its_wallet_connector_same_origin():
     assert "/api/guard/near/wallet" in html
 
 
+def test_wallet_panel_offers_the_complete_operation_controls():
+    """The wallet panel exposes asset choice, preview, disconnect and confirm.
+
+    A transfer UI that can only pick NEAR, cannot disconnect, and asks the wallet
+    to sign without a final confirmation is an incomplete product. These are the
+    controls that make the flow usable and safe; their absence is a regression.
+    """
+    with running_server() as base:
+        _, body, _ = _request("GET", base + "/console")
+    html = _html(body)
+    assert 'id="w-asset"' in html
+    assert 'id="w-receiver"' in html
+    assert 'id="w-amount"' in html
+    assert 'id="w-preview"' in html
+    assert 'id="w-disconnect"' in html
+    # The JS implements the new behaviour, not just the markup.
+    assert "function populateWalletAssets" in html
+    assert "function renderWalletPreview" in html
+    assert "function disconnectWallet" in html
+    assert "function confirmWalletOperation" in html
+    assert "supported_assets" in html
+
+
+def test_wallet_panel_has_no_third_party_script_or_fake_state():
+    """The wallet controls stay same-origin and never fabricate a connected state."""
+    with running_server() as base:
+        _, body, _ = _request("GET", base + "/console")
+    html = _html(body)
+    # No external script origin is introduced by the wallet controls.
+    assert "https://cdn" not in html
+    # The account starts disconnected; the UI must not claim a connection.
+    assert 'id="w-account" class="small muted"' in html
+    assert "not connected" in html
+
+
 def test_wallet_asset_is_served_and_is_the_bundled_connector():
     with running_server() as base:
         status, body, headers = _request("GET", base + "/assets/near-connect.js")

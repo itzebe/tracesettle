@@ -128,6 +128,8 @@ CONSOLE_HTML = """<!DOCTYPE html>
   .empty { color: var(--muted); font-size: 13px; padding: 12px; border: 1px dashed var(--line);
     border-radius: 8px; text-align: center; }
   .loading { color: var(--muted); font-size: 13px; }
+  .preview { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin-top: 12px;
+    background: #0b1220; font-size: 13px; }
   ul.plain { list-style: none; margin: 0; padding: 0; }
   ul.plain li { border-bottom: 1px solid var(--line); padding: 10px 0; }
   ul.plain li:last-child { border-bottom: none; }
@@ -275,11 +277,14 @@ CONSOLE_HTML = """<!DOCTYPE html>
         (<span class="mono">TRACESETTLE_NEAR_EXECUTION=1</span>).</p>
       <div id="wallet-connect"></div>
       <div class="row" style="margin-top:12px">
+        <div class="field"><label for="w-asset">Asset</label>
+          <select id="w-asset"><option value="near:native">NEAR (native)</option></select></div>
         <div class="field"><label for="w-receiver">Recipient</label>
           <input type="text" id="w-receiver" placeholder="recipient.testnet" autocomplete="off"></div>
-        <div class="field"><label for="w-amount">Amount (NEAR)</label>
+        <div class="field"><label for="w-amount">Amount</label>
           <input type="text" id="w-amount" value="0.02" autocomplete="off"></div>
       </div>
+      <div id="w-preview" class="preview" hidden></div>
       <div class="actions" style="margin-top:12px">
         <button class="act primary" type="button" id="w-send" disabled>Authorize, sign and send</button>
       </div>
@@ -857,13 +862,14 @@ async function evalNear(approved) {
 }
 
 /* ---- NEAR wallet-mediated flow (the connected wallet signs and sends) ---- */
-const WALLET = { connector: null, accountId: null, info: null };
+const WALLET = { connector: null, accountId: null, info: null, network: "testnet" };
 
 async function loadWallet() {
   const connectEl = document.getElementById("wallet-connect");
   const out = document.getElementById("wallet-output");
   const sendBtn = document.getElementById("w-send");
   out.innerHTML = "";
+  hideWalletPreview();
   let info;
   try {
     info = await api("GET", "/api/guard/near/wallet");
@@ -885,13 +891,69 @@ async function loadWallet() {
     return;
   }
   const network = info.network || "testnet";
+  WALLET.network = network;
+  populateWalletAssets(info.supported_assets || []);
   connectEl.innerHTML =
     '<div class="actions"><button class="act primary" type="button" id="w-connect">Connect wallet</button>' +
+    '<button class="act" type="button" id="w-disconnect" hidden>Disconnect</button>' +
     '<span id="w-account" class="small muted" style="margin-left:10px">not connected</span></div>' +
     '<div class="small muted" style="margin-top:8px">Network: ' + esc(network) +
     ". The wallet signs and sends; this server authorizes and independently verifies.</div>";
   document.getElementById("w-connect").onclick = () => connectWallet(network);
+  document.getElementById("w-disconnect").onclick = () => disconnectWallet();
   sendBtn.onclick = sendWalletOperation;
+  // A live preview of what will be authorized, so the exact parameters are
+  // visible before the wallet is ever asked to sign.
+  ["w-receiver", "w-amount", "w-asset"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) { el.addEventListener("input", renderWalletPreview); el.addEventListener("change", renderWalletPreview); }
+  });
+  renderWalletPreview();
+}
+
+function populateWalletAssets(assets) {
+  const sel = document.getElementById("w-asset");
+  if (!sel) return;
+  const current = sel.value;
+  sel.innerHTML = assets.length
+    ? assets.map((a) => '<option value="' + esc(a.identifier) + '">' + esc(a.symbol) +
+        " — " + esc(a.name || a.identifier) + " (" + esc(a.decimals) + " decimals)</option>").join("")
+    : '<option value="near:native">NEAR (native)</option>';
+  if (current) {
+    for (const opt of sel.options) { if (opt.value === current) { sel.value = current; break; } }
+  }
+}
+
+function currentWalletSelection() {
+  const assetEl = document.getElementById("w-asset");
+  const receiverEl = document.getElementById("w-receiver");
+  const amountEl = document.getElementById("w-amount");
+  return {
+    asset: assetEl ? assetEl.value : "near:native",
+    assetLabel: assetEl && assetEl.selectedOptions.length ? assetEl.selectedOptions[0].textContent : "NEAR",
+    receiver: receiverEl ? receiverEl.value.trim() : "",
+    amount: amountEl ? amountEl.value.trim() : "",
+  };
+}
+
+function hideWalletPreview() {
+  const el = document.getElementById("w-preview");
+  if (el) { el.hidden = true; el.innerHTML = ""; }
+}
+
+function renderWalletPreview() {
+  const el = document.getElementById("w-preview");
+  if (!el) return;
+  const sel = currentWalletSelection();
+  if (!sel.receiver && !sel.amount) { hideWalletPreview(); return; }
+  el.hidden = false;
+  el.innerHTML =
+    '<div class="small muted">This is what TraceSettle will evaluate and, if allowed, ' +
+    "bind to the authorization. The wallet then signs exactly this.</div>" +
+    '<dl class="kv"><dt>Asset</dt><dd>' + esc(sel.assetLabel) + "</dd>" +
+    '<dt>Recipient</dt><dd class="mono small">' + esc(sel.receiver || "—") + "</dd>" +
+    "<dt>Amount</dt><dd>" + esc(sel.amount || "—") + "</dd>" +
+    "<dt>Network</dt><dd>" + esc(WALLET.network) + "</dd></dl>";
 }
 
 async function connectWallet(network) {
@@ -900,34 +962,58 @@ async function connectWallet(network) {
   try {
     if (!WALLET.connector) {
       WALLET.connector = new window.TraceSettleWallet.NearConnector({ network: network });
+      // The connector can move between wallets/accounts; the approved account
+      // must always be the one the wallet is currently reporting, or an
+      // authorization could be bound to a stale identity.
       WALLET.connector.on("wallet:signIn", (t) => {
-        const accounts = t.accounts || [];
-        WALLET.accountId = accounts.length ? accounts[0].accountId : null;
-        accountEl.textContent = WALLET.accountId || "not connected";
-        document.getElementById("w-send").disabled = !WALLET.accountId;
+        const accounts = (t && t.accounts) || [];
+        setWalletAccount(accounts.length ? accounts[0].accountId : null);
       });
-      WALLET.connector.on("wallet:signOut", () => {
-        WALLET.accountId = null;
-        accountEl.textContent = "not connected";
-        document.getElementById("w-send").disabled = true;
-      });
+      WALLET.connector.on("wallet:signOut", () => setWalletAccount(null));
+      WALLET.connector.on("selector:walletsChanged", () => { refreshWalletAccount(); });
     }
     await WALLET.connector.connect();
-    if (!WALLET.accountId) {
-      try {
-        const connected = await WALLET.connector.getConnectedWallet();
-        if (connected && connected.accounts && connected.accounts.length) {
-          WALLET.accountId = connected.accounts[0].accountId;
-        }
-      } catch (ignore) { /* no restored session */ }
-    }
-    accountEl.textContent = WALLET.accountId || "not connected";
-    document.getElementById("w-send").disabled = !WALLET.accountId;
+    if (!WALLET.accountId) { await refreshWalletAccount(); }
+    setWalletAccount(WALLET.accountId);
   } catch (err) {
     accountEl.textContent = "connection failed";
     document.getElementById("wallet-output").innerHTML =
       '<div class="note bad">' + esc(err && err.message ? err.message : String(err)) + "</div>";
   }
+}
+
+async function refreshWalletAccount() {
+  if (!WALLET.connector) return;
+  try {
+    const connected = await WALLET.connector.getConnectedWallet();
+    if (connected && connected.accounts && connected.accounts.length) {
+      WALLET.accountId = connected.accounts[0].accountId;
+    }
+  } catch (ignore) { /* no restored session */ }
+}
+
+function setWalletAccount(accountId) {
+  WALLET.accountId = accountId || null;
+  const accountEl = document.getElementById("w-account");
+  const sendBtn = document.getElementById("w-send");
+  const disconnectBtn = document.getElementById("w-disconnect");
+  const connectBtn = document.getElementById("w-connect");
+  if (accountEl) accountEl.textContent = WALLET.accountId || "not connected";
+  if (sendBtn) sendBtn.disabled = !WALLET.accountId;
+  if (disconnectBtn) disconnectBtn.hidden = !WALLET.accountId;
+  if (connectBtn) connectBtn.hidden = !!WALLET.accountId;
+}
+
+async function disconnectWallet() {
+  try {
+    if (WALLET.connector && typeof WALLET.connector.disconnect === "function") {
+      await WALLET.connector.disconnect();
+    }
+  } catch (ignore) { /* the session is being discarded regardless */ }
+  setWalletAccount(null);
+  hideWalletPreview();
+  const out = document.getElementById("wallet-output");
+  if (out) out.innerHTML = "";
 }
 
 async function sendWalletOperation() {
@@ -937,9 +1023,8 @@ async function sendWalletOperation() {
     out.innerHTML = '<div class="note bad">Connect a wallet first.</div>';
     return;
   }
-  const receiver = document.getElementById("w-receiver").value.trim();
-  const amount = document.getElementById("w-amount").value.trim();
-  if (!receiver || !amount) {
+  const sel = currentWalletSelection();
+  if (!sel.receiver || !sel.amount) {
     out.innerHTML = '<div class="note bad">A recipient and an amount are required.</div>';
     return;
   }
@@ -949,9 +1034,9 @@ async function sendWalletOperation() {
     const prepared = await api("POST", "/api/guard/near/wallet/prepare", {
       service_id: "treasury-agent",
       account_id: WALLET.accountId,
-      receiver_id: receiver,
-      asset: "near:native",
-      amount: amount,
+      receiver_id: sel.receiver,
+      asset: sel.asset,
+      amount: sel.amount,
     });
     const decision = (prepared.decision || {}).decision || "UNKNOWN";
     if (!prepared.authorized) {
@@ -961,8 +1046,14 @@ async function sendWalletOperation() {
         "No authorization means nothing to sign.</div>" + decisionFindings(prepared.decision) + "</div>";
       return;
     }
+    const confirmed = await confirmWalletOperation(prepared);
+    if (!confirmed) {
+      out.innerHTML = '<div class="note sim">Nothing was sent. The wallet was not asked to sign, ' +
+        "and the authorization expires unused.</div>";
+      return;
+    }
     out.innerHTML = '<div class="card"><div class="kv"><dt>Authorization</dt><dd>' + status("ALLOW") +
-      "</dd><dt>Amount</dt><dd>" + esc(prepared.amount_human) + " NEAR</dd>" +
+      "</dd><dt>Amount</dt><dd>" + esc(prepared.amount_human) + "</dd>" +
       '<dt>Recipient</dt><dd class="mono small">' + esc(prepared.destination) + "</dd></div>" +
       '<div class="small">The wallet will now ask you to approve this exact transfer. ' +
       "The authorization is bound to these parameters.</div></div>" +
@@ -993,6 +1084,21 @@ async function sendWalletOperation() {
   } finally {
     sendBtn.disabled = !WALLET.accountId;
   }
+}
+
+/* A blocking confirmation of the exact parameters, shown after the server has
+   authorized and before the wallet is asked to sign. It never replaces the
+   server-side decision; it is a last human check on what will be signed. */
+function confirmWalletOperation(prepared) {
+  const asset = (prepared.asset && (prepared.asset.symbol || prepared.asset.identifier)) || "";
+  const message = `Authorize and send this transfer?
+
+Amount:    ${prepared.amount_human} ${asset}
+Recipient: ${prepared.destination}
+Network:   ${prepared.network || WALLET.network}
+
+The wallet will sign exactly these parameters.`;
+  return Promise.resolve(window.confirm(message));
 }
 
 function extractTxHash(outcome) {

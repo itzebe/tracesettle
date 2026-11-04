@@ -205,3 +205,24 @@ def test_a_prepared_operation_is_owner_scoped():
     store = api.near_wallet_store()
     # Another owner cannot take it.
     assert store.take(prepared.payload["prepare_id"], "other-service") is None
+
+
+def test_wallet_info_advertises_the_supported_assets():
+    """The console needs the real, network-scoped asset list, not a hardcoded one."""
+    api, _, _ = _api()
+    info = api.dispatch("GET", "/api/guard/near/wallet", {}, None)
+    assets = {a["identifier"] for a in info.payload["supported_assets"]}
+    assert "near:native" in assets
+    # A testnet asset identifier must never be offered on mainnet, and vice versa.
+    assert all(a["decimals"] >= 0 for a in info.payload["supported_assets"])
+    ops = {o["operation"] for o in info.payload["supported_operations"]}
+    assert {"NATIVE_TRANSFER", "NEP141_TRANSFER"} <= ops
+
+
+def test_wallet_info_assets_are_scoped_to_the_configured_network():
+    api, _, _ = _api()
+    info = api.dispatch("GET", "/api/guard/near/wallet", {}, None)
+    assert info.payload["network"] == "testnet"
+    ids = {a["identifier"] for a in info.payload["supported_assets"]}
+    assert "near:wrap.testnet" in ids
+    assert "near:wrap.near" not in ids

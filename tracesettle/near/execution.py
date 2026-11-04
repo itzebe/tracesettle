@@ -652,12 +652,35 @@ class NearExecutionBoundary:
 
     def wallet_execution_info(self) -> dict[str, Any]:
         """Describe the wallet flow for the UI. Holds no key and never signs."""
+        from .assets import supported_assets
+
         return {
             "enabled": True,
             "mode": "wallet",
             "network": self.config.network.value,
             "signs": False,
             "broadcasts": False,
+            "supported_operations": [
+                {
+                    "operation": "NATIVE_TRANSFER",
+                    "asset": "near:native",
+                    "description": "Native NEAR transfer (a plain Transfer action).",
+                },
+                {
+                    "operation": "NEP141_TRANSFER",
+                    "asset_identifier_template": "near:<contract>",
+                    "description": "NEP-141 ft_transfer call on the token contract.",
+                },
+            ],
+            "supported_assets": [
+                {
+                    "identifier": a.identifier,
+                    "symbol": a.symbol,
+                    "decimals": a.decimals,
+                    "name": a.name,
+                }
+                for a in supported_assets(self.config.network)
+            ],
             "note": (
                 "The connected wallet signs and sends the transaction. This "
                 "boundary authorizes the intent, binds it to the transaction, and "
