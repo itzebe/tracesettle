@@ -1059,3 +1059,67 @@ verification rule was weakened and no production configuration was touched.
 - **Authorized actions completed:** pushed `feat/near-security-integration`
   (`d69f9c8..a284c50`), updated PR #10. **Not done:** merge, production deploy, X
   post, submission.
+
+## Settlement-engine defect fix + independent origin verification (2026-11-04, HEAD `897ebb8`)
+
+Two findings from the final pre-submission audit, both fixed with
+mutation-checked regression tests. The reconciliation engine stays deterministic;
+no verification rule was weakened.
+
+- **Defect: a reverted origin transaction was reported `CONFIRMED`.** A receipt
+  with `status: "0x0"` was still treated as a decisive source-chain deposit,
+  because inclusion in a block was taken as success. Inclusion proves the
+  transaction was *mined*, not that it *succeeded*. `reconcile.py` now has
+  `_is_confirmed_revert()` (an EVM `REVERTED` receipt or `execution_succeeded:
+  False`) and a material-conflict branch: a confirmed revert yields
+  `CONTRADICTORY`, never `CONFIRMED`. Verified: `reverted origin -> CONTRADICTORY
+  | outcome: INCOMPLETE`; a successful origin still confirms; a *reported-only*
+  revert stays `REPORTED` (only a confirmed revert is decisive).
+- **New safety invariant `reverted_execution_never_confirms`** (12 total). It
+  fails if any `CONFIRMED` stage carries a confirmed-revert evidence item.
+  Mutation-tested: neutralising `_confirmed_revert` to `False` makes
+  `test_reverted_origin_transaction_is_never_confirmed` fail, so the guard is not
+  vacuous. `tests/test_safety_invariants.py` grew 4 tests.
+- **Gap: the deposit hash was a claim with no independent check.**
+  `tracesettle/near/origin_verify.py` (new) reads the origin chain directly and
+  returns `OriginVerdict` in {`VERIFIED`, `UNCONFIRMED`, `CONTRADICTORY`,
+  `NOT_FOUND`, `UNAVAILABLE`, `UNSUPPORTED`}. Matching is by **explicit
+  identifier** — the decoded recipient script/token contract and, when the quote
+  states it, the amount — never a provider's word and never amount/timestamp
+  similarity. A token deposit requires a matching ERC-20 `Transfer` log; a native
+  deposit checks the top-level recipient (the receipt does not carry `value`, so
+  the amount is disclosed as not checked, never guessed).
+- **Wiring.** `NearIntentsLifecycle._origin_verification()` derives the origin
+  chain from the **evaluated transaction** (`decision.transaction.chain`; the
+  asset id's `nep141:<chain>-…` prefix is only a fallback — a bridge asset id
+  like `nep141:eth.omft.near` does not name its chain). `refresh_status` attaches
+  the verdict; `get()` replays the stored verdict with **no second network call**;
+  `guard/api.py` exposes `verify-origin`; the console gained the button and
+  `renderOriginVerification()`. A check that cannot run (no source, or an outage)
+  is reported and never breaks the status read.
+- **Assurance evidence is now inspectable.** `StageAssurance` carries
+  `supporting_evidence_ids`/`conflicting_evidence_ids` and
+  `NearSettlementAssurance` carries the normalized `evidence` list, so a
+  `VERIFIED` claim names the exact evidence behind each stage. `report.py` and the
+  console thread it through.
+- **Live re-check.** The reference ETH→USDC deposit
+  (`0xfca11aa0…ba01d2`, deposit address `0xB741c0…A572B`) verifies `VERIFIED`
+  against the real chain (receipt status `0x1`, pays the deposit address),
+  reproduced across runs. The earlier one-off `UNAVAILABLE`/`MALFORMED` was a
+  transient `eth.drpc.org` hiccup, not a defect.
+- **Packaging.** New test imports `origin_verify` from a package-only copy, so a
+  runtime dependency on the test tree would fail the build.
+- **Counts:** 942 → **972 passed, 24 skipped** (996 collected); pyflakes clean;
+  compileall OK; offline demo byte-identical (`4864f13c…`); 23 guard invariants +
+  12 settlement invariants hold.
+- **Secret audit (publication gate).** gitleaks 8.21.2 over the full history (60
+  commits) + a targeted high-confidence scan of every reachable blob: **no
+  credentials**. Matches are public chain data (Bitcoin output scripts,
+  addresses, txids) and a self-documenting `totally-invalid-key-123` placeholder.
+- **Repository visibility is still blocked.** The GitHub App token has no
+  `Administration` permission: `PATCH /repos` and `gh repo edit --visibility
+  public` both return `403 Resource not accessible by integration`, and the
+  browser session is logged out. This is a permission limit, not a security
+  finding — the secret audit passed. The owner must flip visibility in the UI or
+  supply a classic PAT with `repo` scope. No merge, production deploy, X post or
+  submission was performed.
