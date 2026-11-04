@@ -1358,16 +1358,15 @@ key and only authorizes the intent and verifies the on-chain result.
   no PAT, AWS key, JWT, PEM, or service credential; every `ed25519:…` value is a
   public transaction **signature**, not a secret key. No credential in any
   commit or blob on the TraceSettle branches.
-- **Publication blocker — stray branch `origin/knotwork-backup`.** It is an
-  unrelated history (no common ancestor with `master`; a VR "knotwork" Vite
-  prototype) that also tracks `.openhands/memory/MEMORY.md` containing a real
-  personal email, cross-project internal notes, and sandbox/tooling internals.
-  It must be **deleted before the repository is made public**. The current
-  GitHub token cannot do this: it is a GitHub App installation token with
-  `contents/issues/pull_requests/actions: write` but **no `administration`
-  permission**, so both `PATCH /repos/...` (`private:false`) and
-  `DELETE /repos/.../git/refs/heads/...` are refused `403 Resource not
-  accessible by integration`.
+- **Stray branch `origin/knotwork-backup` removed.** It was an unrelated
+  history (no common ancestor with `master`; a VR "knotwork" Vite prototype)
+  that also tracked `.openhands/memory/MEMORY.md` containing a real personal
+  email, cross-project internal notes, and sandbox/tooling internals. It was
+  deleted with `DELETE /repos/.../git/refs/heads/knotwork-backup` (HTTP 204)
+  before publication. A re-scan of every remaining ref now finds no real
+  personal email and no foreign-project memory file. Deleting the ref removes it
+  from the published branch list; the objects remain in the repository's
+  unreachable set until GitHub's own garbage collection runs.
 - **Visibility change is blocked for the same reason.** Making
   `itzebe/tracesettle` public requires the repository Administration permission
   (or the owner acting in the web UI). The browser session available to the
