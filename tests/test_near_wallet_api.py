@@ -8,6 +8,8 @@ independently verifies the on-chain record. No key is ever held or transmitted.
 
 from __future__ import annotations
 
+import pytest
+
 from near_helpers import (
     RECIPIENT,
     SIGNER,
@@ -226,3 +228,99 @@ def test_wallet_info_assets_are_scoped_to_the_configured_network():
     ids = {a["identifier"] for a in info.payload["supported_assets"]}
     assert "near:wrap.testnet" in ids
     assert "near:wrap.near" not in ids
+
+
+def test_an_unrecognised_operation_is_never_verified():
+    """A fail-closed check: an operation the verifier does not recognise must
+    resolve to DISPUTED, never VERIFIED. Otherwise a record for an operation
+    whose amount could not be checked (e.g. a Delegate/AddKey/full-access
+    action) would be reported as an independent success."""
+    api, rpc, _ = _api()
+    prepared = _post(api, "/api/guard/near/wallet/prepare", _prepare_body())
+    prepare_id = prepared.payload["prepare_id"]
+    rpc.tx_status_result = _record(deposit=str(YOCTO_PER_NEAR), status_kind="success")
+    # Sabotage the operation label so no semantic branch matches.
+    stored = api.near_wallet_store().peek(prepare_id, "local")
+    stored.operation = "ADD_KEY"
+    result = _post(api, "/api/guard/near/wallet/verify",
+                   {"prepare_id": prepare_id, "tx_hash": TX_HASH})
+    assert result.payload["verification"]["state"] == SettlementState.DISPUTED.value
+    names = {c["name"]: c["ok"] for c in result.payload["verification"]["checks"]}
+    assert names["operation_recognised"] is False
+
+
+def test_a_final_successful_record_for_an_unknown_operation_is_disputed():
+    """The same guard at the pure-verifier level, so it cannot be weakened by an
+    HTTP-layer change."""
+    from tracesettle.near.verify import IntendedOperation, verify_intent
+
+    intended = IntendedOperation(
+        network=NETWORKS[NearNetwork.TESTNET],
+        signer_id=SIGNER,
+        operation="ADD_KEY",
+        receiver_id=RECIPIENT,
+        amount_base=YOCTO_PER_NEAR,
+        destination=RECIPIENT,
+        contract=None,
+    )
+    record = _record(deposit=str(YOCTO_PER_NEAR), status_kind="success")
+    verification = verify_intent(
+        intended=intended, result=record, source_status=SourceStatus.OK
+    )
+    assert verification.state is SettlementState.DISPUTED
+
+
+def test_wallet_verification_is_recorded_on_the_audit_chain():
+    """The independent settlement outcome must persist as audit evidence, not
+    only be returned in the response, and it must carry the on-chain facts."""
+    api, rpc, guard = _api()
+    prepared = _post(api, "/api/guard/near/wallet/prepare", _prepare_body())
+    rpc.tx_status_result = _record(deposit=str(YOCTO_PER_NEAR))
+    _post(api, "/api/guard/near/wallet/verify", {
+        "prepare_id": prepared.payload["prepare_id"], "tx_hash": TX_HASH,
+    })
+    records = [r for r in guard.audit_records(limit=50)
+               if r.event_type == "SETTLEMENT_VERIFICATION"]
+    assert records, "the settlement verification was not recorded"
+    rec = records[-1]
+    assert rec.outcome == SettlementState.VERIFIED.value
+    assert rec.extra["tx_hash"] == TX_HASH
+    assert rec.extra["destination"] == RECIPIENT
+    # The record is on the hash-chained log and the chain still verifies.
+    assert guard.audit_verification().ok is True
+
+
+def test_a_disputed_wallet_verification_is_recorded_with_its_failing_check():
+    api, rpc, guard = _api()
+    prepared = _post(api, "/api/guard/near/wallet/prepare", _prepare_body())
+    rpc.tx_status_result = _record(deposit=str(YOCTO_PER_NEAR + 1))  # wrong amount
+    _post(api, "/api/guard/near/wallet/verify", {
+        "prepare_id": prepared.payload["prepare_id"], "tx_hash": TX_HASH,
+    })
+    rec = [r for r in guard.audit_records(limit=50)
+           if r.event_type == "SETTLEMENT_VERIFICATION"][-1]
+    assert rec.outcome == SettlementState.DISPUTED.value
+    assert any(c["name"] == "transfer_amount_matches" and not c["ok"] for c in rec.extra["checks"])
+
+
+@pytest.mark.parametrize("degraded", [
+    SourceStatus.TIMEOUT,
+    SourceStatus.RATE_LIMITED,
+    SourceStatus.SERVER_ERROR,
+    SourceStatus.NETWORK_ERROR,
+    SourceStatus.UNAUTHORIZED,
+    SourceStatus.MALFORMED,
+])
+def test_every_degraded_rpc_status_is_insufficient_evidence(degraded):
+    """No upstream degradation may ever resolve to VERIFIED: a source that could
+    not answer leaves the settlement unverified, never successful."""
+    api, rpc, _ = _api()
+    prepared = _post(api, "/api/guard/near/wallet/prepare", _prepare_body())
+    rpc.tx_status_status = degraded
+    rpc.tx_status_result = None
+    result = _post(api, "/api/guard/near/wallet/verify", {
+        "prepare_id": prepared.payload["prepare_id"], "tx_hash": TX_HASH,
+    })
+    state = result.payload["verification"]["state"]
+    assert state == SettlementState.INSUFFICIENT_EVIDENCE.value
+    assert state != SettlementState.VERIFIED.value

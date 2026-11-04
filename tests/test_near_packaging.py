@@ -19,6 +19,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from tracesettle.guard.invariants import INVARIANTS
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PACKAGE_ROOT = REPO_ROOT / "tracesettle"
 
@@ -150,7 +152,7 @@ def test_all_invariants_hold_from_a_package_only_copy(tmp_path):
     )
     assert out.returncode == 0, out.stderr
     result = json.loads(out.stdout.strip().splitlines()[-1])
-    assert result["n"] == 29
+    assert result["n"] == len(INVARIANTS)
     assert result["all_hold"] is True
 
 

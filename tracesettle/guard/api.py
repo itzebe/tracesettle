@@ -662,6 +662,27 @@ class GuardAPI:
             verification = self.near_execution.verify_wallet_submission(prepared, tx_hash)
         except ExecutionError as exc:
             return ApiResponse(422, {"error": str(exc)})
+        # Record the independent settlement outcome on the hash-chained audit log
+        # so the evidence survives the request. The stored fields are public
+        # on-chain identifiers and the derived state only - never a secret.
+        self.service.audit.append(
+            event_type="SETTLEMENT_VERIFICATION",
+            actor=self._near_execution_owner(authenticated_service_id),
+            outcome=verification.state.value,
+            detail=verification.note,
+            service_id=prepared.decision.request.service_id if prepared.decision.request else None,
+            authorization_id=prepared.authorization_id,
+            extra={
+                "tx_hash": tx_hash,
+                "prepare_id": prepare_id,
+                "network": prepared.network.value,
+                "operation": prepared.operation,
+                "asset": prepared.asset.identifier,
+                "amount_human": str(prepared.amount_human),
+                "destination": prepared.destination,
+                "checks": [{"name": c.name, "ok": c.ok} for c in verification.checks],
+            },
+        )
         return ApiResponse(
             200,
             {

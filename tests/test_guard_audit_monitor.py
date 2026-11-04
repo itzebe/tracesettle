@@ -268,3 +268,22 @@ def test_approved_destination_is_not_an_incident():
     service = make_service()
     service.evaluate(make_request(destination=APPROVED_DESTINATION))
     assert service.incidents() == ()
+
+
+def test_guard_service_keeps_a_configured_empty_persistent_audit_log(tmp_path):
+    """A configured audit-log path must survive construction.
+
+    An empty ``AuditLog`` is falsy (it defines ``__len__``), so a truthiness
+    guard in ``GuardService.__init__`` would replace the persistent log with an
+    in-memory one on every fresh start — silently disabling durable auditing.
+    """
+    from tracesettle.guard.service import GuardService
+
+    path = tmp_path / "audit.jsonl"
+    audit = AuditLog(path=path)
+    assert not audit  # the precondition that made the bug reachable
+    service = GuardService(audit=audit)
+    assert service.audit is audit
+    service.audit.append(event_type="E", actor="svc", outcome="ALLOW", detail="recorded")
+    assert path.exists()
+    assert len(AuditLog(path=path).read_file()) == 1

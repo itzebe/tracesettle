@@ -215,7 +215,10 @@ class GuardService:
         safeguard_store: Any = None,
     ) -> None:
         self.policy = policy or DEFAULT_POLICY
-        self.audit = audit or AuditLog()
+        # ``is not None`` rather than truthiness: an empty AuditLog is falsy
+        # (it defines __len__), so ``audit or AuditLog()`` would silently drop a
+        # configured persistent log on every fresh start.
+        self.audit = audit if audit is not None else AuditLog()
         self.monitor = monitor or SecurityMonitor()
         #: The learning loop. When no safeguard store is configured it is inert,
         #: so a deployment without durable learning behaves exactly as before.

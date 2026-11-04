@@ -257,6 +257,45 @@ def _no_key_material_in_output() -> InvariantResult:
     )
 
 
+def _configured_audit_log_is_persistent() -> InvariantResult:
+    """A configured audit-log path must survive construction and be written.
+
+    An empty ``AuditLog`` is falsy, so a truthiness guard would swap a configured
+    persistent log for an in-memory one on every fresh start, silently discarding
+    durable audit evidence. This runs the real ``GuardService`` constructor with
+    an empty, path-backed log and checks the record lands on disk.
+    """
+    import tempfile
+    from pathlib import Path
+
+    from .audit import AuditLog
+
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "audit.jsonl"
+        audit = AuditLog(path=path)
+        if audit:
+            return InvariantResult(
+                "configured_audit_log_is_persistent", False, "a fresh path-backed log was truthy"
+            )
+        service = GuardService(policy=DEFAULT_POLICY, audit=audit)
+        if service.audit is not audit:
+            return InvariantResult(
+                "configured_audit_log_is_persistent",
+                False,
+                "the configured audit log was replaced during construction",
+            )
+        service.audit.append(event_type="E", actor="invariant", outcome="OK", detail="probe")
+        if not path.exists() or len(AuditLog(path=path).read_file()) != 1:
+            return InvariantResult(
+                "configured_audit_log_is_persistent", False, "the record was not persisted"
+            )
+    return InvariantResult(
+        "configured_audit_log_is_persistent",
+        True,
+        "a configured audit-log path is kept and the record is written to disk",
+    )
+
+
 def _unregistered_identity_never_executes() -> InvariantResult:
     service, signer, executor = _fresh()
     decision = service.evaluate_payload(_payload(service_id="rogue-service"))
@@ -1540,6 +1579,7 @@ INVARIANTS: dict[str, Callable[[], InvariantResult]] = {
     "expiry_is_enforced": _expiry_is_enforced,
     "client_assertions_never_allow": _client_assertions_never_allow,
     "audit_chain_detects_modification": _audit_chain_detects_modification,
+    "configured_audit_log_is_persistent": _configured_audit_log_is_persistent,
     "no_key_material_in_output": _no_key_material_in_output,
     "unregistered_identity_never_executes": _unregistered_identity_never_executes,
     "amounts_are_exact_decimals": _amounts_are_exact_decimals,
@@ -1585,6 +1625,7 @@ INVARIANT_DESCRIPTIONS: dict[str, str] = {
     "expiry_is_enforced": "An authorization outside its validity window is refused.",
     "client_assertions_never_allow": "Client-supplied approval or bypass flags never produce ALLOW and are reported.",
     "audit_chain_detects_modification": "An edit to a stored audit record is detected by chain recomputation.",
+    "configured_audit_log_is_persistent": "A configured audit-log path is kept by the guard and each record is written to disk, so durable audit evidence is never silently dropped.",
     "no_key_material_in_output": "No response body or metric carries the authorization signing key.",
     "unregistered_identity_never_executes": "An unregistered service identity is blocked and never reaches the executor.",
     "amounts_are_exact_decimals": "Amounts are compared as exact decimals, never as binary floats.",

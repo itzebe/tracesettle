@@ -88,7 +88,7 @@ Amounts are exact `Decimal`s: a limit of `0.3` admits `0.3` and refuses
 `0.30000000000000004`. Severity is compared by an explicit rank, never by the
 severity's string value (`"MEDIUM"` sorts after `"HIGH"` alphabetically).
 
-Twenty-nine structural guarantees are checked by *running the real code*, on demand, at
+Thirty structural guarantees are checked by *running the real code*, on demand, at
 `GET /api/guard/invariants` — including `refusal_never_reaches_the_executor` and
 `authorization_is_single_use`. Each checker is also mutation-tested: the guarded
 behaviour is deliberately broken and the checker must notice. A checker that
@@ -144,10 +144,14 @@ Where each capability stands:
   `Gjs4YNbEPBQKWB3M6MpV2zAwhvJySk7U6Q8NZnKVWCKH`). The default **simulated
   executor** never signs or broadcasts anything — that is by design, and no
   Testnet or Mainnet evidence is claimed for it.
-- **Wallet-mediated flow:** Locally verified — the authorize → prepare → verify
-  path is exercised over a live local HTTP socket (replay refused, tamper
-  `DISPUTED`). The wallet itself is what signs and broadcasts; TRACESETTLE holds
-  no key and claims no Testnet or Mainnet execution of its own for this path.
+- **Wallet-mediated flow:** Testnet verified — the authorize → prepare → verify
+  path was exercised against real NEAR testnet: a funded `*.testnet` account
+  signed the exact wallet request the server returned, the harness broadcast it,
+  and `/verify` read the chain back to `VERIFIED`. Replay of a consumed
+  `prepare_id` is refused (`404`); a tampered submission resolves to `DISPUTED`.
+  The server held no key at any point — the testnet account's own key signed
+  *outside* the server. The browser wallet connector itself was not driven by a
+  real browser extension; the signing step used the testnet account key directly.
 
 Stages: `SOURCE_CHAIN_DEPOSIT`, `BRIDGE_DEPOSIT_CREDIT`, `NEAR_SETTLEMENT`,
 `DESTINATION_CHAIN_DELIVERY`, and `REFUND`.
@@ -416,7 +420,16 @@ wallet — not the server — signs and sends. The server holds no key at any po
 - **A provider or wallet `SUCCESS` never verifies on its own.** Verification is
   the same deterministic discipline as everywhere else: a contradiction is
   `DISPUTED`, an unfinalized transaction is `PENDING`, and only a fully matched,
-  final, successful record reaches `VERIFIED`.
+  final, successful record reaches `VERIFIED`. An operation the verifier does not
+  recognise is `DISPUTED`, never `VERIFIED`; a degraded RPC source (timeout,
+  rate limit, server error, unauthorized) is `INSUFFICIENT_EVIDENCE`, never
+  `VERIFIED`.
+- **The verification is recorded as durable evidence.** Each `verify` outcome is
+  appended to the hash-chained audit log (`SETTLEMENT_VERIFICATION`, with the
+  on-chain tx hash, destination, amount and every check), so the independent
+  finding survives the request and a restart. A configured `TRACESETTLE_GUARD_AUDIT_LOG`
+  is honoured — a fresh, empty path-backed log is kept, not silently replaced
+  (invariant `configured_audit_log_is_persistent`).
 - **The connector is vendored and served same-origin.** The console loads
   `@hot-labs/near-connect` (MIT) from `/assets/near-connect.js`, so no
   third-party script origin is added to the page. The console's
@@ -432,11 +445,14 @@ wallet — not the server — signs and sends. The server holds no key at any po
   server's decision remains the only thing that permits a sign; the confirmation
   is a human check on top of it, never a replacement.
 
-**Locally verified:** the flow was exercised over a live local HTTP socket —
-`prepare` returns `VERIFIED`-eligible parameters, replaying a consumed
-`prepare_id` is refused (`404`), and a tampered submission resolves to
-`DISPUTED`. Packaging tests prove the wallet route and the vendored asset are
-present in a package-only copy, so the shipped image serves them.
+**Locally verified + Testnet verified:** the flow was exercised against real NEAR
+testnet — the server's `prepare` returned the exact wallet request, the testnet
+account signed it, the harness broadcast the signed transaction, and `verify`
+read the chain back to `VERIFIED`. Replaying a consumed `prepare_id` is refused
+(`404`), and a tampered submission resolves to `DISPUTED`. Packaging tests prove
+the wallet route and the vendored asset are present in a package-only copy, so
+the shipped image serves them. The server never held a key: the signing account's
+key lived only in the harness, outside the server process.
 
 ### Durable investigation history
 
@@ -538,11 +554,11 @@ a bare interpreter.
 **1. Run the tests.**
 
 ```sh
-python -m pytest tests/ --collect-only -q   # 1179 tests collected
-python -m pytest tests/ -q                  # 1155 passed, 24 skipped
+python -m pytest tests/ --collect-only -q   # 1192 tests collected
+python -m pytest tests/ -q                  # 1168 passed, 24 skipped
 ```
-→ `1155 passed, 24 skipped`. The skips are the PostgreSQL integration
-tests; set `TRACESETTLE_TEST_PG_DSN` to a real server to run them (**1179 passed, 0 skipped**).
+→ `1168 passed, 24 skipped`. The skips are the PostgreSQL integration
+tests; set `TRACESETTLE_TEST_PG_DSN` to a real server to run them (**1192 passed, 0 skipped**).
 
 **2. Prove the enforcement boundary: a permitted request executes, a suspicious
 one cannot.**
@@ -595,7 +611,7 @@ curl -sS -X POST http://127.0.0.1:8080/api/guard/sign \
 curl -sS http://127.0.0.1:8080/api/guard/invariants \
   | python3 -c 'import sys,json;d=json.load(sys.stdin);print("all hold:",d["all_hold"]);[print(" ",i["name"]) for i in d["invariants"]]'
 ```
-→ `all hold: True` and the twenty-nine invariant names, including the eleven NEAR
+→ `all hold: True` and the thirty invariant names, including the eleven NEAR
 ones (`near_policy_must_be_in_force`, `near_native_scope_gap_is_always_stated`,
 `near_function_call_key_cannot_transfer_near`,
 `near_provider_success_is_never_verified_without_evidence`,
@@ -929,7 +945,7 @@ transaction request ──▶ │ guard/rules.py      7 controls, all run  │
                         │                     validate, then execute │
                         │ guard/audit.py      hash-chained records  │
                         │ guard/monitor.py    counters + incidents  │
-                        │ guard/invariants.py 29 checked guarantees │
+                        │ guard/invariants.py 30 checked guarantees │
                         └────────────────────┬─────────────────────┘
                                              │ ALLOW + authorization
                                              ▼
@@ -1002,7 +1018,7 @@ identical decisions.
 | `tracesettle/guard/safeguards.py` | Durable security safeguards: the learning loop's store (SQLite). |
 | `tracesettle/guard/learning.py` | The learning loop: derive a lesson, apply safeguards (only ever tightening). |
 | `tracesettle/guard/state_pg.py` | Optional PostgreSQL backend: shared nonces, counters, revocations, idempotency. |
-| `tracesettle/guard/invariants.py` | The twenty-nine structural guarantees, checked by execution. |
+| `tracesettle/guard/invariants.py` | The thirty structural guarantees, checked by execution. |
 | `tracesettle/guard/api.py` | Guard HTTP routing and JSON serialization. |
 | `tracesettle/guard/console.py` | The security operations console page. |
 | `docs/TRANSACTION_SECURITY.md` | The security layer in full, including what it does not do. |
@@ -1012,7 +1028,7 @@ identical decisions.
 | `demo/demonstrate.py` | Read-only walkthrough (live, or `--offline` replay of captures). |
 | `demo/replay_opener.py` | Offline transport that replays `evidence/raw/` through the real code. |
 | `tracesettle/static/near-connect.js` | Vendored `@hot-labs/near-connect` (MIT) wallet connector, served same-origin at `/assets/near-connect.js`. |
-| `tests/` | 1175 tests (24 PostgreSQL tests skip without `TRACESETTLE_TEST_PG_DSN`). `evidence/raw/` fixtures are real captures; `tests/fixtures/synthetic/` are clearly labelled synthetic. |
+| `tests/` | 1192 tests (24 PostgreSQL tests skip without `TRACESETTLE_TEST_PG_DSN`). `evidence/raw/` fixtures are real captures; `tests/fixtures/synthetic/` are clearly labelled synthetic. |
 | `PHASE1_FEASIBILITY.md` | Phase 1 feasibility and API verification. |
 | `submission/` | Hackathon artifacts: API payload shape, technical summary, demo post draft, publication checklist. |
 | `docs/official/` | NEAR documentation captured during Phase 1. |
@@ -1104,7 +1120,7 @@ variable and all documented in `docs/TRANSACTION_SECURITY.md`:
   replay-nonce store all have explicit caps, so a flood cannot exhaust memory.
   When durable state is configured, spent nonces and the limit counters live in
   SQLite instead, so they survive a restart (see **Durable state** below).
-- **Structural invariants, checked by execution.** Twenty-nine guarantees at
+- **Structural invariants, checked by execution.** Thirty guarantees at
   `GET /api/guard/invariants`, each mutation-tested so a checker that cannot fail
   is treated as a defect.
 - **Honest audit claim.** In-place modification of an audit record is detectable;
@@ -1326,7 +1342,7 @@ immutable commit SHA (not a moving tag), and cancels superseded runs.
 ## Tests
 
 ```sh
-python3 -m pytest tests/ -q          # 1151 passed, 24 skipped (1175 with a server)
+python3 -m pytest tests/ -q          # 1168 passed, 24 skipped (1192 with a server)
 python3 -m pytest tests/test_guard_authorization.py -q
 python3 -m pytest tests/test_guard_invariants.py -q
 python3 -m pytest tests/test_guard_end_to_end.py -q

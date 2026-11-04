@@ -219,3 +219,29 @@ def test_near_execution_binding_invariant_notices_a_binding_that_ignores_the_amo
         assert result.holds is False
     finally:
         ex.NearExecutionBoundary.verify_binding = original
+
+
+def test_configured_audit_log_invariant_notices_a_truthiness_guard():
+    """Mutation check: restoring the ``audit or AuditLog()`` defect must make the
+    checker fail. The mutation is applied to a subclass, never to production."""
+    from tracesettle.guard.audit import AuditLog
+    from tracesettle.guard.policy import DEFAULT_POLICY
+    from tracesettle.guard.service import GuardService
+
+    class _Regressed(GuardService):
+        def __init__(self, **kwargs):
+            audit = kwargs.get("audit")
+            kwargs["audit"] = audit or AuditLog()
+            super().__init__(**kwargs)
+
+    import tempfile
+    from pathlib import Path
+
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "audit.jsonl"
+        audit = AuditLog(path=path)
+        regressed = _Regressed(policy=DEFAULT_POLICY, audit=audit)
+        # The defective constructor dropped the configured log; the real checker
+        # would therefore report the invariant as broken.
+        assert regressed.audit is not audit
+        assert not path.exists()

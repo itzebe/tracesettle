@@ -288,7 +288,7 @@ def verify_transaction(
     # Decide the state from the checks, never from any single flag.
     hard_fail = [c for c in checks if not c.ok and c.name in {
         "tx_hash_matches", "signer_matches", "receiver_matches", "nonce_matches", "execution_success",
-        "transfer_amount_matches", "ft_transfer_args_match",
+        "transfer_amount_matches", "ft_transfer_args_match", "operation_recognised",
     }]
     semantic_missing = [c for c in checks if not c.ok and c.name in {
         "ft_transfer_event_matches",
@@ -443,7 +443,7 @@ def verify_intent(
 
     hard_fail = [c for c in checks if not c.ok and c.name in {
         "signer_matches", "receiver_matches", "execution_success",
-        "transfer_amount_matches", "ft_transfer_args_match",
+        "transfer_amount_matches", "ft_transfer_args_match", "operation_recognised",
     }]
     semantic_missing = [c for c in checks if not c.ok and c.name in {"ft_transfer_event_matches"}]
 
