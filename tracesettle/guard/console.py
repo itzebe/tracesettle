@@ -805,6 +805,10 @@ async function loadIntents() {
   // Binding both an onclick on the button and an onsubmit on the form made a
   // single click create two intents (two POSTs) — a real duplicate-submission bug.
   document.getElementById("intents-create").onsubmit = (e) => { e.preventDefault(); createIntent(); };
+  // A durable record must be actionable after a reload, so the list is a resume
+  // affordance: the click handler lives on the container, which survives the
+  // innerHTML rewrite the render performs.
+  document.getElementById("intents-create-output").onclick = onIntentListClick;
   const list = await api("GET", "/api/guard/near/lifecycle");
   document.getElementById("i-dry-quote").onclick = () => stepIntent("quote", { dry: true }, "intents-step-output");
   document.getElementById("i-live-quote").onclick = () => stepIntent("quote", { dry: false }, "intents-step-output");
@@ -816,8 +820,7 @@ async function loadIntents() {
   document.getElementById("i-approve").onclick = () => decideQuote(true);
   document.getElementById("i-reject").onclick = () => decideQuote(false);
   if (list && list.intents && list.intents.length) {
-    out.innerHTML = '<div class="note">' + esc(list.intents.length) +
-      " intent(s) recorded for the local owner. Create a new one below.</div>";
+    out.innerHTML = renderIntentResumeList(list.intents);
   }
 }
 
@@ -861,6 +864,11 @@ async function createIntent() {
       "</dd><dt>State</dt><dd>" + esc(data.state) +
       '</dd><dt>Summary</dt><dd class="small">' + esc(d.summary || "") + "</dd></div></div>" +
       (data.created === false ? '<div class="note">This is the same transaction as an existing intent; no duplicate was created.</div>' : "");
+    // Surface the durable list again so this intent is resumable after a reload.
+    try {
+      const list = await api("GET", "/api/guard/near/lifecycle");
+      if (list && list.intents && list.intents.length) out.innerHTML += renderIntentResumeList(list.intents);
+    } catch (e) { /* the decision card already rendered; the list is a convenience */ }
   } catch (err) { out.innerHTML = '<div class="note bad">' + esc(err.message) + "</div>"; }
   finally { IN.busy = false; if (submit) submit.disabled = false; }
 }
@@ -1049,6 +1057,77 @@ async function listIntents() {
       '<table class="table"><thead><tr><th>Id</th><th>State</th><th>Provider status</th></tr></thead>' +
       "<tbody>" + (rows || '<tr><td colspan="3">none</td></tr>') + "</tbody></table></div>";
   } catch (err) { out.innerHTML = '<div class="note bad">' + esc(err.message) + "</div>"; }
+}
+
+// The owner's durable intents, as a resume list. Each row carries the stored
+// state, so a reload resumes an existing intent instead of abandoning it.
+function renderIntentResumeList(intents) {
+  const rows = intents.map((i) =>
+    '<tr><td class="small">' + esc(i.intent_id) + "</td><td>" + status(i.state) +
+    '</td><td class="small">' + esc(i.provider_status || "—") +
+    '</td><td><button class="act" type="button" data-intent-id="' + esc(i.intent_id) +
+    '" data-state="' + esc(i.state) + '">Resume</button></td></tr>').join("");
+  return '<div class="card"><h3>Resume a recorded intent</h3>' +
+    '<p class="small muted">Each row is a durable record. Resume re-selects it so the quote, ' +
+    "approval, deposit, status and assurance steps below run against it — no new intent is created.</p>" +
+    '<table class="table"><thead><tr><th>Id</th><th>State</th><th>Provider status</th><th></th></tr></thead>' +
+    "<tbody>" + rows + "</tbody></table></div>";
+}
+
+function onIntentListClick(e) {
+  const btn = e.target.closest("button[data-intent-id]");
+  if (!btn) return;
+  resumeIntent(btn.getAttribute("data-intent-id"), btn.getAttribute("data-state"));
+}
+
+async function resumeIntent(intentId, state) {
+  const out = document.getElementById("intents-create-output");
+  IN.intentId = intentId;
+  IN.idemKey = null;
+  out.innerHTML = loading("Loading intent " + intentId + "…");
+  let record = null;
+  try {
+    const data = await api("POST", "/api/guard/near/lifecycle/" + intentId + "/get", {});
+    record = data.intent || null;
+  } catch (err) { out.innerHTML = '<div class="note bad">' + esc(err.message) + "</div>"; return; }
+  if (!record) { out.innerHTML = '<div class="note bad">No such intent.</div>'; return; }
+
+  out.innerHTML = '<div class="card"><h3>Intent ' + esc(intentId) + "</h3>" +
+    '<div class="kv"><dt>State</dt><dd>' + status(record.state || state || "UNKNOWN") +
+    "</dd><dt>Provider status</dt><dd>" + esc(record.provider_status || "—") +
+    "</dd><dt>Deposit address</dt><dd>" +
+    (record.deposit_address ? "<code>" + esc(record.deposit_address) + "</code>" : "—") +
+    "</dd><dt>Quote approved</dt><dd>" + (record.quote_approved ? "Yes" : "No") +
+    "</dd></div>" +
+    '<div class="actions"><button class="act" type="button" id="i-refresh-record">Refresh this record</button></div></div>' +
+    '<div id="i-refresh-output" aria-live="polite"></div>';
+
+  // Restore the parts of the journey the stored evidence supports, so the
+  // operator continues from where the transaction actually is.
+  const q = record.quote || null;
+  if (record.deposit_address && q && q.quote) {
+    renderHandoff({
+      ok: true,
+      deposit_address: record.deposit_address,
+      deposit_memo: record.deposit_memo || null,
+      quote: q.quote,
+      expiry: record.quote_expiry || {},
+      dry: false,
+    });
+  }
+  const approveWrap = document.getElementById("i-approve-wrap");
+  if (approveWrap) approveWrap.hidden = !(record.deposit_address && !record.quote_approved);
+  const depositWrap = document.getElementById("i-deposit-form-wrap");
+  if (depositWrap) depositWrap.hidden = !(record.deposit_address && record.quote_approved);
+  const refresh = document.getElementById("i-refresh-record");
+  if (refresh) refresh.onclick = async () => {
+    const ro = document.getElementById("i-refresh-output");
+    ro.innerHTML = loading("Reading the provider status…");
+    try {
+      const d = await api("POST", "/api/guard/near/lifecycle/" + intentId + "/status", {});
+      ro.innerHTML = renderLifecycleStatus(d);
+    } catch (err) { ro.innerHTML = '<div class="note bad">' + esc(err.message) + "</div>"; }
+  };
 }
 
 async function loadTokens() {

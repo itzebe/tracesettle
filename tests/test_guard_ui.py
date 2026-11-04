@@ -503,6 +503,28 @@ def test_console_lifecycle_has_a_wallet_handoff_and_deposit_step():
     assert "Quote expires" in CONSOLE_HTML
 
 
+def test_console_lifecycle_exposes_a_resume_affordance():
+    """A durable record must be resumable after a reload.
+
+    The store exists so a lifecycle survives a restart, but the list was a
+    dead-end: it named the intents and offered no way to act on one, so a reload
+    abandoned an in-flight transaction. The list must render a per-intent Resume
+    control that re-selects the record through the real ``/get`` action.
+    """
+    from tracesettle.guard.console import CONSOLE_HTML
+
+    assert "renderIntentResumeList" in CONSOLE_HTML
+    assert "resumeIntent" in CONSOLE_HTML
+    # The Resume control carries the intent id and re-selects that record.
+    assert 'data-intent-id=' in CONSOLE_HTML
+    assert '"/get"' in CONSOLE_HTML
+    # The handler is delegated to the container, which survives the innerHTML
+    # rewrite the render performs; a per-row binding would be discarded.
+    assert 'getElementById("intents-create-output").onclick' in CONSOLE_HTML
+    # Resuming must not create a new intent.
+    assert "no new intent is created" in CONSOLE_HTML
+
+
 def test_console_declares_an_inline_favicon():
     """No external origin, and no 404 for a missing favicon."""
     from tracesettle.guard.console import CONSOLE_HTML

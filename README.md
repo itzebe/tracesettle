@@ -230,6 +230,11 @@ settle → assurance flow:
 6. **Settle + assurance.** When the swap settles, the same evidence pipeline that
    powers investigations produces the settlement-assurance view (above), so a
    provider `SUCCESS` is never confused with verified receipt.
+7. **Resume.** The console lists the owner's durable intents with a per-intent
+   **Resume** control, so a record survives a page reload and an in-flight
+   transaction can be continued (approve, deposit, status, assurance) without
+   creating a new intent. Resuming re-selects the stored record through the same
+   `/get` action; it creates nothing.
 
 The lifecycle never signs, submits, or moves funds: it obtains a deposit address,
 hands it to the operator, and observes the outcome. `tests/test_near_lifecycle.py`
@@ -239,7 +244,8 @@ socket** — create → authorize → live quote → approve → status → assu
 route wired to the wrong path, gated by the wrong flag, or answered without a body
 fails there rather than in the product. The console walks the same six steps in
 the **Intents Lifecycle** tab, gating the deposit form behind the approve/reject
-controls.
+controls, and lists the durable intents with a **Resume** control so a reload does
+not abandon an in-flight transaction.
 
 ### Durable investigation history
 
