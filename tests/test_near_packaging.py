@@ -150,7 +150,7 @@ def test_all_invariants_hold_from_a_package_only_copy(tmp_path):
     )
     assert out.returncode == 0, out.stderr
     result = json.loads(out.stdout.strip().splitlines()[-1])
-    assert result["n"] == 27
+    assert result["n"] == 29
     assert result["all_hold"] is True
 
 
@@ -170,3 +170,63 @@ def test_origin_verifier_is_shipped_and_importable_from_the_package(tmp_path):
     )
     assert out.returncode == 0, out.stderr
     assert out.stdout.strip().endswith("ok")
+
+
+def test_near_execution_boundary_runs_from_a_package_only_copy(tmp_path):
+    """The execution boundary and its imports must resolve without the test tree.
+
+    The boundary is built with an inline fake RPC (no test helper, no network) and
+    driven to a BLOCK decision, so every runtime import the route needs is
+    exercised in a package-only copy.
+    """
+    root = _package_only_copy(tmp_path)
+    script = r'''
+import sys, json
+sys.path.insert(0, sys.argv[1])
+from decimal import Decimal
+from tracesettle.guard.authorization import AuthorizationAuthority, InMemoryReplayStore
+from tracesettle.guard.policy import PolicyConfig, ServicePolicy
+from tracesettle.guard.service import GuardService
+from tracesettle.model import SourceStatus
+from tracesettle.near import ed25519
+from tracesettle.near.execution import NearExecutionBoundary
+from tracesettle.near.networks import NETWORKS, NearNetwork
+from tracesettle.near.rpc import RpcResult
+
+class Rpc:
+    def __init__(self, c): self.c = c
+    def status(self): return RpcResult(SourceStatus.OK, {"chain_id": self.c.chain_id, "genesis_hash": self.c.genesis_hash})
+    def block_hash(self, *, finality="final"): return RpcResult(SourceStatus.OK, {"hash": "9Gq9bHtf6SKUuWLbzgPMVedA3BtYbYVwb5NVUrQyzoE9", "height": 1})
+    def view_access_key(self, a, p): return RpcResult(SourceStatus.OK, {"nonce": 1})
+    def call_function(self, a, m, args=None, *, finality="final"): return RpcResult(SourceStatus.OK, {"decimals": 24})
+    def send_tx(self, s, *, wait_until="INCLUDED_FINAL"): return RpcResult(SourceStatus.OK, {})
+    def tx_status(self, h, a): return RpcResult(SourceStatus.OK, {})
+
+cfg = NETWORKS[NearNetwork.TESTNET]
+policy = PolicyConfig(policy_id="p", name="p", version="1",
+    approved_destinations=frozenset({"ok.testnet"}),
+    services={"svc": ServicePolicy(service_id="svc", allowed_operations=frozenset({"WITHDRAWAL"}),
+        allowed_chains=frozenset({"near-testnet"}), allowed_assets=frozenset({"NEAR:NATIVE"}),
+        max_amount_per_transaction=Decimal("100"), approval_threshold=Decimal("1000"))},
+    per_transaction_limit=Decimal("100"), approval_threshold=Decimal("1000"),
+    allow_unlisted_destinations=False)
+g = GuardService(policy=policy, authority=AuthorizationAuthority(key=bytes(range(32)), key_id="k", ephemeral=False, replay_store=InMemoryReplayStore()))
+b = NearExecutionBoundary(g, cfg, rpc=Rpc(cfg))
+pk = "ed25519:" + __import__("base64").b64encode(b"").decode()  # placeholder, replaced below
+seed = bytes(range(32))
+alpha = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+n = int.from_bytes(ed25519.public_key(seed), "big"); out = ""
+while n:
+    n, r = divmod(n, 58); out = alpha[r] + out
+pk = "ed25519:" + out
+prepared = b.prepare(service_id="svc", account_id="agent.testnet", public_key=pk,
+    receiver_id="attacker.testnet", asset_identifier="near:native", amount_human="1")
+print(json.dumps({"authorized": prepared.authorized, "decision": prepared.decision.decision.value}))
+'''
+    out = subprocess.run(
+        [sys.executable, "-c", script, str(root)], capture_output=True, text=True, timeout=120
+    )
+    assert out.returncode == 0, out.stderr
+    result = json.loads(out.stdout.strip().splitlines()[-1])
+    assert result["authorized"] is False
+    assert result["decision"] == "BLOCK"

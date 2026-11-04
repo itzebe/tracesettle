@@ -88,7 +88,7 @@ Amounts are exact `Decimal`s: a limit of `0.3` admits `0.3` and refuses
 `0.30000000000000004`. Severity is compared by an explicit rank, never by the
 severity's string value (`"MEDIUM"` sorts after `"HIGH"` alphabetically).
 
-Twenty-seven structural guarantees are checked by *running the real code*, on demand, at
+Twenty-nine structural guarantees are checked by *running the real code*, on demand, at
 `GET /api/guard/invariants` — including `refusal_never_reaches_the_executor` and
 `authorization_is_single_use`. Each checker is also mutation-tested: the guarded
 behaviour is deliberately broken and the checker must notice. A checker that
@@ -138,8 +138,12 @@ Where each capability stands:
   `TRACESETTLE_NEAR_AGENT_API_URL` and the read succeeds.
 - **TEE:** not integrated and not claimed (see
   [`docs/TEE_RESEARCH.md`](docs/TEE_RESEARCH.md)).
-- **Signing / broadcasting:** never performed. The executor is simulated, so there
-  is no Testnet or Mainnet evidence for it — by design.
+- **Live NEAR execution boundary:** Testnet verified — the opt-in boundary
+  (`TRACESETTLE_NEAR_EXECUTION=1`) built, signed, broadcast and independently
+  verified a real NEAR testnet transfer (tx
+  `Gjs4YNbEPBQKWB3M6MpV2zAwhvJySk7U6Q8NZnKVWCKH`). The default **simulated
+  executor** never signs or broadcasts anything — that is by design, and no
+  Testnet or Mainnet evidence is claimed for it.
 
 Stages: `SOURCE_CHAIN_DEPOSIT`, `BRIDGE_DEPOSIT_CREDIT`, `NEAR_SETTLEMENT`,
 `DESTINATION_CHAIN_DELIVERY`, and `REFUND`.
@@ -352,6 +356,39 @@ the **Intents Lifecycle** tab, gating the deposit form behind the approve/reject
 controls, and lists the durable intents with a **Resume** control so a reload does
 not abandon an in-flight transaction.
 
+### Live NEAR execution boundary (opt-in, off by default)
+
+Beyond the simulated executor, TRACESETTLE ships a **real** NEAR execution
+boundary (`tracesettle/near/execution.py`) that builds a genuine transaction,
+binds the guard's authorization to the exact bytes, accepts a signature produced
+elsewhere, broadcasts it, and then *independently* verifies the result by reading
+the chain back. It is deliberately narrow and gated:
+
+- **Off by default.** The routes are only mounted when
+  `TRACESETTLE_NEAR_EXECUTION=1`; a prepared operation is server-side, bounded,
+  TTL'd and owner-scoped, and no route signs with a stored key.
+- **The guard authorizes; it never holds a key.** `POST .../near/execution/prepare`
+  runs the seven controls against the *actual* parameters and, on `ALLOW`, returns
+  a transaction plus an authorization. The caller signs with their **own** wallet
+  and submits the signature; the boundary re-derives the binding from the bytes it
+  would broadcast, so changing the amount after authorization is refused
+  (`WRONG_PARAMETERS`).
+- **Independent verification, not a provider's word.** After broadcast the
+  boundary reads the transaction back and confirms the outcome, the signer, the
+  receiver and the transferred amount before it reports `VERIFIED`. A provider
+  `SUCCESS` alone never yields `VERIFIED`.
+- **Standard library only.** Serialization (Borsh), ed25519, the RPC client and
+  the verifier are all stdlib — no runtime dependency is added.
+
+**Locally verified (testnet):** the full pipeline was exercised live on NEAR
+testnet — a funded `*.testnet` account built, signed, broadcast and independently
+verified a real transfer (tx
+`Gjs4YNbEPBQKWB3M6MpV2zAwhvJySk7U6Q8NZnKVWCKH`), reaching state `VERIFIED`. The
+tests substitute only the RPC transport (a network boundary), so every line of
+`execution.py` runs. Two structural invariants guard it:
+`near_execution_never_signs_without_authorization` and
+`near_execution_binding_covers_the_bytes`.
+
 ### Durable investigation history
 
 A settlement investigation is a conclusion drawn from live sources, and those
@@ -425,8 +462,10 @@ mutation-tested: `near_policy_must_be_in_force`,
 `near_provider_success_is_never_verified_without_evidence`,
 `near_partial_settlement_is_never_verified`,
 `near_terminal_states_are_evidence_distinguished`,
-`near_destination_delivery_requires_the_destination_chain`, and
-`near_chain_is_derived_from_the_origin_asset`.
+`near_destination_delivery_requires_the_destination_chain`,
+`near_chain_is_derived_from_the_origin_asset`,
+`near_execution_never_signs_without_authorization`, and
+`near_execution_binding_covers_the_bytes` (eleven NEAR-specific in total).
 
 ## Try it: do X → see Y
 
@@ -450,11 +489,11 @@ a bare interpreter.
 **1. Run the tests.**
 
 ```sh
-python -m pytest tests/ --collect-only -q   # 1065 tests collected
-python -m pytest tests/ -q                  # 1041 passed, 24 skipped
+python -m pytest tests/ --collect-only -q   # 1153 tests collected
+python -m pytest tests/ -q                  # 1129 passed, 24 skipped
 ```
-→ `1041 passed, 24 skipped`. The skips are the PostgreSQL integration
-tests; set `TRACESETTLE_TEST_PG_DSN` to a real server to run them (1031 pass).
+→ `1129 passed, 24 skipped`. The skips are the PostgreSQL integration
+tests; set `TRACESETTLE_TEST_PG_DSN` to a real server to run them (**1153 passed, 0 skipped**).
 
 **2. Prove the enforcement boundary: a permitted request executes, a suspicious
 one cannot.**
@@ -1015,7 +1054,7 @@ variable and all documented in `docs/TRANSACTION_SECURITY.md`:
   replay-nonce store all have explicit caps, so a flood cannot exhaust memory.
   When durable state is configured, spent nonces and the limit counters live in
   SQLite instead, so they survive a restart (see **Durable state** below).
-- **Structural invariants, checked by execution.** Twenty-seven guarantees at
+- **Structural invariants, checked by execution.** Twenty-nine guarantees at
   `GET /api/guard/invariants`, each mutation-tested so a checker that cannot fail
   is treated as a defect.
 - **Honest audit claim.** In-place modification of an audit record is detectable;
@@ -1237,7 +1276,7 @@ immutable commit SHA (not a moving tag), and cancels superseded runs.
 ## Tests
 
 ```sh
-python3 -m pytest tests/ -q          # 1041 passed, 24 skipped (1065 with a server)
+python3 -m pytest tests/ -q          # 1129 passed, 24 skipped (1153 with a server)
 python3 -m pytest tests/test_guard_authorization.py -q
 python3 -m pytest tests/test_guard_invariants.py -q
 python3 -m pytest tests/test_guard_end_to_end.py -q

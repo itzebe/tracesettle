@@ -1254,6 +1254,284 @@ def _near_chain_is_derived_from_the_origin_asset():
         store.close()
 
 
+def _near_execution_never_signs_without_a_valid_authorization():
+    """The execution boundary must not sign or broadcast without an authorization.
+
+    A real boundary is driven with a policy that blocks the destination. The
+    transaction is built and evaluated (so the real controls run), but the
+    decision is BLOCK, so no authorization exists and a broadcast attempt must be
+    refused with nothing submitted to the RPC. This is the same fail-closed
+    guarantee as ``refusal_never_reaches_the_executor``, proved for the live NEAR
+    path specifically.
+    """
+    from ..near.execution import ExecutionError, NearExecutionBoundary
+    from ..near.networks import NETWORKS, NearNetwork
+
+    class _RecordingRpc:
+        """Minimal RPC: records broadcasts, answers identity/asset queries."""
+
+        def __init__(self, config):
+            self.config = config
+            self.broadcasts: list[str] = []
+
+        def status(self):
+            from ..near.rpc import RpcResult
+            from ..model import SourceStatus
+
+            return RpcResult(
+                SourceStatus.OK,
+                {"chain_id": self.config.chain_id, "genesis_hash": self.config.genesis_hash},
+            )
+
+        def block_hash(self, *, finality="final"):
+            from ..near.rpc import RpcResult
+            from ..model import SourceStatus
+
+            return RpcResult(
+                SourceStatus.OK,
+                {"hash": "9Gq9bHtf6SKUuWLbzgPMVedA3BtYbYVwb5NVUrQyzoE9", "height": 1},
+            )
+
+        def view_access_key(self, account_id, public_key):
+            from ..near.rpc import RpcResult
+            from ..model import SourceStatus
+
+            return RpcResult(SourceStatus.OK, {"nonce": 1})
+
+        def call_function(self, account_id, method_name, args=None, *, finality="final"):
+            from ..near.rpc import RpcResult
+            from ..model import SourceStatus
+
+            return RpcResult(SourceStatus.OK, {"decimals": 24})
+
+        def send_tx(self, signed_transaction_b64, *, wait_until="INCLUDED_FINAL"):
+            self.broadcasts.append(signed_transaction_b64)
+            from ..near.rpc import RpcResult
+            from ..model import SourceStatus
+
+            return RpcResult(SourceStatus.OK, {})
+
+        def tx_status(self, tx_hash, sender_account_id):
+            from ..near.rpc import RpcResult
+            from ..model import SourceStatus
+
+            return RpcResult(SourceStatus.OK, {})
+
+    from .policy import PolicyConfig, ServicePolicy
+    from ..near import ed25519
+
+    seed = bytes(range(32))
+    signer = "agent.testnet"
+    config = NETWORKS[NearNetwork.TESTNET]
+    policy = PolicyConfig(
+        policy_id="near-exec-invariant",
+        name="near exec invariant",
+        version="1",
+        approved_destinations=frozenset({"approved.testnet"}),
+        services={
+            "svc": ServicePolicy(
+                service_id="svc",
+                allowed_operations=frozenset({"WITHDRAWAL"}),
+                allowed_chains=frozenset({"near-testnet"}),
+                allowed_assets=frozenset({"NEAR:NATIVE"}),
+                max_amount_per_transaction=Decimal("100"),
+                approval_threshold=Decimal("1000"),
+            )
+        },
+        per_transaction_limit=Decimal("100"),
+        approval_threshold=Decimal("1000"),
+        allow_unlisted_destinations=False,
+    )
+    guard = GuardService(
+        policy=policy,
+        authority=AuthorizationAuthority(
+            key=_INVARIANT_KEY, key_id="i", ephemeral=False, replay_store=InMemoryReplayStore()
+        ),
+    )
+    rpc = _RecordingRpc(config)
+    boundary = NearExecutionBoundary(guard, config, rpc=rpc)
+    pub = "ed25519:" + _b58(ed25519.public_key(seed))
+    prepared = boundary.prepare(
+        service_id="svc",
+        account_id=signer,
+        public_key=pub,
+        receiver_id="attacker.testnet",  # not approved -> BLOCK
+        asset_identifier="near:native",
+        amount_human="1",
+    )
+    if prepared.authorized:
+        return InvariantResult(
+            "near_execution_never_signs_without_authorization",
+            False,
+            "a blocked destination still produced an authorization",
+        )
+    import base64 as _base64
+
+    sig = _base64.b64encode(ed25519.sign(prepared.transaction.tx_hash_bytes, seed)).decode()
+    refused = False
+    try:
+        boundary.broadcast(prepared, sig)
+    except ExecutionError:
+        refused = True
+    if not refused or rpc.broadcasts:
+        return InvariantResult(
+            "near_execution_never_signs_without_authorization",
+            False,
+            "the boundary signed or broadcast without an authorization",
+        )
+    return InvariantResult(
+        "near_execution_never_signs_without_authorization",
+        True,
+        "a transaction without an authorization is never signed or broadcast",
+    )
+
+
+def _near_execution_binding_covers_the_bytes():
+    """The authorization must cover the exact bytes that would be broadcast.
+
+    An authorized transaction is prepared and then *tampered* (the transfer
+    amount is changed by one unit) while keeping the original authorization. The
+    boundary must refuse: the binding is derived from the amount that goes into
+    the bytes, so a change to the bytes changes the binding. A boundary that
+    verified only the presence of a token would accept the tampered transaction.
+    """
+    from ..near.execution import ExecutionError, NearExecutionBoundary
+    from ..near.networks import NETWORKS, NearNetwork
+    from ..near import ed25519
+    import base64 as _base64
+    import dataclasses
+
+    seed = bytes(range(32))
+    signer = "agent.testnet"
+    receiver = "approved.testnet"
+    config = NETWORKS[NearNetwork.TESTNET]
+
+    class _Rpc:
+        def __init__(self):
+            self.broadcasts: list[str] = []
+
+        def status(self):
+            from ..near.rpc import RpcResult
+            from ..model import SourceStatus
+
+            return RpcResult(
+                SourceStatus.OK,
+                {"chain_id": config.chain_id, "genesis_hash": config.genesis_hash},
+            )
+
+        def block_hash(self, *, finality="final"):
+            from ..near.rpc import RpcResult
+            from ..model import SourceStatus
+
+            return RpcResult(
+                SourceStatus.OK,
+                {"hash": "9Gq9bHtf6SKUuWLbzgPMVedA3BtYbYVwb5NVUrQyzoE9", "height": 1},
+            )
+
+        def view_access_key(self, account_id, public_key):
+            from ..near.rpc import RpcResult
+            from ..model import SourceStatus
+
+            return RpcResult(SourceStatus.OK, {"nonce": 1})
+
+        def call_function(self, account_id, method_name, args=None, *, finality="final"):
+            from ..near.rpc import RpcResult
+            from ..model import SourceStatus
+
+            return RpcResult(SourceStatus.OK, {"decimals": 24})
+
+        def send_tx(self, signed_transaction_b64, *, wait_until="INCLUDED_FINAL"):
+            self.broadcasts.append(signed_transaction_b64)
+            from ..near.rpc import RpcResult
+            from ..model import SourceStatus
+
+            return RpcResult(SourceStatus.OK, {})
+
+        def tx_status(self, tx_hash, sender_account_id):
+            from ..near.rpc import RpcResult
+            from ..model import SourceStatus
+
+            return RpcResult(SourceStatus.OK, {})
+
+    from .policy import PolicyConfig, ServicePolicy
+
+    policy = PolicyConfig(
+        policy_id="near-bind-invariant",
+        name="near bind invariant",
+        version="1",
+        approved_destinations=frozenset({receiver}),
+        services={
+            "svc": ServicePolicy(
+                service_id="svc",
+                allowed_operations=frozenset({"WITHDRAWAL"}),
+                allowed_chains=frozenset({"near-testnet"}),
+                allowed_assets=frozenset({"NEAR:NATIVE"}),
+                max_amount_per_transaction=Decimal("100"),
+                approval_threshold=Decimal("1000"),
+            )
+        },
+        per_transaction_limit=Decimal("100"),
+        approval_threshold=Decimal("1000"),
+        allow_unlisted_destinations=False,
+    )
+    guard = GuardService(
+        policy=policy,
+        authority=AuthorizationAuthority(
+            key=_INVARIANT_KEY, key_id="i", ephemeral=False, replay_store=InMemoryReplayStore()
+        ),
+    )
+    boundary = NearExecutionBoundary(guard, config, rpc=_Rpc())
+    pub = "ed25519:" + _b58(ed25519.public_key(seed))
+    prepared = boundary.prepare(
+        service_id="svc",
+        account_id=signer,
+        public_key=pub,
+        receiver_id=receiver,
+        asset_identifier="near:native",
+        amount_human="1",
+    )
+    if not prepared.authorized:
+        return InvariantResult(
+            "near_execution_binding_covers_the_bytes",
+            False,
+            "the invariant's own authorized prepare did not authorize",
+        )
+    tampered = dataclasses.replace(
+        prepared,
+        transaction=dataclasses.replace(
+            prepared.transaction, amount_base=prepared.transaction.amount_base + 1
+        ),
+    )
+    sig = _base64.b64encode(ed25519.sign(prepared.transaction.tx_hash_bytes, seed)).decode()
+    refused = False
+    try:
+        boundary.accept_signature(tampered, sig)
+    except ExecutionError:
+        refused = True
+    if not refused:
+        return InvariantResult(
+            "near_execution_binding_covers_the_bytes",
+            False,
+            "a tampered transaction passed the authorization binding",
+        )
+    return InvariantResult(
+        "near_execution_binding_covers_the_bytes",
+        True,
+        "the authorization is bound to the exact bytes; a tampered amount is refused",
+    )
+
+
+def _b58(raw: bytes) -> str:
+    alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+    n = int.from_bytes(raw, "big")
+    out = ""
+    while n:
+        n, r = divmod(n, 58)
+        out = alphabet[r] + out
+    pad = len(raw) - len(raw.lstrip(b"\x00"))
+    return "1" * pad + (out or "")
+
+
 INVARIANTS: dict[str, Callable[[], InvariantResult]] = {
     "non_allow_never_authorizes": _non_allow_never_authorizes,
     "refusal_never_reaches_the_executor": _refusal_never_reaches_the_executor,
@@ -1292,6 +1570,10 @@ INVARIANTS: dict[str, Callable[[], InvariantResult]] = {
         _near_destination_delivery_requires_the_destination_chain
     ),
     "near_chain_is_derived_from_the_origin_asset": _near_chain_is_derived_from_the_origin_asset,
+    "near_execution_never_signs_without_authorization": (
+        _near_execution_never_signs_without_a_valid_authorization
+    ),
+    "near_execution_binding_covers_the_bytes": _near_execution_binding_covers_the_bytes,
 }
 
 #: Human-readable statement of each guarantee, for the console and the docs.
@@ -1323,6 +1605,8 @@ INVARIANT_DESCRIPTIONS: dict[str, str] = {
     "near_terminal_states_are_evidence_distinguished": "A reported failure or refund never reads as a definitive FAILED/REFUNDED state, and a confirmed refund is REFUNDED rather than a verified settlement.",
     "near_destination_delivery_requires_the_destination_chain": "A destination delivery is verified only by reading the destination chain and matching the intended recipient; a provider success claim and a confirmed origin deposit never confirm it.",
     "near_chain_is_derived_from_the_origin_asset": "The chain the guard evaluates is derived from the origin asset, and an explicit chain that disagrees with it is refused; a caller cannot steer a chain-scoped policy to the wrong chain.",
+    "near_execution_never_signs_without_authorization": "The NEAR execution boundary never signs or broadcasts a transaction that did not receive an authorization.",
+    "near_execution_binding_covers_the_bytes": "The authorization is bound to the exact bytes that would be broadcast; changing the amount after authorization is refused.",
 }
 
 

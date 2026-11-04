@@ -336,6 +336,22 @@ NEAR_LIFECYCLE_ENABLED = (
     in {"1", "true", "yes", "on"}
 )
 
+#: Whether the NEAR execution boundary is enabled. Off by default. When enabled,
+#: TraceSettle builds real NEAR transactions, hands them to a caller's wallet to
+#: sign, broadcasts the signed bytes, and independently verifies settlement. It
+#: never holds a key. Because enabling it exposes a path to a live broadcast, it
+#: is an explicit operator decision and never turned on by a public bind.
+NEAR_EXECUTION_ENABLED = (
+    os.environ.get("TRACESETTLE_NEAR_EXECUTION", "").strip().lower()
+    in {"1", "true", "yes", "on"}
+)
+
+#: The NEAR network the execution boundary acts on: ``testnet`` (the default) or
+#: ``mainnet``. Testnet is the default so a misconfiguration cannot spend real
+#: funds. The network is resolved server-side and its genesis hash is checked
+#: against the RPC before any transaction is built.
+NEAR_EXECUTION_NETWORK = os.environ.get("TRACESETTLE_NEAR_EXECUTION_NETWORK", "testnet").strip() or "testnet"
+
 # ---------------------------------------------------------------------------
 # Serve defaults (env-driven so a container image needs no CLI flags)
 # ---------------------------------------------------------------------------

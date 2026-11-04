@@ -50,7 +50,11 @@ class GuardAPI:
     """Routes guard requests to the service and serializes the results."""
 
     def __init__(
-        self, service: GuardService, lifecycle: Any = None, investigation_store: Any = None
+        self,
+        service: GuardService,
+        lifecycle: Any = None,
+        investigation_store: Any = None,
+        near_execution: Any = None,
     ) -> None:
         self.service = service
         #: The optional durable settlement-investigation store. When set, a
@@ -60,6 +64,11 @@ class GuardAPI:
         #: enabled it and configured a durable store, so a deployment that does
         #: not offer the lifecycle pays nothing and exposes no route.
         self.lifecycle = lifecycle
+        #: The optional NEAR execution boundary: the one path that may build a
+        #: real transaction, obtain a wallet signature, broadcast it and verify
+        #: settlement. Off by default; a deployment that does not opt in exposes
+        #: no route and holds no network path to a signing flow.
+        self.near_execution = near_execution
 
     def dispatch(
         self,
@@ -165,6 +174,8 @@ class GuardAPI:
                     "all_passed": all(r.passed for r in results),
                 },
             )
+        if path == "/api/guard/near/execution":
+            return self._near_execution_info()
         if path == "/api/guard/near/access-keys":
             return ApiResponse(200, {"keys": self._near_access_keys()})
         if path == "/api/guard/near/policy-scope":
@@ -325,6 +336,14 @@ class GuardAPI:
             if not self._identity_matches(body, authenticated_service_id):
                 return ApiResponse(403, {"error": "service identity does not match the credential"})
             return self._near_agent_evaluate(body)
+        if path == "/api/guard/near/execution/prepare":
+            if not self._identity_matches(body, authenticated_service_id):
+                return ApiResponse(403, {"error": "service identity does not match the credential"})
+            return self._near_execution_prepare(body, authenticated_service_id)
+        if path == "/api/guard/near/execution/submit":
+            if not self._identity_matches(body, authenticated_service_id):
+                return ApiResponse(403, {"error": "service identity does not match the credential"})
+            return self._near_execution_submit(body, authenticated_service_id)
         if path == "/api/guard/near/lifecycle":
             return self._lifecycle_create(body, authenticated_service_id)
         if path == "/api/guard/near/lifecycle/list":
@@ -409,6 +428,140 @@ class GuardAPI:
             200,
             decision.to_dict(include_authorization=bool(body.get("return_authorization", False))),
         )
+
+    # -- NEAR execution boundary -------------------------------------------
+
+    def _require_near_execution(self) -> ApiResponse | None:
+        if self.near_execution is None:
+            return ApiResponse(
+                404,
+                {
+                    "error": "the NEAR execution boundary is not enabled",
+                    "hint": "set TRACESETTLE_NEAR_EXECUTION=1 and configure the network",
+                },
+            )
+        return None
+
+    def _near_execution_info(self) -> ApiResponse:
+        """Describe the execution boundary, or report that it is disabled."""
+        if self.near_execution is None:
+            return ApiResponse(
+                200,
+                {
+                    "enabled": False,
+                    "note": (
+                        "The NEAR execution boundary is disabled. Enable it with "
+                        "TRACESETTLE_NEAR_EXECUTION=1. It never holds a key: a "
+                        "prepared transaction is signed by the caller's wallet."
+                    ),
+                },
+            )
+        config = self.near_execution.config
+        return ApiResponse(
+            200,
+            {
+                "enabled": True,
+                "network": config.to_dict(),
+                "signs": False,
+                "broadcasts": True,
+                "note": (
+                    "TraceSettle builds the transaction and independently verifies "
+                    "settlement. It never holds a private key: the wallet signs."
+                ),
+            },
+        )
+
+    def _near_execution_owner(self, authenticated_service_id: str | None) -> str:
+        """The owner a prepared operation belongs to.
+
+        The authenticated identity when service authentication is enabled, and a
+        single ``local`` owner otherwise. It is deliberately **not** taken from a
+        body field: prepare and submit must agree on the owner without the client
+        supplying it, and one service must never reach another's prepared
+        operation.
+        """
+        return authenticated_service_id if authenticated_service_id is not None else "local"
+
+    def _near_execution_prepare(self, body: Any, authenticated_service_id: str | None) -> ApiResponse:
+        """Build a real transaction and evaluate it with the operator policy.
+
+        Nothing is signed or broadcast here. On ALLOW the prepared operation is
+        stored (owner-scoped, single-use) and its id returned; the caller signs
+        ``transaction`` with their wallet and posts the signature to
+        ``/submit``. On any other outcome no authorization is issued and there is
+        nothing to sign.
+        """
+        refused = self._require_near_execution()
+        if refused is not None:
+            return refused
+        if not isinstance(body, dict):
+            return _bad_request("request body must be a JSON object")
+        required = ("service_id", "account_id", "public_key", "receiver_id", "asset", "amount")
+        missing = [f for f in required if not str(body.get(f, "")).strip()]
+        if missing:
+            return _bad_request("missing required field(s): " + ", ".join(missing))
+        from ..near.execution import ExecutionError
+
+        try:
+            prepared = self.near_execution.prepare(
+                service_id=str(body["service_id"]),
+                account_id=str(body["account_id"]),
+                public_key=str(body["public_key"]),
+                receiver_id=str(body["receiver_id"]),
+                asset_identifier=str(body["asset"]),
+                amount_human=str(body["amount"]),
+                network=body.get("network"),
+                request_id=body.get("request_id"),
+                idempotency_key=body.get("idempotency_key"),
+            )
+        except ExecutionError as exc:
+            return ApiResponse(422, {"error": str(exc)})
+        payload = prepared.to_dict()
+        if prepared.authorized:
+            owner = self._near_execution_owner(authenticated_service_id)
+            prepare_id = self.near_execution_store().store(prepared, owner)
+            payload["prepare_id"] = prepare_id
+            payload["expires_in_seconds"] = 90
+        return ApiResponse(200, payload)
+
+    def _near_execution_submit(self, body: Any, authenticated_service_id: str | None) -> ApiResponse:
+        """Accept a wallet signature, broadcast, and verify settlement.
+
+        The prepared operation is looked up from the server-side store (never
+        rebuilt from the request), so the bytes that are broadcast are provably
+        the bytes that were prepared and authorized. The authorization binding is
+        re-validated against the stored transaction and the single-use nonce is
+        consumed; the signature must verify against the transaction hash.
+        """
+        refused = self._require_near_execution()
+        if refused is not None:
+            return refused
+        if not isinstance(body, dict):
+            return _bad_request("request body must be a JSON object")
+        prepare_id = str(body.get("prepare_id", "")).strip()
+        signature = str(body.get("signature", "")).strip()
+        if not prepare_id or not signature:
+            return _bad_request("fields 'prepare_id' and 'signature' are required")
+        owner = self._near_execution_owner(authenticated_service_id)
+        prepared = self.near_execution_store().take(prepare_id, owner)
+        if prepared is None:
+            return ApiResponse(404, {"error": "unknown or expired prepare_id"})
+        from ..near.execution import ExecutionError
+
+        try:
+            executed = self.near_execution.broadcast(prepared, signature)
+        except ExecutionError as exc:
+            return ApiResponse(422, {"error": str(exc)})
+        return ApiResponse(200, executed.to_dict())
+
+    def near_execution_store(self) -> Any:
+        store = getattr(self, "_near_execution_store", None)
+        if store is None:
+            from ..near.execution import PreparedOperationStore
+
+            store = PreparedOperationStore()
+            self._near_execution_store = store
+        return store
 
     # -- NEAR Intents lifecycle --------------------------------------------
 

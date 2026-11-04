@@ -181,3 +181,41 @@ def test_service_credentials_hashed_invariant_notices_a_plaintext_store():
         assert result.holds is False
     finally:
         serviceauth.hash_secret = original
+
+
+def test_near_execution_invariant_notices_a_broadcast_without_authorization():
+    """If the boundary broadcast a non-authorized transaction, the invariant must fail."""
+    from tracesettle.guard import invariants as inv
+    from tracesettle.near import execution as ex
+
+    original = ex.NearExecutionBoundary.accept_signature
+
+    def permissive(self, prepared, signature_b64):  # noqa: ANN001
+        # The mutation: skip the authorization check entirely.
+        return prepared.transaction.signed_b64(b"\x00" * 64), "mutated"
+
+    ex.NearExecutionBoundary.accept_signature = permissive
+    try:
+        result = inv.INVARIANTS["near_execution_never_signs_without_authorization"]()
+        assert result.holds is False
+    finally:
+        ex.NearExecutionBoundary.accept_signature = original
+
+
+def test_near_execution_binding_invariant_notices_a_binding_that_ignores_the_amount():
+    """If the binding ignored the amount, a tampered transaction would pass."""
+    from tracesettle.guard import invariants as inv
+    from tracesettle.near import execution as ex
+
+    original = ex.NearExecutionBoundary.verify_binding
+
+    def permissive(self, prepared, *, consume=False):  # noqa: ANN001
+        # The mutation: accept any transaction that merely carries a token.
+        return None
+
+    ex.NearExecutionBoundary.verify_binding = permissive
+    try:
+        result = inv.INVARIANTS["near_execution_binding_covers_the_bytes"]()
+        assert result.holds is False
+    finally:
+        ex.NearExecutionBoundary.verify_binding = original

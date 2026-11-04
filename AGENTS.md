@@ -1224,3 +1224,55 @@ deterministic, fail-closed capability.
   a limit, or edits the policy. With no store configured it is inert and the guard
   is unchanged. A safeguard store that cannot be read fails closed
   (`REQUIRE_APPROVAL`, never `ALLOW`).
+
+## Live NEAR execution boundary + release pass (2026-11-04)
+
+The guard could authorize but not *execute*. This pass adds a real, opt-in NEAR
+execution boundary and completes the publication workflow.
+
+- **New `tracesettle/near/` modules (stdlib only).** `borsh.py` (canonical
+  serializer), `ed25519.py` (RFC 8032 signing from a seed), `rpc.py` (JSON-RPC
+  client with fallbacks), `networks.py` (`NETWORKS` config + chain ids),
+  `assets.py` (asset resolution + on-chain `ft_metadata` decimals check),
+  `txbuild.py` (transaction builder; `guard_amount()` derives the bound amount
+  from `amount_base` so it can never drift from the action), `verify.py`
+  (independent on-chain verification; `EXECUTED_OPTIMISTIC` is **not** final),
+  `execution.py` (`NearExecutionBoundary`: prepare → authorize → accept
+  signature → broadcast → verify; `wait_for_final` bounded poll).
+- **Chain is network-scoped.** `guard_chain_for(config.network)` replaces the
+  module-level `GUARD_CHAIN`, so a token minted on one network is a genuine
+  mismatch on another. Cross-network replay is a real refusal, not a coincidence.
+- **`guard/api.py` execution routes, gated off by default.** Mounted only when
+  `TRACESETTLE_NEAR_EXECUTION=1`. A **server-side** prepared-operation store is
+  bounded, TTL'd and **owner-scoped**; the owner is `local` when unauthenticated
+  else the authenticated service id — never a body field.
+- **`config.py` / `ui.py`.** `NEAR_EXECUTION` settings; `_build_near_execution`
+  wires the boundary into the server only when enabled.
+- **Two new invariants (27 → 29).** `near_execution_never_signs_without_authorization`
+  and `near_execution_binding_covers_the_bytes`, both mutation-tested in
+  `tests/test_guard_invariants.py`. NEAR-specific invariants: 9 → 11.
+- **Tests:** 1129 passed / 24 skipped (filesystem-only); **1153 passed / 0
+  skipped** with a real PostgreSQL (local `postgres:16-alpine`, DSN
+  `host=127.0.0.1 port=15432 dbname=tsstate user=ts password=devpass`).
+  New: `tests/test_near_execution.py` (26), `tests/test_near_execution_api.py`
+  (10), `tests/test_near_prepared_store.py` (7), plus a packaging test proving
+  the boundary imports and runs from a **package-only copy** (no test tree).
+- **LIVE milestone (testnet).** A funded `*.testnet` account built, signed,
+  broadcast and independently verified a real transfer →
+  `Gjs4YNbEPBQKWB3M6MpV2zAwhvJySk7U6Q8NZnKVWCKH`, state `VERIFIED`. The tests
+  substitute only the RPC transport, so every line of `execution.py` runs.
+- **Gates:** pyflakes clean, compileall OK, offline demo byte-identical
+  (md5 `4864f13c…`), `near_demo.py --json` byte-identical, 29/29 invariants hold,
+  9/9 attack scenarios pass.
+- **Publication secret audit (mandatory gate).** gitleaks 8.18.4 over the full
+  history (`git fetch --unshallow`; 79 commits, 69 scanned) and the working tree:
+  57 + 59 `generic-api-key` hits, **all false positives** — public Bitcoin tx
+  data in `evidence/raw/*.json`, public ERC-20 contract addresses in tests, and
+  literal `REDACTED`/placeholder strings. No private key, seed phrase, PAT,
+  database credential, or signing material in any commit or blob. No `.env` was
+  ever tracked (only the placeholder `.env.production.example`); `.openhands/` is
+  git-ignored and untracked.
+- **Reconciliation:** remote `master` = `80f8f95b` (the stated baseline) and is a
+  direct ancestor of the feature branch; the recovery commit `d1d17fb` is
+  contained. No merge was required. Branch pushed to the existing open PR #10
+  (`feat/near-security-integration` → `master`); no duplicate PR created.

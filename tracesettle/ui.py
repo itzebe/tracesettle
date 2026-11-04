@@ -774,6 +774,36 @@ def _build_lifecycle(guard_service: GuardService, *, upstream_cache: TtlCache | 
     return NearIntentsLifecycle(guard_service=guard_service, http_client=client, store=store)
 
 
+def _build_near_execution(guard_service: GuardService) -> Any:
+    """Build the NEAR execution boundary, or ``None`` when it is not enabled.
+
+    The boundary can broadcast a real transaction, so it is an explicit operator
+    decision (``TRACESETTLE_NEAR_EXECUTION=1``), never a public-bind default. The
+    network is resolved server-side (testnet by default) and its genesis hash is
+    verified against the RPC before any transaction is built, so a mainnet
+    endpoint answering while the code believes it is on testnet is a hard error.
+
+    The boundary holds no key: it builds the transaction, accepts a wallet
+    signature, and broadcasts. A misconfigured network name is a hard failure at
+    start-up, not a silent fallback.
+    """
+    if not config.NEAR_EXECUTION_ENABLED:
+        return None
+    from .near.execution import NearExecutionBoundary
+    from .near.networks import NetworkError, network_config
+    from .near.rpc import NearRpc
+
+    try:
+        net_config = network_config(config.NEAR_EXECUTION_NETWORK)
+    except NetworkError as exc:
+        raise RuntimeError(f"TRACESETTLE_NEAR_EXECUTION_NETWORK: {exc}") from exc
+    client = HttpClient(
+        timeout=config.REQUEST_TIMEOUT_SECONDS,
+        max_attempts=config.MAX_ATTEMPTS,
+    )
+    return NearExecutionBoundary(guard_service, net_config, rpc=NearRpc(net_config, client=client))
+
+
 def _build_investigation_store() -> Any:
     """Build the durable investigations store, or ``None`` when unconfigured.
 
@@ -858,6 +888,7 @@ class InvestigationServer(ThreadingHTTPServer):
             self.guard_service,
             lifecycle=self.lifecycle,
             investigation_store=self.investigation_store,
+            near_execution=_build_near_execution(self.guard_service),
         )
         self.guard_limiter = guard_limiter or TokenBucketLimiter(
             config.GUARD_RATE_LIMIT_PER_MINUTE, config.GUARD_RATE_LIMIT_BURST
