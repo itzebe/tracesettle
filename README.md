@@ -150,8 +150,20 @@ Where each capability stands:
   and `/verify` read the chain back to `VERIFIED`. Replay of a consumed
   `prepare_id` is refused (`404`); a tampered submission resolves to `DISPUTED`.
   The server held no key at any point — the testnet account's own key signed
-  *outside* the server. The browser wallet connector itself was not driven by a
-  real browser extension; the signing step used the testnet account key directly.
+  *outside* the server.
+- **Browser-wallet journey:** Testnet verified — the console's real wallet panel
+  was driven in a real Chromium browser by a wallet that holds the key and signs
+  (`demo/browser_wallet/`). Four scenarios were exercised end to end against real
+  testnet transactions: an approved transfer reaches `VERIFIED`; a non-approved
+  recipient is `BLOCK`ed before the wallet is ever asked to sign; a wallet that
+  signs a *different* amount than was authorized is `DISPUTED` (the transfer
+  succeeds on-chain, but the record contradicts the intent); and a rejected
+  signature broadcasts nothing. The page never sees a private key — the wallet
+  emulator speaks the bundled connector's injected-wallet protocol and returns
+  only a signed-and-broadcast hash, exactly as a real extension does. The
+  emulator's transaction layout is pinned byte-for-byte to the repository's own
+  serializer (`tests/test_browser_wallet_borsh.py`). See
+  [`demo/browser_wallet/README.md`](demo/browser_wallet/README.md).
 
 Stages: `SOURCE_CHAIN_DEPOSIT`, `BRIDGE_DEPOSIT_CREDIT`, `NEAR_SETTLEMENT`,
 `DESTINATION_CHAIN_DELIVERY`, and `REFUND`.
@@ -453,6 +465,13 @@ read the chain back to `VERIFIED`. Replaying a consumed `prepare_id` is refused
 the wallet route and the vendored asset are present in a package-only copy, so
 the shipped image serves them. The server never held a key: the signing account's
 key lived only in the harness, outside the server process.
+
+**Testnet verified (browser):** the console's wallet panel was additionally driven
+in a real Chromium browser by a wallet emulator that holds the key and signs
+(`demo/browser_wallet/run_demo.py`). It runs four scenarios — approved
+(`VERIFIED`), non-approved recipient (`BLOCK`, the wallet is never asked),
+tampered amount (`DISPUTED`), and user rejection (nothing broadcast) — against
+real testnet transactions. The page never receives the key.
 
 ### Durable investigation history
 

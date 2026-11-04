@@ -1373,3 +1373,47 @@ key and only authorizes the intent and verifies the on-chain result.
   agent is not authenticated, so the visibility change could not be performed
   here. Everything else in the release workflow (audit, tests, push, PR, CI)
   completed.
+
+## Browser-wallet transaction journey (2026-11-04)
+
+The wallet-mediated flow was previously exercised by signing with the testnet
+account key directly (outside the server). The **browser wallet connector was
+never driven by a browser**. This pass closes that gap: the console's real wallet
+panel is driven in a real Chromium browser by a wallet emulator that holds the
+key and signs.
+
+- **What runs.** `demo/browser_wallet/run_demo.py` starts the console with
+  `TRACESETTLE_NEAR_EXECUTION=1` and an operator policy approving one recipient,
+  then runs four scenarios through the real page: `happy` (approved → `VERIFIED`),
+  `blocked` (non-approved recipient → `BLOCK`, the wallet is **never** asked to
+  sign), `tamper` (the wallet signs a *different* amount → `DISPUTED`, the
+  transfer succeeds on-chain but contradicts the intent), `reject` (the user
+  rejects → nothing broadcast). All four matched the expected outcome against
+  real testnet transactions.
+- **The key never reaches the page.** The emulator plays a wallet *extension*:
+  the key lives in the Node process; the page receives only `signIn`/`getAccounts`
+  results and a signed-and-broadcast hash, exactly as a real extension returns.
+  It speaks the vendored connector's injected-wallet protocol
+  (`near-wallet-injected-request` / `near-wallet-injected-response`) and
+  advertises a manifest via the `near-wallet-injected` event.
+- **The connector's real `connect()` runs.** Only the selector popup is skipped:
+  the page's `NearConnector.connect()` is subclassed to preselect the injected
+  wallet id. `getConnectedWallet`, the account read-back, `signAndSendTransaction`
+  and the whole server flow are the real code paths.
+- **Borsh layout is pinned to the repository.** The emulator builds the NEAR
+  transaction with the same V0 layout as `tracesettle/near/borsh.py`;
+  `tests/test_browser_wallet_borsh.py` asserts byte-identical output against a
+  vector from the repository's own serializer (skips only when Node is absent).
+  A changed amount changes both bytes and hash.
+- **Evidence:** `evidence/browser_wallet/` (per-scenario JSON + screenshot; the
+  two on-chain txs `EvNeH37s…ntep4` and `BHgNvQ2A…hRTR`, both re-read `FINAL`).
+  No key material is present; only public testnet data.
+- **Honest scope:** the wallet is a faithful *emulation*, not a real
+  browser-extension wallet; it signs **testnet** transactions only. The
+  provider/wallet success is never treated as proof — settlement is verified
+  field by field against the authorized intent.
+- **Counts:** 1170 passed, 24 skipped without PostgreSQL (1194 with a PostgreSQL
+  server, verified locally against `postgres:16-alpine`); pyflakes clean;
+  compileall OK; offline demo byte-identical (md5 `4864f13c…`).
+- **Deployment note:** production stays on the previously restored master
+  deployment; this branch is not deployed. No merge, no production change.

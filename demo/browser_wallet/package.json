@@ -1,0 +1,12 @@
+{
+  "name": "tracesettle-browser-wallet-demo",
+  "private": true,
+  "type": "module",
+  "description": "Drives the TraceSettle console in a real browser with an emulated NEAR wallet (testnet demonstration only).",
+  "scripts": {
+    "test": "node --test borsh.test.mjs"
+  },
+  "dependencies": {
+    "puppeteer-core": "23.11.1"
+  }
+}
