@@ -92,8 +92,9 @@ CONSOLE_HTML = """<!DOCTYPE html>
     letter-spacing: .04em; text-transform: uppercase; padding: 2px 8px; border-radius: 999px;
     border: 1px solid currentColor; }
   .status::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
-  .s-ALLOW, .s-CONFIRMED, .s-EXECUTED, .s-OK, .s-RESOLVED, .s-VALID, .s-VERIFIED { color: var(--ok); }
-  .s-REQUIRE_APPROVAL, .s-REPORTED, .s-ACKNOWLEDGED, .s-PARTIAL, .s-REPORTED_ONLY { color: var(--warn); }
+  .s-ALLOW, .s-CONFIRMED, .s-EXECUTED, .s-OK, .s-RESOLVED, .s-VALID, .s-VERIFIED,
+  .s-SETTLEMENT_VERIFIED, .s-DESTINATION_DELIVERY_VERIFIED, .s-ORIGIN_DEPOSIT_VERIFIED { color: var(--ok); }
+  .s-REQUIRE_APPROVAL, .s-REPORTED, .s-ACKNOWLEDGED, .s-PARTIAL, .s-REPORTED_ONLY, .s-UNCONFIRMED { color: var(--warn); }
   .s-HOLD, .s-UNKNOWN, .s-INCOMPLETE, .s-OPEN, .s-NO_EXPIRY_STATED, .s-QUOTE_EXPIRED,
   .s-PENDING, .s-AWAITING_DEPOSIT, .s-DEPOSIT_SUBMITTED { color: var(--hold); }
   .s-BLOCK, .s-REFUSED, .s-CONTRADICTORY, .s-UNAVAILABLE, .s-FAILED { color: var(--bad); }
@@ -391,6 +392,7 @@ CONSOLE_HTML = """<!DOCTYPE html>
       <div class="actions" style="margin-bottom:12px">
         <button class="act" type="button" id="i-status">Refresh status</button>
         <button class="act" type="button" id="i-verify-origin">Verify deposit on origin chain</button>
+        <button class="act" type="button" id="i-verify-destination">Verify delivery on destination chain</button>
         <button class="act" type="button" id="i-assurance">Run settlement assurance</button>
       </div>
       <div id="intents-assurance-output" aria-live="polite"></div>
@@ -815,6 +817,7 @@ async function loadIntents() {
   document.getElementById("i-live-quote").onclick = () => stepIntent("quote", { dry: false }, "intents-step-output");
   document.getElementById("i-status").onclick = () => stepIntent("status", {}, "intents-assurance-output");
   document.getElementById("i-verify-origin").onclick = () => stepIntent("verify-origin", {}, "intents-assurance-output");
+  document.getElementById("i-verify-destination").onclick = () => stepIntent("verify-destination", {}, "intents-assurance-output");
   document.getElementById("i-assurance").onclick = () => stepIntent("assurance", {}, "intents-assurance-output");
   document.getElementById("i-list").onclick = listIntents;
   document.getElementById("i-tokens").onclick = loadTokens;
@@ -909,6 +912,8 @@ async function stepIntent(action, body, targetId) {
       out.innerHTML = renderLifecycleStatus(data);
     } else if (action === "verify-origin") {
       out.innerHTML = renderOriginVerification(data);
+    } else if (action === "verify-destination") {
+      out.innerHTML = renderDestinationVerification(data);
     } else if (action === "assurance") {
       out.innerHTML = renderAssurance(data);
     } else {
@@ -971,6 +976,8 @@ function renderLifecycleStatus(data) {
   if (data.quote_approved != null) rows.push(["Quote approved", data.quote_approved ? "Yes" : "No"]);
   const ov = (data.lifecycle && data.lifecycle.origin_verification) || data.origin_verification;
   if (ov) rows.push(["Origin-chain deposit check", status(ov.level || "UNKNOWN")]);
+  const dv = (data.lifecycle && data.lifecycle.destination_verification) || data.destination_verification;
+  if (dv) rows.push(["Destination-chain delivery check", status(dv.level || "UNKNOWN")]);
   if (data.updated_at) rows.push(["Observed", fmtAt(data.updated_at)]);
   return '<div class="card"><h3>Provider status</h3>' +
     '<p class="small muted">This is what the provider reports. A provider success is not proof that ' +
@@ -1008,13 +1015,44 @@ function renderOriginVerification(data) {
     "</div>";
 }
 
+function renderDestinationVerification(data) {
+  const v = data.destination_verification || data;
+  const level = v.level || "UNKNOWN";
+  const headlines = {
+    VERIFIED: "Independently verified on the destination chain: the transaction succeeded and transferred the expected asset to the intended recipient.",
+    UNCONFIRMED: "Found, but a required check did not hold (not yet final, or an amount that differs) — insufficient evidence, not a failure.",
+    CONTRADICTORY: "Confirmed to be something other than this delivery (a revert, a different recipient, or a different token).",
+    NOT_FOUND: "The claimed hash is not present on the destination chain — a missing record, not proof of failure.",
+    UNAVAILABLE: "The destination chain could not be queried, so the claim was not checked.",
+    UNSUPPORTED: "No public source is configured for this destination chain, so the claim cannot be checked here.",
+  };
+  const checks = v.checks || {};
+  const rows = Object.keys(checks).map((k) =>
+    "<dt>" + esc(k) + '</dt><dd><code class="mono">' + esc(JSON.stringify(checks[k])) + "</code></dd>").join("");
+  return '<div class="card"><h3>Destination-chain delivery check</h3>' +
+    '<div class="kv"><dt>Verdict</dt><dd>' + status(level) +
+    "</dd><dt>Chain</dt><dd>" + esc(v.chain || "—") +
+    "</dd><dt>Transaction</dt><dd>" + (v.evidence_url
+      ? '<a href="' + esc(v.evidence_url) + '" rel="noopener noreferrer" target="_blank"><code class="mono">' + esc(v.tx_hash || "") + "</code></a>"
+      : '<code class="mono">' + esc(v.tx_hash || "") + "</code>") +
+    "</dd></div>" +
+    '<p class="small">' + esc(headlines[level] || v.summary || "") + "</p>" +
+    (v.summary && headlines[level] ? '<p class="small muted">' + esc(v.summary) + "</p>" : "") +
+    (rows ? '<details><summary class="small">Checks performed</summary><div class="kv">' + rows + "</div></details>" : "") +
+    ((v.limitations || []).length
+      ? '<ul class="small muted">' + v.limitations.map((l) => "<li>" + esc(l) + "</li>").join("") + "</ul>" : "") +
+    "</div>";
+}
+
 function renderAssurance(data) {
   const a = data.assurance || data;
   const level = a.level || "UNKNOWN";
   const verified = a.independently_verified === true;
   const stages = a.stages || [];
   const headlines = {
-    VERIFIED: "Independently verified from on-chain evidence.",
+    SETTLEMENT_VERIFIED: "Settlement verified — the origin deposit and the destination delivery are both independently confirmed.",
+    DESTINATION_DELIVERY_VERIFIED: "Destination delivery verified — the destination leg is confirmed; the origin deposit was not independently confirmed.",
+    ORIGIN_DEPOSIT_VERIFIED: "Origin deposit verified — the origin leg is confirmed; the destination delivery is not yet verified.",
     REFUNDED: "Refund independently confirmed on-chain — the funds came back, not to the destination.",
     FAILED: "Failed: decisive evidence independently establishes the transaction did not complete.",
     PARTIAL: "Partial: the destination is confirmed but received less than the quote expected.",

@@ -168,7 +168,7 @@ def test_a_verified_settlement_is_verified():
         ],
     )
     assurance = settlement_assurance_from_result(result)
-    assert assurance.level is AssuranceLevel.VERIFIED
+    assert assurance.level is AssuranceLevel.SETTLEMENT_VERIFIED
     assert assurance.independently_verified is True
 
 
@@ -304,7 +304,7 @@ def test_a_full_delivery_stays_verified():
     assurance = settlement_assurance_from_result(
         _delivered_result(), expected_amount_out="1000000", observed_amount_out="1000000"
     )
-    assert assurance.level is AssuranceLevel.VERIFIED
+    assert assurance.level is AssuranceLevel.SETTLEMENT_VERIFIED
     assert assurance.independently_verified is True
     assert assurance.shortfall == "0"
 
@@ -313,7 +313,7 @@ def test_an_over_delivery_is_not_a_shortfall():
     assurance = settlement_assurance_from_result(
         _delivered_result(), expected_amount_out="1000000", observed_amount_out="1000001"
     )
-    assert assurance.level is AssuranceLevel.VERIFIED
+    assert assurance.level is AssuranceLevel.SETTLEMENT_VERIFIED
     assert assurance.shortfall == "0"
 
 
@@ -340,6 +340,8 @@ def test_a_reported_refund_without_a_payout_is_not_refunded():
         ],
     )
     assurance = settlement_assurance_from_result(result, provider_reported_success=False)
+    # The provider claims a refund but no payout was observed, so the level stays
+    # REPORTED_ONLY — never REFUNDED, because no payout was independently confirmed.
     assert assurance.level is AssuranceLevel.REPORTED_ONLY
     assert assurance.level is not AssuranceLevel.REFUNDED
 
@@ -366,11 +368,26 @@ def test_a_reported_failure_without_evidence_is_not_failed():
     assert assurance.level is not AssuranceLevel.FAILED
 
 
-def test_a_confirmed_deposit_in_flight_is_pending():
+def test_a_confirmed_deposit_in_flight_is_origin_verified():
     result = _result(
         OverallOutcome.UNKNOWN,
         [
             (Stage.SOURCE_CHAIN_DEPOSIT, StageState.CONFIRMED),
+            (Stage.BRIDGE_DEPOSIT_CREDIT, StageState.CONFIRMED),
+            (Stage.DESTINATION_CHAIN_DELIVERY, StageState.MISSING),
+        ],
+    )
+    assurance = settlement_assurance_from_result(result)
+    assert assurance.level is AssuranceLevel.ORIGIN_DEPOSIT_VERIFIED
+    assert assurance.independently_verified is False
+
+
+def test_a_confirmed_bridge_credit_without_a_source_receipt_is_pending():
+    """Only the bridge credit is confirmed, so the swap is pending, not origin-verified."""
+    result = _result(
+        OverallOutcome.UNKNOWN,
+        [
+            (Stage.SOURCE_CHAIN_DEPOSIT, StageState.UNAVAILABLE),
             (Stage.BRIDGE_DEPOSIT_CREDIT, StageState.CONFIRMED),
             (Stage.DESTINATION_CHAIN_DELIVERY, StageState.MISSING),
         ],
@@ -394,9 +411,21 @@ def test_pending_requires_a_confirmed_deposit():
 
 
 def test_every_assurance_level_is_reachable():
-    """The seven mission states plus the finer distinctions must all be defined."""
+    """The mission states plus the finer distinctions must all be defined."""
     names = {level.value for level in AssuranceLevel}
-    assert {"VERIFIED", "PENDING", "FAILED", "REFUNDED", "PARTIAL", "UNKNOWN", "UNAVAILABLE"} <= names
+    assert {
+        "SETTLEMENT_VERIFIED",
+        "DESTINATION_DELIVERY_VERIFIED",
+        "ORIGIN_DEPOSIT_VERIFIED",
+        "REPORTED_ONLY",
+        "PENDING",
+        "FAILED",
+        "REFUNDED",
+        "PARTIAL",
+        "UNKNOWN",
+        "UNAVAILABLE",
+        "CONTRADICTORY",
+    } <= names
 
 
 def test_a_shortfall_without_a_confirmed_delivery_is_not_partial():

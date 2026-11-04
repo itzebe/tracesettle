@@ -16,7 +16,7 @@ FIXTURE_DIR = pathlib.Path(__file__).resolve().parent.parent / "tracesettle" / "
 
 def test_near_invariants_are_registered():
     near = [name for name in inv.INVARIANTS if name.startswith("near_")]
-    assert len(near) == 7
+    assert len(near) == 8
     assert all(name in inv.INVARIANT_DESCRIPTIONS for name in near)
 
 
@@ -58,7 +58,7 @@ def test_near_settlement_invariant_notices_a_false_verification(monkeypatch):
         real_result = real(result, provider_reported_success=provider_reported_success)
         return NearSettlementAssurance(
             outcome=real_result.outcome,
-            level=AssuranceLevel.VERIFIED,
+            level=AssuranceLevel.SETTLEMENT_VERIFIED,
             provider_claimed_success=True,
             independently_verified=True,
             stages=real_result.stages,
@@ -127,4 +127,28 @@ def test_near_terminal_states_invariant_notices_a_reported_failure_as_failed(mon
 
     monkeypatch.setattr(settlement_mod, "settlement_assurance_from_result", permissive)
     result = inv._near_terminal_states_are_evidence_distinguished()
+    assert result.holds is False
+
+
+def test_near_destination_invariant_notices_a_provider_trusting_verifier(monkeypatch):
+    """Mutation: if the destination verifier trusted a success without checking the
+    recipient, the invariant must fail. Neutralizing the recipient check reproduces
+    the defect the invariant exists to catch."""
+    from tracesettle.near import destination_verify as dv_mod
+    from tracesettle.near.destination_verify import DestinationVerdict
+
+    real = dv_mod.verify_destination_delivery
+
+    def permissive(*args, **kwargs):
+        result = real(*args, **kwargs)
+        # A provider-trusting verifier would call any successful receipt a delivery.
+        return dv_mod.DestinationVerification(
+            level=DestinationVerdict.VERIFIED,
+            chain=result.chain,
+            tx_hash=result.tx_hash,
+            summary="trusted the receipt",
+        )
+
+    monkeypatch.setattr(dv_mod, "verify_destination_delivery", permissive)
+    result = inv.INVARIANTS["near_destination_delivery_requires_the_destination_chain"]()
     assert result.holds is False

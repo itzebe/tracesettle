@@ -498,6 +498,9 @@ class NearIntentsLifecycle:
         origin_check = self._origin_verification(record)
         if origin_check is not None:
             lifecycle_dict["origin_verification"] = origin_check
+        destination_check = self._destination_verification(record, dest_hashes)
+        if destination_check is not None:
+            lifecycle_dict["destination_verification"] = destination_check
         record, changed = self._store.apply_provider_status(
             intent_id, owner=owner, provider_status=data.status,
             provider_updated_at=data.updated_at, observed_at=at, lifecycle=lifecycle_dict,
@@ -570,6 +573,80 @@ class NearIntentsLifecycle:
                 "limitations": [],
             }
         return verification.to_dict()
+
+    # -- independent destination-chain verification of the delivery ----------
+
+    def _destination_verification(
+        self, record: Any, destination_tx_hashes: tuple[str, ...] | None = None
+    ) -> dict[str, Any] | None:
+        """Independently check the named destination transaction against the chain.
+
+        The destination hash the provider reports is a claim; this reads the
+        destination chain and returns a structured verdict. It is read-only and
+        only runs when a destination hash is known. A check that cannot be
+        completed (no source for the chain, or a source outage) is reported as such
+        and never blocks the provider-status read that calls it.
+        """
+        from ..assets import chain_of, contract_of
+        from .destination_verify import fetch_latest_block_number, verify_destination_delivery
+
+        if destination_tx_hashes is None:
+            lifecycle = record.lifecycle or {}
+            destination_tx_hashes = tuple(lifecycle.get("destination_tx_hashes") or ())
+        if not destination_tx_hashes:
+            return None
+        tx_hash = destination_tx_hashes[0]
+
+        destination_chain = chain_of(record.destination_asset or "")
+        # The expected output is the quote's promised amount; the provider's own
+        # reported amount is never used as the expectation, or a shortfall would be
+        # invisible.
+        expected_amount = _expected_amount_out(record)
+        try:
+            latest_block = fetch_latest_block_number(destination_chain or "", self._http)
+            verification = verify_destination_delivery(
+                chain=destination_chain or "",
+                tx_hash=tx_hash,
+                recipient=record.recipient,
+                token_contract=contract_of(record.destination_asset),
+                expected_amount=expected_amount,
+                client=self._http,
+                latest_block_number=latest_block,
+            )
+        except Exception as exc:  # noqa: BLE001 - never let a check break the status read
+            return {
+                "level": "UNAVAILABLE",
+                "chain": destination_chain,
+                "tx_hash": tx_hash,
+                "summary": f"The destination-chain check could not be completed: {exc}",
+                "checks": {},
+                "evidence_url": None,
+                "limitations": [],
+            }
+        return verification.to_dict()
+
+    def destination_verification(self, *, owner: str, intent_id: str) -> dict[str, Any] | None:
+        """Independently verify the recorded destination hash against the chain.
+
+        Returns ``None`` when no destination transaction hash is known. The check
+        is read-only; its verdict is also recorded on the intent so a later read
+        carries it forward without another network call.
+        """
+        record = self._store.get(intent_id, owner=owner)
+        if record is None:
+            return None
+        verification = self._destination_verification(record)
+        if verification is None:
+            return None
+        at = _utc_now()
+        lifecycle = dict(record.lifecycle or {})
+        lifecycle["destination_verification"] = verification
+        self._store.update(intent_id, owner=owner, updated_at=at, lifecycle=lifecycle)
+        self._store.append_event(
+            intent_id, owner=owner, at=at, kind="DESTINATION_VERIFICATION",
+            detail={"level": verification.get("level"), "chain": verification.get("chain")},
+        )
+        return verification
 
     # -- step 5: independent settlement assurance ---------------------------
 
@@ -646,10 +723,12 @@ class NearIntentsLifecycle:
             )
             data["state"] = view.label
             data["lifecycle"] = view.to_dict()
-            # The origin-chain check is not re-run on read (that would hit the
-            # network), so carry the last recorded verdict forward.
+            # The origin/destination checks are not re-run on read (that would hit
+            # the network), so carry the last recorded verdicts forward.
             if prior.get("origin_verification"):
                 data["lifecycle"]["origin_verification"] = prior["origin_verification"]
+            if prior.get("destination_verification"):
+                data["lifecycle"]["destination_verification"] = prior["destination_verification"]
         return data
 
     def list(self, *, owner: str, limit: int = 50) -> list[dict[str, Any]]:

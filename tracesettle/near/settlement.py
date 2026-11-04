@@ -39,8 +39,16 @@ class AssuranceLevel(str, enum.Enum):
     UNAVAILABLE" requirement is explicit and testable.
     """
 
-    #: Every decisive stage independently confirmed from authoritative evidence.
-    VERIFIED = "VERIFIED"
+    #: The origin deposit *and* the destination delivery are independently
+    #: confirmed and correlated to the same intent. The only state that means the
+    #: whole settlement is verified.
+    SETTLEMENT_VERIFIED = "SETTLEMENT_VERIFIED"
+    #: The destination delivery is independently confirmed on-chain, but the full
+    #: settlement (every decisive stage) is not, so it is not full settlement.
+    DESTINATION_DELIVERY_VERIFIED = "DESTINATION_DELIVERY_VERIFIED"
+    #: The origin-chain deposit is independently confirmed, and the swap is still
+    #: progressing: the destination delivery is not yet verified.
+    ORIGIN_DEPOSIT_VERIFIED = "ORIGIN_DEPOSIT_VERIFIED"
     #: The provider reports success and no independent evidence contradicts it,
     #: but at least one decisive stage is only reported.
     REPORTED_ONLY = "REPORTED_ONLY"
@@ -206,7 +214,15 @@ def settlement_assurance_from_result(
     if outcome is OverallOutcome.CONTRADICTORY:
         level = AssuranceLevel.CONTRADICTORY
     elif outcome in _VERIFIED_OUTCOMES:
-        level = AssuranceLevel.VERIFIED
+        # SETTLED_VERIFIED requires the engine to have confirmed both the NEAR
+        # settlement and the destination delivery, correlated to the same intent.
+        # The origin deposit is a separate, independently verified leg; when the
+        # engine has not confirmed it, the delivery is still verified but the whole
+        # settlement is not, so the two are distinguished rather than conflated.
+        if _state_of(result, Stage.SOURCE_CHAIN_DEPOSIT) is StageState.CONFIRMED:
+            level = AssuranceLevel.SETTLEMENT_VERIFIED
+        else:
+            level = AssuranceLevel.DESTINATION_DELIVERY_VERIFIED
     elif outcome in _REFUND_VERIFIED_OUTCOMES:
         # An independently confirmed refund: the money is established to have
         # come back. This is a terminal, verified state in its own right, and it
@@ -230,19 +246,29 @@ def settlement_assurance_from_result(
         # FAILED_* and anything else: the money is not established as delivered.
         level = AssuranceLevel.UNKNOWN
 
-    # A deposit that is independently confirmed to exist while the settlement is
-    # not yet terminal is *pending*, not unknown: the evidence shows the swap is
-    # actively progressing. This never applies to a contradictory result, and it
-    # never applies once a terminal level has been reached.
+    # An origin deposit that is independently confirmed while the destination is
+    # not is *origin-verified*, not unknown. When only the bridge credit is
+    # confirmed (the source receipt itself was unavailable), the swap is still
+    # *pending*. Neither applies to a contradictory result, to a terminal level, or
+    # to a REPORTED_ONLY level — where the provider's claim is what is unverified,
+    # and promoting it to a verified leg would obscure that.
     if (
-        level in (AssuranceLevel.UNKNOWN, AssuranceLevel.REPORTED_ONLY)
+        level in (AssuranceLevel.UNKNOWN, AssuranceLevel.UNAVAILABLE)
         and outcome is not OverallOutcome.CONTRADICTORY
-        and _state_of(result, Stage.BRIDGE_DEPOSIT_CREDIT) is StageState.CONFIRMED
         and _state_of(result, Stage.DESTINATION_CHAIN_DELIVERY) is not StageState.CONFIRMED
     ):
-        level = AssuranceLevel.PENDING
+        if _state_of(result, Stage.SOURCE_CHAIN_DEPOSIT) is StageState.CONFIRMED:
+            level = AssuranceLevel.ORIGIN_DEPOSIT_VERIFIED
+        elif _state_of(result, Stage.BRIDGE_DEPOSIT_CREDIT) is StageState.CONFIRMED:
+            level = AssuranceLevel.PENDING
 
-    verified = level is AssuranceLevel.VERIFIED
+    # ``independently_verified`` means the *destination delivery* — the fact that
+    # funds reached the destination — is established from on-chain evidence, not
+    # from the provider's word. It is true for both SETTLEMENT_VERIFIED (origin and
+    # destination confirmed) and DESTINATION_DELIVERY_VERIFIED (destination
+    # confirmed, origin not). An origin-only verification does not set it, because
+    # a confirmed deposit says nothing about whether the funds arrived.
+    verified = level in (AssuranceLevel.SETTLEMENT_VERIFIED, AssuranceLevel.DESTINATION_DELIVERY_VERIFIED)
     partial = _is_partial(result)
     conflicts = tuple(c.description for c in result.contradictions)
 
@@ -268,8 +294,8 @@ def settlement_assurance_from_result(
     ]
     if provider_reported_success and not verified:
         limitations.append(
-            "The provider reported success, but independent evidence did not confirm it, so the "
-            "assurance level is not VERIFIED."
+            "The provider reported success, but independent evidence did not confirm the whole "
+            "settlement, so the assurance level is not SETTLEMENT_VERIFIED."
         )
     if partial:
         limitations.append(
@@ -409,8 +435,18 @@ def _summary(
     partial: bool,
     amount_partial: bool = False,
 ) -> str:
-    if level is AssuranceLevel.VERIFIED:
-        return "Independently verified: the decisive NEAR settlement stages are confirmed."
+    if level is AssuranceLevel.SETTLEMENT_VERIFIED:
+        return "Settlement verified: the origin deposit and the destination delivery are both independently confirmed."
+    if level is AssuranceLevel.DESTINATION_DELIVERY_VERIFIED:
+        return (
+            "Destination delivery verified: the destination leg is independently confirmed, but "
+            "the whole settlement is not (the origin deposit was not independently confirmed)."
+        )
+    if level is AssuranceLevel.ORIGIN_DEPOSIT_VERIFIED:
+        return (
+            "Origin deposit verified: the origin leg is independently confirmed, but the "
+            "destination delivery is not yet verified."
+        )
     if level is AssuranceLevel.REFUNDED:
         return "Refunded: an on-chain refund payout is independently confirmed."
     if level is AssuranceLevel.FAILED:

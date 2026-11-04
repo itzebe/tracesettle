@@ -23,6 +23,8 @@ from tracesettle.near.tee import (
 )
 from decimal import Decimal
 
+from conftest import load_raw
+
 FIXTURE_DIR = pathlib.Path(__file__).resolve().parent.parent / "tracesettle" / "near" / "fixtures"
 
 APPROVED = "0x1111111111111111111111111111111111111111"
@@ -486,4 +488,50 @@ def test_lifecycle_verify_origin_without_a_hash_is_a_bad_request(tmp_path):
     )
     intent_id = created.payload["intent_id"]
     out = api.dispatch("POST", f"/api/guard/near/lifecycle/{intent_id}/verify-origin", {}, {})
+    assert out.status == 400
+
+
+def test_lifecycle_verify_destination_action(tmp_path):
+    """The verify-destination action independently checks the named destination hash."""
+    api, lifecycle, opener = _lifecycle_api(tmp_path)
+    created = api.dispatch(
+        "POST", "/api/guard/near/lifecycle", {}, {"transaction": _tx(amount="1000000")}
+    )
+    assert created.status == 200
+    intent_id = created.payload["intent_id"]
+    opener.json("POST", "/v0/quote", {"quote": {"depositAddress": APPROVED}, "correlationId": "c"})
+    api.dispatch("POST", f"/api/guard/near/lifecycle/{intent_id}/quote", {}, {"dry": False})
+    opener.json("GET", "/v0/status", load_raw("oneclick_status_SUCCESS.json"))
+    api.dispatch("POST", f"/api/guard/near/lifecycle/{intent_id}/status", {}, {})
+    # The intent's destination asset is USDC on base, so the receipt is read from
+    # base: a Transfer of that token to the approved destination.
+    opener.json("POST", "base-rpc", {"jsonrpc": "2.0", "id": 1, "result": "0x1903ac4"}, once=True)
+    token = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+    topic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+    word = "0x" + APPROVED.lower().replace("0x", "").rjust(64, "0")
+    opener.json("POST", "base-rpc", {
+        "jsonrpc": "2.0", "id": 1, "result": {
+            "transactionHash": "0x91cd1ede3f49313787d6c21c633aee5a1417c46a6dfd33904dc407498c9af3f3",
+            "status": "0x1", "from": APPROVED, "to": token, "blockNumber": "0x1903ac4",
+            "logs": [{"address": token, "topics": [topic, word, word],
+                      "data": hex(1000000), "logIndex": "0x1"}],
+        },
+    })
+    out = api.dispatch(
+        "POST", f"/api/guard/near/lifecycle/{intent_id}/verify-destination", {}, {}
+    )
+    assert out.status == 200
+    assert out.payload["destination_verification"]["level"] == "VERIFIED"
+    assert out.payload["destination_verification"]["chain"] == "base"
+
+
+def test_lifecycle_verify_destination_without_a_hash_is_a_bad_request(tmp_path):
+    api, _, _ = _lifecycle_api(tmp_path)
+    created = api.dispatch(
+        "POST", "/api/guard/near/lifecycle", {}, {"transaction": _tx(amount="1000000")}
+    )
+    intent_id = created.payload["intent_id"]
+    out = api.dispatch(
+        "POST", f"/api/guard/near/lifecycle/{intent_id}/verify-destination", {}, {}
+    )
     assert out.status == 400

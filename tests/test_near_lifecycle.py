@@ -22,7 +22,7 @@ from tracesettle.near import intents as intents_mod
 from tracesettle.near.lifecycle import LifecycleError, NearIntentsLifecycle
 from tracesettle.near.policy import load_fixture
 
-from conftest import REAL_DEPOSIT_ADDRESS, client_for, load_raw
+from conftest import REAL_DEPOSIT_ADDRESS, REAL_DESTINATION_TX, client_for, load_raw
 
 _FIXTURE_DIR = pathlib.Path(__file__).resolve().parents[1] / "tracesettle" / "near" / "fixtures"
 from guard_helpers import make_service
@@ -255,7 +255,7 @@ def test_assurance_is_verified_only_from_onchain_evidence(opener, store):
     _wire_full_success(opener)
     out = lc.assurance(owner="treasury-agent", intent_id=created["intent_id"])
     assert out["ok"] is True
-    assert out["assurance"]["level"] == "VERIFIED"
+    assert out["assurance"]["level"] == "SETTLEMENT_VERIFIED"
     assert out["assurance"]["independently_verified"] is True
 
 
@@ -274,7 +274,7 @@ def test_assurance_without_evidence_is_not_verified(opener, store):
     opener.http_error("POST", "solver-relay", 500, b"boom")
     opener.http_error("POST", "rpc.fastnear", 500, b"boom")
     out = lc.assurance(owner="treasury-agent", intent_id=created["intent_id"])
-    assert out["assurance"]["level"] != "VERIFIED"
+    assert out["assurance"]["level"] != "SETTLEMENT_VERIFIED"
     assert out["assurance"]["independently_verified"] is False
 
 
@@ -605,3 +605,81 @@ def test_status_read_attaches_the_origin_verification(opener, store):
     _wire_origin_receipt(opener)
     out = lc.refresh_status(owner="treasury-agent", intent_id=intent_id)
     assert out["lifecycle"]["origin_verification"]["level"] == "VERIFIED"
+
+
+# -- independent destination-chain verification ------------------------------
+
+
+def _status_with_destination(opener, store, *, destination_asset=USDC_ETH):
+    """An intent whose provider status names a destination transaction.
+
+    The destination asset is on ``eth`` so the reference receipt can be replayed;
+    the head read (finality) is served first, then the receipt.
+    """
+    lc, _ = _lifecycle(opener, store)
+    created = lc.create_and_authorize(
+        owner="treasury-agent",
+        payload=_intent_payload(destination_asset=destination_asset),
+        policy_read=None, access_key=None, created_at=CREATED_AT,
+    )
+    opener.json("POST", "/v0/quote", {"quote": {"depositAddress": REAL_DEPOSIT_ADDRESS}, "correlationId": "c"})
+    lc.request_quote(owner="treasury-agent", intent_id=created["intent_id"], dry=False)
+    opener.json("GET", "/v0/status", load_raw("oneclick_status_SUCCESS.json"))
+    opener.json("POST", "ethereum-rpc", {"jsonrpc": "2.0", "id": 1, "result": "0x1903ac4"}, once=True)
+    opener.json("POST", "ethereum-rpc", load_raw("evm_receipt_destination.json"), once=True)
+    lc.refresh_status(owner="treasury-agent", intent_id=created["intent_id"])
+    return lc, created["intent_id"]
+
+
+def test_status_read_attaches_the_destination_verification(opener, store):
+    lc, intent_id = _status_with_destination(opener, store)
+    out = lc.get(owner="treasury-agent", intent_id=intent_id)
+    dv = out["lifecycle"]["destination_verification"]
+    assert dv["level"] == "VERIFIED"
+    assert dv["chain"] == "eth"
+    assert dv["tx_hash"] == REAL_DESTINATION_TX
+
+
+def test_destination_verification_survives_a_read_without_a_network_call(opener, store):
+    lc, intent_id = _status_with_destination(opener, store)
+    calls_before = len(opener.calls)
+    out = lc.get(owner="treasury-agent", intent_id=intent_id)
+    assert out["lifecycle"]["destination_verification"]["level"] == "VERIFIED"
+    assert len(opener.calls) == calls_before
+
+
+def test_destination_verification_is_contradictory_for_a_reverted_delivery(opener, store):
+    lc, _ = _lifecycle(opener, store)
+    created = lc.create_and_authorize(
+        owner="treasury-agent", payload=_intent_payload(destination_asset=USDC_ETH),
+        policy_read=None, access_key=None, created_at=CREATED_AT,
+    )
+    opener.json("POST", "/v0/quote", {"quote": {"depositAddress": REAL_DEPOSIT_ADDRESS}, "correlationId": "c"})
+    lc.request_quote(owner="treasury-agent", intent_id=created["intent_id"], dry=False)
+    opener.json("GET", "/v0/status", load_raw("oneclick_status_SUCCESS.json"))
+    opener.json("POST", "ethereum-rpc", {"jsonrpc": "2.0", "id": 1, "result": "0x1903ac4"}, once=True)
+    reverted = load_raw("evm_receipt_destination.json")
+    reverted["result"]["status"] = "0x0"
+    opener.json("POST", "ethereum-rpc", reverted)
+    lc.refresh_status(owner="treasury-agent", intent_id=created["intent_id"])
+    out = lc.get(owner="treasury-agent", intent_id=created["intent_id"])
+    assert out["lifecycle"]["destination_verification"]["level"] == "CONTRADICTORY"
+
+
+def test_destination_verification_requires_a_known_hash(opener, store):
+    lc, _ = _lifecycle(opener, store)
+    created = lc.create_and_authorize(
+        owner="treasury-agent", payload=_intent_payload(), policy_read=None, access_key=None,
+        created_at=CREATED_AT,
+    )
+    assert lc.destination_verification(owner="treasury-agent", intent_id=created["intent_id"]) is None
+
+
+def test_explicit_destination_verification_returns_a_verdict(opener, store):
+    lc, intent_id = _status_with_destination(opener, store)
+    opener.json("POST", "ethereum-rpc", {"jsonrpc": "2.0", "id": 1, "result": "0x1903ac4"}, once=True)
+    opener.json("POST", "ethereum-rpc", load_raw("evm_receipt_destination.json"))
+    v = lc.destination_verification(owner="treasury-agent", intent_id=intent_id)
+    assert v is not None
+    assert v["level"] == "VERIFIED"
+    assert v["evidence_url"] is not None

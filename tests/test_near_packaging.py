@@ -126,7 +126,9 @@ def test_settlement_assurance_runs_from_a_package_only_copy(tmp_path):
     )
     assert out.returncode == 0, out.stderr
     result = json.loads(out.stdout.strip().splitlines()[-1])
-    assert {"VERIFIED", "REFUNDED", "FAILED", "PARTIAL", "PENDING", "UNKNOWN", "UNAVAILABLE"} <= set(
+    assert {"SETTLEMENT_VERIFIED", "DESTINATION_DELIVERY_VERIFIED", "ORIGIN_DEPOSIT_VERIFIED",
+            "REFUNDED", "FAILED", "PARTIAL", "PENDING", "REPORTED_ONLY", "UNKNOWN",
+            "UNAVAILABLE", "CONTRADICTORY"} <= set(
         result["levels"]
     )
     assert result["refund_level"] == "REFUNDED"
@@ -148,7 +150,7 @@ def test_all_invariants_hold_from_a_package_only_copy(tmp_path):
     )
     assert out.returncode == 0, out.stderr
     result = json.loads(out.stdout.strip().splitlines()[-1])
-    assert result["n"] == 23
+    assert result["n"] == 24
     assert result["all_hold"] is True
 
 

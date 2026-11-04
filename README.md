@@ -173,20 +173,28 @@ independently proven?" has a first-class answer rather than being left to the
 reader to infer from stage states. It maps the engine's stages onto the NEAR
 settlement path (deposit address, source-chain transaction, deposit confirmation,
 intent execution, destination transaction, destination receipt, refund) and
-reports one of `VERIFIED`, `REFUNDED`, `FAILED`, `PARTIAL`, `PENDING`,
+reports one of `SETTLEMENT_VERIFIED`, `DESTINATION_DELIVERY_VERIFIED`,
+`ORIGIN_DEPOSIT_VERIFIED`, `REFUNDED`, `FAILED`, `PARTIAL`, `PENDING`,
 `REPORTED_ONLY`, `CONTRADICTORY`, `UNAVAILABLE`, or `UNKNOWN`.
 
 **A provider's success status is a `REPORTED` claim and never raises the level.**
 If the provider says `SUCCESS` but no decisive on-chain evidence confirms it, the
-assurance level is not `VERIFIED` — the report says so explicitly, and the
+assurance level is not verified — the report says so explicitly, and the
 Markdown document, the main page and the operations console all render the view.
-The three terminal states are distinguished by their evidence: a refund confirmed
+The verified levels are graded by *which leg* was established on-chain, so the
+two are never conflated: `SETTLEMENT_VERIFIED` means the origin deposit **and**
+the destination delivery were each independently confirmed; when only the
+destination leg is confirmed (the origin source was unavailable) the level is
+`DESTINATION_DELIVERY_VERIFIED`; when only the origin deposit is confirmed and
+the destination is not, the level is `ORIGIN_DEPOSIT_VERIFIED` — a confirmed
+deposit says nothing about whether the money arrived. The three terminal states
+are distinguished by their evidence: a refund confirmed
 on-chain is `REFUNDED` (never presented as a successful settlement), a failure
 established by decisive evidence is `FAILED` (a merely *reported* failure stays
 unverified), and a confirmed deposit whose swap is still progressing is `PENDING`
 (not `UNKNOWN`). When the destination delivery *is* independently confirmed but the
 received amount is below the quote's expected output, the level is `PARTIAL` (never
-`VERIFIED`), and both the expected and observed amounts plus the shortfall are
+a verified level), and both the expected and observed amounts plus the shortfall are
 disclosed. A shortfall against an *unconfirmed* delivery is not classified as
 partial; the difference is disclosed as a limitation instead. Amounts never create
 a confirmation.
@@ -218,6 +226,39 @@ The check is read-only and never blocks the provider-status read that calls it; 
 verdict is recorded on the intent and carried forward on later reads without a
 second network call. `tests/test_near_origin_verify.py` (19 tests) covers each
 verdict, and `tests/test_near_lifecycle.py` covers the wiring and persistence.
+
+### Independent destination-chain delivery verification
+
+A confirmed origin deposit proves only that the money **left** the source; it says
+nothing about whether the intended asset reached the intended recipient on the
+destination chain. `POST /api/guard/near/lifecycle/{intent_id}/verify-destination`
+(and the console's **Verify delivery on destination chain** button) closes that gap
+the same way the origin check works: it reads the destination chain directly and
+matches explicit identifiers — the recipient address and the ERC-20 token
+contract — never a provider's word and never amount/timestamp similarity. The
+verdict is one of `VERIFIED`, `UNCONFIRMED`, `CONTRADICTORY`, `NOT_FOUND`,
+`UNAVAILABLE` or `UNSUPPORTED`:
+
+- `VERIFIED` — the destination transaction is included, **succeeded**, and carries
+  a `Transfer` of the expected token to the intended recipient for the expected
+  amount. For a native asset the top-level recipient is matched and the amount is
+  disclosed as not checked (a receipt does not carry the transferred value).
+- `CONTRADICTORY` — the transaction is confirmed to have **reverted**, or pays a
+  different recipient, or transfers a different token, so it cannot be the claimed
+  delivery.
+- `UNCONFIRMED` — the transaction was found but a required check did not hold (too
+  few confirmations, a differing amount, or an unknown intended recipient). This is
+  insufficient evidence, not proof of failure.
+- `NOT_FOUND` / `UNAVAILABLE` / `UNSUPPORTED` — a missing record, a source outage,
+  or no configured source for the chain. None is a verdict that the transfer failed.
+
+Amount is never used to *find* or *correlate* a transaction; it is only ever
+compared once the transaction is already identified by its hash. The check is
+read-only and carried forward on later reads without a second network call.
+`tests/test_near_destination_verify.py` (16 tests) covers each verdict, and
+`tests/test_near_lifecycle.py` covers the wiring and persistence. The structural
+guarantee is asserted by the `near_destination_delivery_requires_the_destination_chain`
+invariant.
 
 ### NEAR Intents lifecycle
 
@@ -340,13 +381,15 @@ refusal is provable: the executor is never called unless the outcome was `ALLOW`
 | H | Native tx wrongly assumed protected by an Intents-only policy | policy-scope rejection |
 | I | Provider reports success without independent evidence | `UNKNOWN` / `UNAVAILABLE` |
 
-Six NEAR-specific structural guarantees join the invariant set, each
+Eight NEAR-specific structural guarantees join the invariant set, each
 mutation-tested: `near_policy_must_be_in_force`,
+`near_policy_selection_is_not_client_controlled`,
 `near_native_scope_gap_is_always_stated`,
 `near_function_call_key_cannot_transfer_near`,
 `near_provider_success_is_never_verified_without_evidence`,
-`near_partial_settlement_is_never_verified`, and
-`near_policy_selection_is_not_client_controlled`.
+`near_partial_settlement_is_never_verified`,
+`near_terminal_states_are_evidence_distinguished`, and
+`near_destination_delivery_requires_the_destination_chain`.
 
 ## Try it: do X → see Y
 
@@ -370,11 +413,11 @@ a bare interpreter.
 **1. Run the tests.**
 
 ```sh
-python -m pytest tests/ --collect-only -q   # 997 tests collected
-python -m pytest tests/ -q                  # 973 passed, 24 skipped
+python -m pytest tests/ --collect-only -q   # 1000 tests collected
+python -m pytest tests/ -q                  # 1000 passed, 24 skipped
 ```
-→ `973 passed, 24 skipped`. The skips are the PostgreSQL integration
-tests; set `TRACESETTLE_TEST_PG_DSN` to a real server to run them (997 pass).
+→ `1000 passed, 24 skipped`. The skips are the PostgreSQL integration
+tests; set `TRACESETTLE_TEST_PG_DSN` to a real server to run them (1000 pass).
 
 **2. Prove the enforcement boundary: a permitted request executes, a suspicious
 one cannot.**
@@ -427,7 +470,7 @@ curl -sS -X POST http://127.0.0.1:8080/api/guard/sign \
 curl -sS http://127.0.0.1:8080/api/guard/invariants \
   | python3 -c 'import sys,json;d=json.load(sys.stdin);print("all hold:",d["all_hold"]);[print(" ",i["name"]) for i in d["invariants"]]'
 ```
-→ `all hold: True` and the twenty-three invariant names, including the seven NEAR
+→ `all hold: True` and the twenty-four invariant names, including the eight NEAR
 ones (`near_policy_must_be_in_force`, `near_native_scope_gap_is_always_stated`,
 `near_function_call_key_cannot_transfer_near`,
 `near_provider_success_is_never_verified_without_evidence`,
@@ -748,7 +791,7 @@ transaction request ──▶ │ guard/rules.py      7 controls, all run  │
                         │                     validate, then execute │
                         │ guard/audit.py      hash-chained records  │
                         │ guard/monitor.py    counters + incidents  │
-                        │ guard/invariants.py 23 checked guarantees │
+                        │ guard/invariants.py 24 checked guarantees │
                         └────────────────────┬─────────────────────┘
                                              │ ALLOW + authorization
                                              ▼
@@ -819,7 +862,7 @@ identical decisions.
 | `tracesettle/guard/service.py` | Orchestration: controls → authorization → monitor → audit. |
 | `tracesettle/guard/state.py` | Durable state: `GuardStateStore` (SQLite), backend-aware `open_state_store`. |
 | `tracesettle/guard/state_pg.py` | Optional PostgreSQL backend: shared nonces, counters, revocations, idempotency. |
-| `tracesettle/guard/invariants.py` | The twenty-three structural guarantees, checked by execution. |
+| `tracesettle/guard/invariants.py` | The twenty-four structural guarantees, checked by execution. |
 | `tracesettle/guard/api.py` | Guard HTTP routing and JSON serialization. |
 | `tracesettle/guard/console.py` | The security operations console page. |
 | `docs/TRANSACTION_SECURITY.md` | The security layer in full, including what it does not do. |
@@ -828,7 +871,7 @@ identical decisions.
 | `.github/workflows/ci.yml` | CI: tests, static analysis, Docker build + runtime, demo determinism. |
 | `demo/demonstrate.py` | Read-only walkthrough (live, or `--offline` replay of captures). |
 | `demo/replay_opener.py` | Offline transport that replays `evidence/raw/` through the real code. |
-| `tests/` | 997 tests (24 PostgreSQL tests skip without `TRACESETTLE_TEST_PG_DSN`). `evidence/raw/` fixtures are real captures; `tests/fixtures/synthetic/` are clearly labelled synthetic. |
+| `tests/` | 1000 tests (24 PostgreSQL tests skip without `TRACESETTLE_TEST_PG_DSN`). `evidence/raw/` fixtures are real captures; `tests/fixtures/synthetic/` are clearly labelled synthetic. |
 | `PHASE1_FEASIBILITY.md` | Phase 1 feasibility and API verification. |
 | `submission/` | Hackathon artifacts: API payload shape, technical summary, demo post draft, publication checklist. |
 | `docs/official/` | NEAR documentation captured during Phase 1. |
@@ -920,7 +963,7 @@ variable and all documented in `docs/TRANSACTION_SECURITY.md`:
   replay-nonce store all have explicit caps, so a flood cannot exhaust memory.
   When durable state is configured, spent nonces and the limit counters live in
   SQLite instead, so they survive a restart (see **Durable state** below).
-- **Structural invariants, checked by execution.** Twenty-three guarantees at
+- **Structural invariants, checked by execution.** Twenty-four guarantees at
   `GET /api/guard/invariants`, each mutation-tested so a checker that cannot fail
   is treated as a defect.
 - **Honest audit claim.** In-place modification of an audit record is detectable;
@@ -1127,7 +1170,7 @@ immutable commit SHA (not a moving tag), and cancels superseded runs.
 ## Tests
 
 ```sh
-python3 -m pytest tests/ -q          # 973 passed, 24 skipped (997 with a server)
+python3 -m pytest tests/ -q          # 1000 passed, 24 skipped (1000 with a server)
 python3 -m pytest tests/test_guard_authorization.py -q
 python3 -m pytest tests/test_guard_invariants.py -q
 python3 -m pytest tests/test_guard_end_to_end.py -q

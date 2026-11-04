@@ -67,7 +67,7 @@ def test_report_carries_the_settlement_assurance_view(opener):
     data = report.to_dict()
     assurance = data["settlement_assurance"]
     assert assurance is not None
-    assert assurance["level"] == "VERIFIED"
+    assert assurance["level"] == "SETTLEMENT_VERIFIED"
     assert assurance["independently_verified"] is True
     assert assurance["provider_claimed_success"] is True
     # The assurance view names the settlement stages explicitly.
@@ -106,7 +106,7 @@ def test_provider_success_without_evidence_is_not_verified(opener):
     assurance = report.to_dict()["settlement_assurance"]
     assert assurance["provider_claimed_success"] is True
     assert assurance["independently_verified"] is False
-    assert assurance["level"] != "VERIFIED"
+    assert assurance["level"] != "SETTLEMENT_VERIFIED"
 
 
 # --- real HTTP: the investigate route exposes the assurance -----------------
@@ -169,7 +169,7 @@ def test_http_investigate_response_includes_assurance(opener):
 
     assert status == 200
     data = body["data"]
-    assert data["settlement_assurance"]["level"] == "VERIFIED"
+    assert data["settlement_assurance"]["level"] == "SETTLEMENT_VERIFIED"
     assert "## Settlement assurance" in body["markdown"]
 
 
@@ -383,7 +383,7 @@ def test_http_lifecycle_full_journey_over_a_socket(opener, monkeypatch, tmp_path
                 base + f"/api/guard/near/lifecycle/{intent_id}/assurance", {}
             )
             assert status == 200, assurance
-            assert assurance["assurance"]["level"] == "VERIFIED"
+            assert assurance["assurance"]["level"] == "SETTLEMENT_VERIFIED"
             assert assurance["assurance"]["independently_verified"] is True
 
             # 6. the record is retrievable and carries the durable event trail

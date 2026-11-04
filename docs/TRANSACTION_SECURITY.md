@@ -155,8 +155,9 @@ silently downgrade an outcome. This was a real defect caught by a test.
 
 ## 8. Structural invariants (`guard/invariants.py`)
 
-Fifteen guarantees, each checked by *running the real code* against an isolated
-service, exposed at `GET /api/guard/invariants` and asserted in
+Fifteen core guarantees (the NEAR-specific ones are listed in
+`docs/NEAR_INTEGRATION.md`), each checked by *running the real code* against an
+isolated service, exposed at `GET /api/guard/invariants` and asserted in
 `tests/test_guard_invariants.py`:
 
 | Invariant | Guarantee |
@@ -196,7 +197,7 @@ single document with no third-party origins and a restrictive
 | `POST` | `/api/guard/incidents/{id}/status` | acknowledge or resolve |
 | `GET` | `/api/guard/audit` | audit records (`?verify=1` to check the chain) |
 | `GET` | `/api/guard/scenarios` | the three labelled simulation scenarios |
-| `GET` | `/api/guard/invariants` | run the fifteen structural checks now |
+| `GET` | `/api/guard/invariants` | run the structural checks now |
 | `POST` | `/api/guard/evaluate` | evaluate a transaction request |
 | `POST` | `/api/guard/sign` | attempt a signing through the reference signer |
 

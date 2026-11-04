@@ -503,6 +503,20 @@ def test_console_lifecycle_has_a_wallet_handoff_and_deposit_step():
     assert "Quote expires" in CONSOLE_HTML
 
 
+def test_console_lifecycle_exposes_independent_destination_verification():
+    """The user journey must expose an independent destination-delivery check.
+
+    A provider SUCCESS is a claim; the destination leg is verified from the chain
+    alone. The console must offer the action and render the verdict.
+    """
+    from tracesettle.guard.console import CONSOLE_HTML
+
+    assert 'id="i-verify-destination"' in CONSOLE_HTML
+    assert "Verify delivery on destination chain" in CONSOLE_HTML
+    assert "renderDestinationVerification" in CONSOLE_HTML
+    assert '"verify-destination"' in CONSOLE_HTML
+
+
 def test_console_lifecycle_exposes_a_resume_affordance():
     """A durable record must be resumable after a reload.
 

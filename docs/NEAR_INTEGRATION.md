@@ -192,11 +192,17 @@ assurance level:
 
 | Level | Meaning |
 | --- | --- |
-| `VERIFIED` | Decisive stages independently confirmed from authoritative evidence |
+| `SETTLEMENT_VERIFIED` | Both the origin deposit and the destination delivery independently confirmed from authoritative evidence |
+| `DESTINATION_DELIVERY_VERIFIED` | The destination delivery is confirmed but the origin deposit is not |
+| `ORIGIN_DEPOSIT_VERIFIED` | The origin deposit is confirmed but the destination delivery is not |
 | `REPORTED_ONLY` | The provider claims success; at least one decisive stage is only reported |
 | `CONTRADICTORY` | Independent evidence conflicts materially |
 | `UNAVAILABLE` | The sources needed could not be queried |
 | `UNKNOWN` | Evidence insufficient to decide |
+
+The verified levels are graded by *which leg* was established on-chain, so a
+confirmed deposit is never presented as a completed delivery. This is asserted by
+the invariant `near_destination_delivery_requires_the_destination_chain`.
 
 **A provider success status never raises the level.** It is recorded as
 `provider_claimed_success` and phrased in the summary, but the level is computed

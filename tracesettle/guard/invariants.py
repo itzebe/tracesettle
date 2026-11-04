@@ -635,6 +635,17 @@ def _postgres_shared_state_refuses_cross_instance_replay() -> InvariantResult:
 # stopped, these show the property that stops them cannot silently weaken.
 
 
+#: Assurance levels that mean the destination leg (or the whole settlement) was
+#: independently verified. The invariants below check that a provider claim can
+#: never reach any of them, and that a shortfall is never among them.
+_VERIFIED_ASSURANCE_LEVELS = frozenset(
+    {
+        "SETTLEMENT_VERIFIED",
+        "DESTINATION_DELIVERY_VERIFIED",
+    }
+)
+
+
 def _near_wrapper(*, policy_read=None, access_key=None):
     """A throwaway NEAR wrapper over a real guard service."""
     from ..near.agent_wrapper import AgentAuthorizationWrapper
@@ -839,7 +850,7 @@ def _near_function_call_key_cannot_transfer_near():
 def _near_provider_success_is_never_verified_without_evidence():
     """A provider success claim must never produce an independently-verified level."""
     from ..model import OverallOutcome, ReconciliationResult, Stage, StageAssessment, StageState
-    from ..near.settlement import AssuranceLevel, settlement_assurance_from_result
+    from ..near.settlement import settlement_assurance_from_result
 
     result = ReconciliationResult(
         stages=(
@@ -853,7 +864,7 @@ def _near_provider_success_is_never_verified_without_evidence():
         summary="no evidence",
     )
     assurance = settlement_assurance_from_result(result, provider_reported_success=True)
-    if assurance.level is AssuranceLevel.VERIFIED or assurance.independently_verified:
+    if assurance.independently_verified or assurance.level in _VERIFIED_ASSURANCE_LEVELS:
         return InvariantResult(
             "near_provider_success_is_never_verified_without_evidence",
             False,
@@ -884,7 +895,7 @@ def _near_partial_settlement_is_never_verified():
     assurance = settlement_assurance_from_result(
         result, expected_amount_out="1000000", observed_amount_out="990000"
     )
-    if assurance.level is AssuranceLevel.VERIFIED or assurance.independently_verified:
+    if assurance.independently_verified or assurance.level in _VERIFIED_ASSURANCE_LEVELS:
         return InvariantResult(
             "near_partial_settlement_is_never_verified",
             False,
@@ -954,6 +965,115 @@ def _near_terminal_states_are_evidence_distinguished():
     )
 
 
+def _near_destination_delivery_requires_the_destination_chain():
+    """A provider SUCCESS must never confirm a destination delivery by itself.
+
+    The mission rule: provider success is a claim, and a confirmed origin deposit
+    proves only that the money left the source. The destination leg is verified
+    only by reading the destination chain and matching an explicit identifier (the
+    recipient). This runs the real verifier and the real EVM adapter over a canned
+    transport: a transaction that succeeded but pays a different recipient must be
+    CONTRADICTORY (never VERIFIED), an unreachable source must be UNAVAILABLE
+    (never a false confirmation), and a correctly-directed delivery must verify.
+    """
+    import json as _json
+
+    from ..httpclient import HttpClient
+    from ..near.destination_verify import DestinationVerdict, verify_destination_delivery
+
+    name = "near_destination_delivery_requires_the_destination_chain"
+    tx_hash = "0x" + "ab" * 32
+    token = "0x" + "cd" * 20
+    intended = "0x" + "11" * 20
+    other = "0x" + "22" * 20
+    transfer_topic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+
+    def _word(address: str) -> str:
+        return "0x" + address.lower().replace("0x", "").rjust(64, "0")
+
+    def _receipt(paid_to: str) -> dict:
+        return {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "transactionHash": tx_hash,
+                "status": "0x1",
+                "from": intended,
+                "to": token,
+                "blockNumber": "0x100",
+                "logs": [
+                    {
+                        "address": token,
+                        "topics": [transfer_topic, _word(intended), _word(paid_to)],
+                        "data": hex(1000),
+                        "logIndex": "0x1",
+                    }
+                ],
+            },
+        }
+
+    class _Opener:
+        def __init__(self, payload: dict | None) -> None:
+            self._payload = payload
+
+        def __call__(self, request: object, timeout: float | None = None) -> object:
+            if self._payload is None:
+                raise TimeoutError("timed out")
+            body = _json.dumps(self._payload).encode()
+
+            class _Response:
+                status = 200
+
+                def read(self) -> bytes:
+                    return body
+
+                def __enter__(self) -> "_Response":
+                    return self
+
+                def __exit__(self, *exc: object) -> bool:
+                    return False
+
+            return _Response()
+
+    def _verify(payload: dict | None):
+        client = HttpClient(opener=_Opener(payload), max_attempts=1, timeout=1.0)
+        return verify_destination_delivery(
+            chain="eth",
+            tx_hash=tx_hash,
+            recipient=intended,
+            token_contract=token,
+            expected_amount="1000",
+            client=client,
+        )
+
+    wrong_recipient = _verify(_receipt(other))
+    if wrong_recipient.level is not DestinationVerdict.CONTRADICTORY:
+        return InvariantResult(
+            name,
+            False,
+            "a successful transaction paying a different recipient was not a contradiction",
+        )
+
+    unavailable = _verify(None)
+    if unavailable.level is not DestinationVerdict.UNAVAILABLE:
+        return InvariantResult(
+            name, False, "an unreachable destination source was not UNAVAILABLE"
+        )
+
+    verified = _verify(_receipt(intended))
+    if verified.level is not DestinationVerdict.VERIFIED:
+        return InvariantResult(
+            name, False, "a correctly-directed, successful delivery was not verified"
+        )
+
+    return InvariantResult(
+        name,
+        True,
+        "a destination delivery is verified only from the chain: a wrong recipient is "
+        "CONTRADICTORY, an unreachable source is UNAVAILABLE, and only a correct transfer verifies",
+    )
+
+
 INVARIANTS: dict[str, Callable[[], InvariantResult]] = {
     "non_allow_never_authorizes": _non_allow_never_authorizes,
     "refusal_never_reaches_the_executor": _refusal_never_reaches_the_executor,
@@ -986,6 +1106,9 @@ INVARIANTS: dict[str, Callable[[], InvariantResult]] = {
     "near_terminal_states_are_evidence_distinguished": (
         _near_terminal_states_are_evidence_distinguished
     ),
+    "near_destination_delivery_requires_the_destination_chain": (
+        _near_destination_delivery_requires_the_destination_chain
+    ),
 }
 
 #: Human-readable statement of each guarantee, for the console and the docs.
@@ -1013,6 +1136,7 @@ INVARIANT_DESCRIPTIONS: dict[str, str] = {
     "near_provider_success_is_never_verified_without_evidence": "A provider success status never yields an independently-verified settlement level without decisive on-chain evidence.",
     "near_partial_settlement_is_never_verified": "A destination that received less than the quote's expected output is classified PARTIAL and is never independently verified.",
     "near_terminal_states_are_evidence_distinguished": "A reported failure or refund never reads as a definitive FAILED/REFUNDED state, and a confirmed refund is REFUNDED rather than a verified settlement.",
+    "near_destination_delivery_requires_the_destination_chain": "A destination delivery is verified only by reading the destination chain and matching the intended recipient; a provider success claim and a confirmed origin deposit never confirm it.",
 }
 
 
