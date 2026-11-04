@@ -683,3 +683,82 @@ def test_explicit_destination_verification_returns_a_verdict(opener, store):
     assert v is not None
     assert v["level"] == "VERIFIED"
     assert v["evidence_url"] is not None
+
+
+# -- the evaluated chain is derived from the origin asset, not the caller -----
+
+
+def test_a_native_origin_asset_derives_its_real_chain(opener, store):
+    """A native bridged asset names its real chain, never ``near``.
+
+    The earlier local derivation split on ``-``, which returned ``near`` for every
+    native omft asset (``nep141:eth.omft.near`` -> ``near``). That value is what
+    the guard evaluates its chain allowlist against, so it must be correct.
+    """
+    lc, _ = _lifecycle(opener, store)
+    created = lc.create_and_authorize(
+        owner="treasury-agent",
+        payload=_intent_payload(origin_asset="nep141:eth.omft.near", chain="eth"),
+        policy_read=None, access_key=None, created_at=CREATED_AT,
+    )
+    assert created["decision"]["transaction"]["chain"] == "eth"
+
+
+def test_an_omitted_chain_is_derived_from_the_origin_asset(opener, store):
+    lc, _ = _lifecycle(opener, store)
+    payload = _intent_payload(origin_asset="nep141:eth.omft.near")
+    payload.pop("chain")
+    created = lc.create_and_authorize(
+        owner="treasury-agent", payload=payload, policy_read=None, access_key=None,
+        created_at=CREATED_AT,
+    )
+    assert created["decision"]["transaction"]["chain"] == "eth"
+
+
+def test_a_declared_chain_that_contradicts_the_origin_asset_is_refused(opener, store):
+    """A caller cannot steer a chain-scoped policy by declaring a different chain."""
+    lc, _ = _lifecycle(opener, store)
+    with pytest.raises(LifecycleError, match="disagrees with the origin asset"):
+        lc.create_and_authorize(
+            owner="treasury-agent",
+            payload=_intent_payload(origin_asset="nep141:eth.omft.near", chain="near"),
+            policy_read=None, access_key=None, created_at=CREATED_AT,
+        )
+
+
+def test_a_near_only_service_cannot_authorize_an_eth_origin(opener, store, tmp_path):
+    """The bypass, end to end: a service permitted only on ``near`` must be refused
+    for an ETH-origin intent, whichever way the chain is expressed."""
+    import dataclasses
+
+    from tracesettle.guard.policy import DEFAULT_POLICY, ServicePolicy
+    from tracesettle.intents_store import IntentStore
+
+    svc = ServicePolicy(
+        service_id="treasury-agent",
+        allowed_operations=frozenset({"SETTLEMENT"}),
+        allowed_chains=frozenset({"near"}),
+        allowed_assets=frozenset({"ETH"}),
+    )
+    policy = dataclasses.replace(DEFAULT_POLICY, services={"treasury-agent": svc})
+    for chain_field in (None, "near"):
+        s = IntentStore(tmp_path / f"intents-{chain_field}.db")
+        try:
+            lc = NearIntentsLifecycle(
+                guard_service=make_service(policy=policy), http_client=client_for(opener), store=s
+            )
+            payload = _intent_payload(origin_asset="nep141:eth.omft.near")
+            payload.pop("chain")
+            if chain_field is not None:
+                payload["chain"] = chain_field
+            try:
+                created = lc.create_and_authorize(
+                    owner="treasury-agent", payload=payload, policy_read=None, access_key=None,
+                    created_at=CREATED_AT,
+                )
+            except LifecycleError:
+                continue  # the explicit-conflict path refuses; that is correct
+            assert created["decision"]["outcome"] != "ALLOW"
+            assert created["permits_signing"] is False
+        finally:
+            s.close()

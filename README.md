@@ -381,15 +381,16 @@ refusal is provable: the executor is never called unless the outcome was `ALLOW`
 | H | Native tx wrongly assumed protected by an Intents-only policy | policy-scope rejection |
 | I | Provider reports success without independent evidence | `UNKNOWN` / `UNAVAILABLE` |
 
-Eight NEAR-specific structural guarantees join the invariant set, each
+Nine NEAR-specific structural guarantees join the invariant set, each
 mutation-tested: `near_policy_must_be_in_force`,
 `near_policy_selection_is_not_client_controlled`,
 `near_native_scope_gap_is_always_stated`,
 `near_function_call_key_cannot_transfer_near`,
 `near_provider_success_is_never_verified_without_evidence`,
 `near_partial_settlement_is_never_verified`,
-`near_terminal_states_are_evidence_distinguished`, and
-`near_destination_delivery_requires_the_destination_chain`.
+`near_terminal_states_are_evidence_distinguished`,
+`near_destination_delivery_requires_the_destination_chain`, and
+`near_chain_is_derived_from_the_origin_asset`.
 
 ## Try it: do X → see Y
 
@@ -413,11 +414,11 @@ a bare interpreter.
 **1. Run the tests.**
 
 ```sh
-python -m pytest tests/ --collect-only -q   # 1000 tests collected
-python -m pytest tests/ -q                  # 1000 passed, 24 skipped
+python -m pytest tests/ --collect-only -q   # 1031 tests collected
+python -m pytest tests/ -q                  # 1007 passed, 24 skipped
 ```
-→ `1000 passed, 24 skipped`. The skips are the PostgreSQL integration
-tests; set `TRACESETTLE_TEST_PG_DSN` to a real server to run them (1000 pass).
+→ `1007 passed, 24 skipped`. The skips are the PostgreSQL integration
+tests; set `TRACESETTLE_TEST_PG_DSN` to a real server to run them (1031 pass).
 
 **2. Prove the enforcement boundary: a permitted request executes, a suspicious
 one cannot.**
@@ -470,7 +471,7 @@ curl -sS -X POST http://127.0.0.1:8080/api/guard/sign \
 curl -sS http://127.0.0.1:8080/api/guard/invariants \
   | python3 -c 'import sys,json;d=json.load(sys.stdin);print("all hold:",d["all_hold"]);[print(" ",i["name"]) for i in d["invariants"]]'
 ```
-→ `all hold: True` and the twenty-four invariant names, including the eight NEAR
+→ `all hold: True` and the twenty-five invariant names, including the nine NEAR
 ones (`near_policy_must_be_in_force`, `near_native_scope_gap_is_always_stated`,
 `near_function_call_key_cannot_transfer_near`,
 `near_provider_success_is_never_verified_without_evidence`,
@@ -791,7 +792,7 @@ transaction request ──▶ │ guard/rules.py      7 controls, all run  │
                         │                     validate, then execute │
                         │ guard/audit.py      hash-chained records  │
                         │ guard/monitor.py    counters + incidents  │
-                        │ guard/invariants.py 24 checked guarantees │
+                        │ guard/invariants.py 25 checked guarantees │
                         └────────────────────┬─────────────────────┘
                                              │ ALLOW + authorization
                                              ▼
@@ -862,7 +863,7 @@ identical decisions.
 | `tracesettle/guard/service.py` | Orchestration: controls → authorization → monitor → audit. |
 | `tracesettle/guard/state.py` | Durable state: `GuardStateStore` (SQLite), backend-aware `open_state_store`. |
 | `tracesettle/guard/state_pg.py` | Optional PostgreSQL backend: shared nonces, counters, revocations, idempotency. |
-| `tracesettle/guard/invariants.py` | The twenty-four structural guarantees, checked by execution. |
+| `tracesettle/guard/invariants.py` | The twenty-five structural guarantees, checked by execution. |
 | `tracesettle/guard/api.py` | Guard HTTP routing and JSON serialization. |
 | `tracesettle/guard/console.py` | The security operations console page. |
 | `docs/TRANSACTION_SECURITY.md` | The security layer in full, including what it does not do. |
@@ -871,7 +872,7 @@ identical decisions.
 | `.github/workflows/ci.yml` | CI: tests, static analysis, Docker build + runtime, demo determinism. |
 | `demo/demonstrate.py` | Read-only walkthrough (live, or `--offline` replay of captures). |
 | `demo/replay_opener.py` | Offline transport that replays `evidence/raw/` through the real code. |
-| `tests/` | 1000 tests (24 PostgreSQL tests skip without `TRACESETTLE_TEST_PG_DSN`). `evidence/raw/` fixtures are real captures; `tests/fixtures/synthetic/` are clearly labelled synthetic. |
+| `tests/` | 1031 tests (24 PostgreSQL tests skip without `TRACESETTLE_TEST_PG_DSN`). `evidence/raw/` fixtures are real captures; `tests/fixtures/synthetic/` are clearly labelled synthetic. |
 | `PHASE1_FEASIBILITY.md` | Phase 1 feasibility and API verification. |
 | `submission/` | Hackathon artifacts: API payload shape, technical summary, demo post draft, publication checklist. |
 | `docs/official/` | NEAR documentation captured during Phase 1. |
@@ -963,7 +964,7 @@ variable and all documented in `docs/TRANSACTION_SECURITY.md`:
   replay-nonce store all have explicit caps, so a flood cannot exhaust memory.
   When durable state is configured, spent nonces and the limit counters live in
   SQLite instead, so they survive a restart (see **Durable state** below).
-- **Structural invariants, checked by execution.** Twenty-four guarantees at
+- **Structural invariants, checked by execution.** Twenty-five guarantees at
   `GET /api/guard/invariants`, each mutation-tested so a checker that cannot fail
   is treated as a defect.
 - **Honest audit claim.** In-place modification of an audit record is detectable;
@@ -1170,7 +1171,7 @@ immutable commit SHA (not a moving tag), and cancels superseded runs.
 ## Tests
 
 ```sh
-python3 -m pytest tests/ -q          # 1000 passed, 24 skipped (1000 with a server)
+python3 -m pytest tests/ -q          # 1007 passed, 24 skipped (1031 with a server)
 python3 -m pytest tests/test_guard_authorization.py -q
 python3 -m pytest tests/test_guard_invariants.py -q
 python3 -m pytest tests/test_guard_end_to_end.py -q

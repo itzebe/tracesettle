@@ -154,10 +154,23 @@ class NearIntentsLifecycle:
         except (_intents.QuoteValidationError, TypeError, ValueError) as exc:
             raise LifecycleError(str(exc)) from exc
 
+        # The chain is derived from the origin asset, not taken on the caller's
+        # word: the guard evaluates its chain allowlist against this value, so a
+        # caller-supplied `chain` that disagrees with the origin asset would let a
+        # service permitted on one chain fund a transfer on another. An explicit
+        # value is accepted only when it names the same chain as the origin asset.
+        asset_chain = _chain_of(quote_request.origin_asset)
+        supplied_chain = str(payload.get("chain") or "").strip().lower()
+        if supplied_chain and supplied_chain != asset_chain:
+            raise LifecycleError(
+                f"field 'chain' ({supplied_chain}) disagrees with the origin asset "
+                f"({quote_request.origin_asset}), which is on '{asset_chain}'"
+            )
+
         transaction = AgentTransaction(
             service_id=service_id,
             operation=operation,
-            chain=str(payload.get("chain") or _chain_of(quote_request.origin_asset)),
+            chain=asset_chain,
             asset=guard_asset,
             amount=guard_amount,
             destination=quote_request.recipient,
@@ -769,12 +782,19 @@ def _authorization_id(decision: Any) -> str | None:
 
 
 def _chain_of(asset_id: str) -> str:
-    """The chain a ``nep141:<chain>-<contract>.omft.near`` asset id names."""
-    if isinstance(asset_id, str) and asset_id.startswith("nep141:"):
-        rest = asset_id[len("nep141:"):]
-        if "-" in rest:
-            return rest.split("-", 1)[0]
-    return "near"
+    """The chain an asset id names, via the canonical parser.
+
+    Delegates to :func:`tracesettle.assets.chain_of` so the chain derived here
+    cannot disagree with the chain the guard and the verifiers use. A native
+    bridged asset (``nep141:eth.omft.near``) names ``eth``, not ``near`` — the
+    earlier local split-on-``-`` returned ``near`` for every native omft asset,
+    which let a request that omitted ``chain`` be evaluated against the wrong
+    chain (a chain-allowlist bypass). Only an id the parser cannot classify falls
+    back to ``near``.
+    """
+    from ..assets import chain_of
+
+    return chain_of(asset_id) or "near"
 
 
 def _swap_detail(data: Any, key: str) -> str | None:

@@ -1032,17 +1032,21 @@ verification rule was weakened and no production configuration was touched.
   already an ancestor (merged via PR #9). No merge/rebase was needed. Head after
   this pass: `a284c502`.
 - **Secret audit of the FULL publication history** (after `git fetch --unshallow`;
-  the clone was shallow, so the boundary commit was NOT the whole history). Scanned
-  all 591 blobs across all refs with `detect-secrets` 1.5.0 plus targeted greps.
-  No private keys, no seed phrases, no PATs/cloud keys/JWTs. Findings were entropy
-  noise, the placeholder `postgresql://user:pass@…` docs, and the ephemeral CI
-  Postgres service password `tracesettle:tracesettle` (a throwaway container
-  credential). **One real exposure:** the unrelated `knotwork-backup` branch
-  carries `.openhands/memory/MEMORY.md`, which contains the owner's personal email
-  (`jonathanebi05@gmail.com`) and sandbox/account notes. That branch is a VR
-  prototype unrelated to TraceSettle and would be published with the repo. Deleting
-  it (or scrubbing that file from its history) needs a token with admin rights and
-  the owner's explicit decision; it is NOT done here.
+  the clone was shallow, so the boundary commit was NOT the whole history).
+  Re-run with `gitleaks 8.21.2` (`--log-opts="--all"`) plus targeted greps: 59
+  findings, **all confirmed false positives** — 57 `generic-api-key` matches are
+  public identifiers (Bitcoin txids, addresses and scriptPubKeys in `evidence/raw/`
+  and public EVM token contracts in tests) and the literal placeholder
+  `totally-invalid-key-123`; 2 `curl-auth-header` matches are the vendored 1Click
+  OpenAPI `Bearer YOUR_JWT_TOKEN` example and a `# no auth header` reproduction
+  comment. No private keys, no seed phrases, no PATs, no cloud keys, no JWTs, no
+  real credentials. The ephemeral CI Postgres service password
+  (`tracesettle:tracesettle`) is a throwaway container credential. **One residual
+  exposure, outside this branch:** the unrelated `knotwork-backup` branch (a VR
+  prototype, not TraceSettle) carries `.openhands/memory/MEMORY.md` with the
+  owner's personal email and sandbox notes. Deleting that branch (or scrubbing the
+  file from its history) needs a token with admin rights and the owner's explicit
+  decision; it is NOT done here.
 - **Repository visibility cannot be changed by this token.** `$GITHUB_TOKEN` is a
   GitHub App installation token (`ghu_`) with `x-accepted-github-permissions:
   metadata=read` and contents write only. REST `PATCH {private:false}` /
@@ -1123,3 +1127,47 @@ no verification rule was weakened.
   finding — the secret audit passed. The owner must flip visibility in the UI or
   supply a classic PAT with `repo` scope. No merge, production deploy, X post or
   submission was performed.
+
+## Mission 5 — chain-allowlist bypass fixed; final release pass (2026-11-04)
+
+Live end-to-end execution of the reference ETH→USDC swap through the real
+lifecycle exposed a genuine, exploitable defect in the NEAR lifecycle. It is
+fixed with mutation-checked regression tests and a new structural invariant.
+
+- **Defect: the evaluated chain was taken from the caller, not the origin asset.**
+  `near/lifecycle.py::_chain_of` split an asset id on `-`, so every *native* omft
+  asset derived `near` (`nep141:eth.omft.near` -> `near`), and
+  `create_and_authorize` used `payload["chain"] or _chain_of(origin_asset)` for
+  the value the guard evaluates its chain allowlist against. Two consequences:
+  (1) a request that omitted `chain` was evaluated against the wrong chain, and
+  (2) a caller could declare `chain: "near"` for an ETH-origin transfer. Either
+  let a service permitted on one chain fund a transfer on another — a
+  chain-allowlist bypass. Reproduced: a service allowed only on `near` received
+  `ALLOW` for a `nep141:eth.omft.near` settlement.
+- **Fix.** `_chain_of` now delegates to the canonical `assets.chain_of`, so the
+  chain cannot disagree with the guard and the verifiers; and
+  `create_and_authorize` derives the chain from the origin asset and **refuses**
+  an explicit `chain` that disagrees with it (`LifecycleError`). No legitimate
+  flow regresses: omitting `chain`, or declaring the correct one, still allows.
+- **Invariant (now 25 total; 9 NEAR).**
+  `near_chain_is_derived_from_the_origin_asset` derives the chain from a native
+  asset and drives the real lifecycle to confirm a contradicting declared chain is
+  refused. Mutation-tested twice: restoring the `"near"` derivation fails it, and
+  dropping the conflict refusal fails it.
+- **Also fixed in this pass:** the origin-verification fallback used the same
+  buggy derivation, so a native ETH origin was checked against `near` and reported
+  `UNSUPPORTED`. With the fix, the reference origin verifies `VERIFIED` on `eth`.
+- **Tests:** 1000 -> **1007 passed, 24 skipped**; with a local PostgreSQL 17
+  (installed via apt for this pass) **1031 passed, 0 skipped**. New: 2 invariant
+  mutation tests, 4 lifecycle regression tests, packaging invariant count 24 -> 25.
+  pyflakes clean; compileall OK; offline demo byte-identical (`4864f13c…`); near
+  demo byte-identical (`a76d72ab…`).
+- **Live reproduction (real HTTP, real provider).** The reference swap
+  (deposit address `0xB741c0…A572B`) run through the real lifecycle returns
+  provider `SUCCESS`, destination verification `VERIFIED` (receipt `0x1`, pays the
+  intended recipient), and assurance `SETTLEMENT_VERIFIED` with both legs
+  `CONFIRMED` — provider success alone never raises the level.
+- **Secret audit (publication gate) re-run:** gitleaks 8.21.2 full history, 59
+  findings, all false positives (see above). Repository visibility remains blocked
+  (App token lacks `Administration`; browser logged out); the authorized push and
+  PR update proceed, the visibility flip does not.

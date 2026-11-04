@@ -16,7 +16,7 @@ FIXTURE_DIR = pathlib.Path(__file__).resolve().parent.parent / "tracesettle" / "
 
 def test_near_invariants_are_registered():
     near = [name for name in inv.INVARIANTS if name.startswith("near_")]
-    assert len(near) == 8
+    assert len(near) == 9
     assert all(name in inv.INVARIANT_DESCRIPTIONS for name in near)
 
 
@@ -151,4 +151,43 @@ def test_near_destination_invariant_notices_a_provider_trusting_verifier(monkeyp
 
     monkeypatch.setattr(dv_mod, "verify_destination_delivery", permissive)
     result = inv.INVARIANTS["near_destination_delivery_requires_the_destination_chain"]()
+    assert result.holds is False
+
+
+def test_near_chain_invariant_notices_a_caller_supplied_chain(monkeypatch):
+    """Mutation: if the evaluated chain came from the caller instead of the origin
+    asset, the invariant must fail. Restoring the original defect (a caller-supplied
+    chain is honoured) reproduces exactly the chain-allowlist bypass the invariant
+    exists to catch."""
+    from tracesettle.near import lifecycle as lifecycle_mod
+
+    # Reproduce the original defect: a native omft asset derives "near", so a
+    # request that omits `chain` is evaluated against the wrong chain.
+    monkeypatch.setattr(
+        lifecycle_mod, "_chain_of", lambda asset_id: "near"
+    )
+    result = inv.INVARIANTS["near_chain_is_derived_from_the_origin_asset"]()
+    assert result.holds is False
+
+
+def test_near_chain_invariant_notices_a_silently_accepted_conflict(monkeypatch):
+    """Mutation: if a declared chain that contradicts the origin asset were accepted
+    (no refusal), the invariant must fail."""
+    from tracesettle.near import lifecycle as lifecycle_mod
+
+    real = lifecycle_mod.NearIntentsLifecycle.create_and_authorize
+
+    def lenient(self, **kwargs):
+        # Drop the conflict refusal: accept any declared chain.
+        try:
+            return real(self, **kwargs)
+        except lifecycle_mod.LifecycleError as exc:
+            if "disagrees with the origin asset" in str(exc):
+                payload = dict(kwargs.get("payload") or {})
+                payload.pop("chain", None)
+                return real(self, **{**kwargs, "payload": payload})
+            raise
+
+    monkeypatch.setattr(lifecycle_mod.NearIntentsLifecycle, "create_and_authorize", lenient)
+    result = inv.INVARIANTS["near_chain_is_derived_from_the_origin_asset"]()
     assert result.holds is False

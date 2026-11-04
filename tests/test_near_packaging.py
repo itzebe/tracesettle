@@ -150,7 +150,7 @@ def test_all_invariants_hold_from_a_package_only_copy(tmp_path):
     )
     assert out.returncode == 0, out.stderr
     result = json.loads(out.stdout.strip().splitlines()[-1])
-    assert result["n"] == 24
+    assert result["n"] == 25
     assert result["all_hold"] is True
 
 

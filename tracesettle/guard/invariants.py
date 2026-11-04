@@ -1074,6 +1074,78 @@ def _near_destination_delivery_requires_the_destination_chain():
     )
 
 
+def _near_chain_is_derived_from_the_origin_asset():
+    """The guard must evaluate the chain the origin asset is actually on.
+
+    A caller can omit ``chain`` or supply one that disagrees with the origin
+    asset. Either way the guard evaluates its chain allowlist against a value the
+    caller influenced, so a service permitted on one chain could fund a transfer
+    on another. The lifecycle derives the chain from the origin asset (via the
+    canonical parser) and refuses a contradicting explicit value. This checks the
+    real derivation and the real refusal, not a restatement of them.
+    """
+    from ..near.lifecycle import LifecycleError, _chain_of
+
+    name = "near_chain_is_derived_from_the_origin_asset"
+    # A native bridged asset names its real chain, not "near".
+    if _chain_of("nep141:eth.omft.near") != "eth":
+        return InvariantResult(
+            name, False, "a native ETH origin asset did not derive the chain 'eth'"
+        )
+    if _chain_of("nep141:base-0x833589fcd6edb6e08f4c7c32d4f71b54bda02913.omft.near") != "base":
+        return InvariantResult(name, False, "a Base ERC-20 origin asset did not derive 'base'")
+
+    # An explicit chain that contradicts the origin asset must be refused, never
+    # silently accepted. This drives the real lifecycle.
+    import tempfile
+    from pathlib import Path
+
+    from ..intents_store import IntentStore
+    from ..httpclient import HttpClient
+    from ..near.lifecycle import NearIntentsLifecycle
+    from .service import GuardService
+
+    store = IntentStore(Path(tempfile.mkdtemp()) / "inv.db")
+    try:
+        lifecycle = NearIntentsLifecycle(
+            guard_service=GuardService(),
+            http_client=HttpClient(opener=lambda *a, **k: None),
+            store=store,
+        )
+        payload = {
+            "service_id": "treasury-agent",
+            "operation": "SETTLEMENT",
+            "chain": "near",  # disagrees with the ETH origin asset below
+            "asset": "ETH",
+            "amount": "1",
+            "recipient": "0x4e6d3A556e485188E9C9a528bc72c88BD92BD735",
+            "refund_to": "0x4e6d3A556e485188E9C9a528bc72c88BD92BD735",
+            "origin_asset": "nep141:eth.omft.near",
+            "destination_asset": (
+                "nep141:base-0x833589fcd6edb6e08f4c7c32d4f71b54bda02913.omft.near"
+            ),
+            "scope": "INTENTS",
+        }
+        try:
+            lifecycle.create_and_authorize(
+                owner="treasury-agent", payload=payload, policy_read=None, access_key=None
+            )
+        except LifecycleError:
+            return InvariantResult(
+                name,
+                True,
+                "the evaluated chain is derived from the origin asset, and an explicit chain that "
+                "disagrees with it is refused rather than evaluated",
+            )
+        return InvariantResult(
+            name,
+            False,
+            "a request whose declared chain contradicted its origin asset was accepted",
+        )
+    finally:
+        store.close()
+
+
 INVARIANTS: dict[str, Callable[[], InvariantResult]] = {
     "non_allow_never_authorizes": _non_allow_never_authorizes,
     "refusal_never_reaches_the_executor": _refusal_never_reaches_the_executor,
@@ -1109,6 +1181,7 @@ INVARIANTS: dict[str, Callable[[], InvariantResult]] = {
     "near_destination_delivery_requires_the_destination_chain": (
         _near_destination_delivery_requires_the_destination_chain
     ),
+    "near_chain_is_derived_from_the_origin_asset": _near_chain_is_derived_from_the_origin_asset,
 }
 
 #: Human-readable statement of each guarantee, for the console and the docs.
@@ -1137,6 +1210,7 @@ INVARIANT_DESCRIPTIONS: dict[str, str] = {
     "near_partial_settlement_is_never_verified": "A destination that received less than the quote's expected output is classified PARTIAL and is never independently verified.",
     "near_terminal_states_are_evidence_distinguished": "A reported failure or refund never reads as a definitive FAILED/REFUNDED state, and a confirmed refund is REFUNDED rather than a verified settlement.",
     "near_destination_delivery_requires_the_destination_chain": "A destination delivery is verified only by reading the destination chain and matching the intended recipient; a provider success claim and a confirmed origin deposit never confirm it.",
+    "near_chain_is_derived_from_the_origin_asset": "The chain the guard evaluates is derived from the origin asset, and an explicit chain that disagrees with it is refused; a caller cannot steer a chain-scoped policy to the wrong chain.",
 }
 
 
