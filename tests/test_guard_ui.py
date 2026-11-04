@@ -169,9 +169,58 @@ def test_console_requests_only_same_origin_endpoints():
     assert "/api/guard/near/policy-scope" in html
     assert "/api/guard/near/agent-evaluate" in html
     assert "api/investigate?format=full" in html
-    # No third-party origins: everything is same-origin.
+    # No third-party origins: the wallet connector is bundled and served from
+    # this origin, so no external script is ever loaded.
     assert "https://cdn" not in html
     assert "http://cdn" not in html
+
+
+def test_console_loads_its_wallet_connector_same_origin():
+    with running_server() as base:
+        _, body, _ = _request("GET", base + "/console")
+    html = _html(body)
+    assert '<script src="/assets/near-connect.js"></script>' in html
+    assert "/api/guard/near/wallet/prepare" in html
+    assert "/api/guard/near/wallet/verify" in html
+    assert "/api/guard/near/wallet" in html
+
+
+def test_wallet_asset_is_served_and_is_the_bundled_connector():
+    with running_server() as base:
+        status, body, headers = _request("GET", base + "/assets/near-connect.js")
+    assert status == 200
+    assert headers.get("Content-Type", "").startswith("text/javascript")
+    assert isinstance(body, bytes) and len(body) > 10_000
+    # It is the near-connect bundle, not an arbitrary payload.
+    assert b"NearConnector" in body
+
+
+def test_wallet_asset_path_traversal_is_refused():
+    with running_server() as base:
+        for path in ("/assets/../ui.py", "/assets/near-connect.js/../ui.py", "/assets/%2e%2e/ui.py"):
+            status, _, _ = _request("GET", base + path)
+            assert status == 404, path
+
+
+def test_console_csp_allows_the_wallet_connector_but_not_arbitrary_scripts():
+    with running_server() as base:
+        _, _, headers = _request("GET", base + "/console")
+    csp = headers.get("Content-Security-Policy", "")
+    # The bundled script is same-origin; the manifest/iframe origins are named.
+    assert "script-src 'self'" in csp
+    assert "https://cdn.jsdelivr.net" in csp
+    assert "https://raw.githubusercontent.com" in csp
+    # No wildcard origin is ever allowed.
+    assert "*" not in csp
+
+
+def test_api_responses_keep_the_strict_default_csp():
+    with running_server() as base:
+        _, _, headers = _request("GET", base + "/api/health")
+    csp = headers.get("Content-Security-Policy", "")
+    assert "default-src 'none'" in csp
+    assert "cdn.jsdelivr.net" not in csp
+
 
 
 def test_console_does_not_fabricate_a_live_badge():

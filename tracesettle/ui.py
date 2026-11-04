@@ -20,6 +20,7 @@ import hmac
 import json
 import logging
 import os
+import pathlib
 import signal
 import socket
 import sys
@@ -45,6 +46,33 @@ log = logging.getLogger("tracesettle.ui")
 
 MAX_BODY_BYTES = 8 * 1024
 MAX_IDENTIFIER_CHARS = 128
+
+#: The default Content-Security-Policy: everything same-origin, no third-party
+#: origin at all. It applies to every response except the security console and
+#: its vendored wallet asset.
+DEFAULT_CSP = (
+    "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; "
+    "connect-src 'self'; img-src 'self' data:; form-action 'none'; base-uri 'none'"
+)
+
+#: The console CSP. It additionally allows the *bundled* wallet connector to run
+#: wallet code in a sandboxed iframe and to resolve the wallet manifest. The
+#: connector executes wallet integrations hosted by the wallet teams, so the
+#: console alone permits those origins; the API responses and every other page
+#: keep :data:`DEFAULT_CSP`. ``script-src 'self'`` is deliberate - the connector
+#: is served from this origin, so no third-party script is loaded.
+CONSOLE_CSP = (
+    "default-src 'none'; style-src 'unsafe-inline'; script-src 'self' 'unsafe-inline'; "
+    "connect-src 'self' https://cdn.jsdelivr.net https://raw.githubusercontent.com; "
+    "frame-src https://cdn.jsdelivr.net https://raw.githubusercontent.com; "
+    "img-src 'self' data:; form-action 'none'; base-uri 'none'"
+)
+
+#: Static assets served from ``tracesettle/static``. A fixed allowlist, so a
+#: request path can never escape the package directory.
+_STATIC_FILES = {
+    "/assets/near-connect.js": ("near-connect.js", "text/javascript; charset=utf-8"),
+}
 
 #: Sentinel returned by :meth:`Handler._authenticate_service` when it has already
 #: sent a refusal. Distinct from ``None``, which means "authentication disabled".
@@ -386,7 +414,12 @@ class Handler(BaseHTTPRequestHandler):
     # -- helpers ------------------------------------------------------------
 
     def _send(
-        self, status: int, body: bytes, content_type: str, extra_headers: dict[str, str] | None = None
+        self,
+        status: int,
+        body: bytes,
+        content_type: str,
+        extra_headers: dict[str, str] | None = None,
+        csp: str | None = None,
     ) -> None:
         self.send_response(status)
         self.send_header("Content-Type", content_type)
@@ -402,11 +435,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Connection", "close")
         for name, value in (extra_headers or {}).items():
             self.send_header(name, value)
-        self.send_header(
-            "Content-Security-Policy",
-            "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; "
-            "connect-src 'self'; img-src 'self' data:; form-action 'none'; base-uri 'none'",
-        )
+        self.send_header("Content-Security-Policy", csp or DEFAULT_CSP)
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)
@@ -436,6 +465,23 @@ class Handler(BaseHTTPRequestHandler):
             return True
         provided = self.headers.get("X-API-Key") or ""
         return hmac.compare_digest(provided.encode("utf-8"), expected.encode("utf-8"))
+
+    def _serve_static(self, path: str) -> None:
+        """Serve a bundled static asset from the package directory.
+
+        The path is resolved through a fixed allowlist (:data:`_STATIC_FILES`), so
+        no request string is ever joined onto a filesystem path; a traversal
+        attempt simply misses the allowlist and 404s. A missing file is a 404, not
+        a 500: the asset is optional and its absence must not break the console.
+        """
+        filename, content_type = _STATIC_FILES[path]
+        asset = pathlib.Path(__file__).resolve().parent / "static" / filename
+        try:
+            body = asset.read_bytes()
+        except OSError:
+            self._json(404, {"error": "not found"})
+            return
+        self._send(200, body, content_type, csp=CONSOLE_CSP)
 
     def _guard_allowed(self) -> bool:
         """Per-client rate limit and API-key check shared by every guard route.
@@ -537,7 +583,9 @@ class Handler(BaseHTTPRequestHandler):
             html = CONSOLE_HTML.replace("__VERSION__", __version__).replace(
                 "__DISCLAIMER__", DISCLAIMER
             )
-            self._send(200, html.encode("utf-8"), "text/html; charset=utf-8")
+            self._send(200, html.encode("utf-8"), "text/html; charset=utf-8", csp=CONSOLE_CSP)
+        elif path in _STATIC_FILES:
+            self._serve_static(path)
         elif path == "/api/health":
             self._json(200, {"status": "ok", "tool": "TRACESETTLE", "version": __version__, "read_only": True})
         elif path.startswith("/api/guard/"):

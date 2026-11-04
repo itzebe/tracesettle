@@ -41,22 +41,32 @@ from ..guard.model import (
     Decision,
     GuardDecision,
     TransactionRequest,
+    canonical_fields,
     fingerprint_of,
     parse_amount,
 )
 from ..guard.service import GuardService
 from ..model import SourceStatus
 from . import ed25519
-from .assets import AssetError, NearAsset, resolve_asset, verify_decimals
+from .assets import AssetError, NearAsset, from_base_units, resolve_asset, to_base_units, verify_decimals
 from .networks import NetworkConfig, NetworkError, NearNetwork, parse_network, verify_network_identity
 from .rpc import NearRpc
 from .txbuild import (
+    DEFAULT_FT_TRANSFER_GAS,
+    OP_FT_TRANSFER,
+    OP_TRANSFER,
     NearTransaction,
     build_ft_transfer,
     build_transfer,
     next_nonce,
 )
-from .verify import SettlementState, SettlementVerification, verify_transaction
+from .verify import (
+    IntendedOperation,
+    SettlementState,
+    SettlementVerification,
+    verify_intent,
+    verify_transaction,
+)
 
 
 class ExecutionError(ValueError):
@@ -128,6 +138,55 @@ class ExecutedOperation:
         }
 
 
+@dataclass
+class PreparedWalletOperation:
+    """An operation a **connected wallet** will sign and send itself.
+
+    Unlike :class:`PreparedOperation`, TraceSettle does not build or hold the
+    transaction bytes here: the wallet constructs its own transaction (its own
+    nonce and block hash) and broadcasts it. What TraceSettle holds is the
+    *intent* the authorization is bound to, the transaction-bound authorization,
+    and the wallet request the user must approve. Verification later checks the
+    on-chain record against that intent.
+    """
+
+    network: NearNetwork
+    account_id: str
+    receiver_id: str
+    operation: str
+    asset: NearAsset
+    amount_base: int
+    amount_human: Decimal
+    destination: str
+    decision: GuardDecision
+    wallet_request: dict[str, Any]
+    authorization: Any = None
+    authorization_id: str | None = None
+    binding: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def authorized(self) -> bool:
+        return self.decision.decision is Decision.ALLOW and self.authorization is not None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "network": self.network.value,
+            "mode": "wallet",
+            "account_id": self.account_id,
+            "receiver_id": self.receiver_id,
+            "operation": self.operation,
+            "asset": self.asset.to_dict(),
+            "amount_base_units": str(self.amount_base),
+            "amount_human": str(self.amount_human),
+            "destination": self.destination,
+            "decision": self.decision.to_dict(include_authorization=False),
+            "authorized": self.authorized,
+            "authorization_id": self.authorization_id,
+            "binding": dict(self.binding),
+            "wallet_request": self.wallet_request,
+        }
+
+
 class PreparedOperationStore:
     """A bounded, expiring, owner-scoped store of prepared operations.
 
@@ -184,6 +243,65 @@ class PreparedOperationStore:
         return prepared
 
     def take(self, prepare_id: str, owner: str) -> PreparedOperation | None:
+        with self._lock:
+            self._prune()
+            entry = self._entries.get(prepare_id)
+            if entry is None:
+                return None
+            _, entry_owner, prepared = entry
+            if entry_owner != owner:
+                return None
+            self._entries.pop(prepare_id, None)
+        return prepared
+
+
+class PreparedWalletStore:
+    """A bounded, expiring, owner-scoped store of wallet operations.
+
+    Identical discipline to :class:`PreparedOperationStore`, but for operations a
+    connected wallet will sign and send. ``peek`` is used to describe the intent
+    without consuming it; ``take`` is used when a submitted hash is verified, so
+    a single authorization verifies at most one submission.
+    """
+
+    def __init__(self, max_entries: int = 128, ttl_seconds: float = 300.0, clock=None) -> None:
+        import threading
+        import time
+
+        self._lock = threading.Lock()
+        self._entries: "OrderedDict[str, tuple[float, str, PreparedWalletOperation]]" = OrderedDict()
+        self._max = max(1, int(max_entries))
+        self._ttl = max(1.0, float(ttl_seconds))
+        self._clock = clock or time.monotonic
+
+    def _prune(self) -> None:
+        now = self._clock()
+        for key in [k for k, (at, _, _) in self._entries.items() if now - at > self._ttl]:
+            self._entries.pop(key, None)
+        while len(self._entries) > self._max:
+            self._entries.popitem(last=False)
+
+    def store(self, prepared: PreparedWalletOperation, owner: str) -> str:
+        import secrets
+
+        prepare_id = "wprep_" + secrets.token_urlsafe(18)
+        with self._lock:
+            self._entries[prepare_id] = (self._clock(), owner, prepared)
+            self._prune()
+        return prepare_id
+
+    def peek(self, prepare_id: str, owner: str) -> PreparedWalletOperation | None:
+        with self._lock:
+            self._prune()
+            entry = self._entries.get(prepare_id)
+            if entry is None:
+                return None
+            _, entry_owner, prepared = entry
+            if entry_owner != owner:
+                return None
+        return prepared
+
+    def take(self, prepare_id: str, owner: str) -> PreparedWalletOperation | None:
         with self._lock:
             self._prune()
             entry = self._entries.get(prepare_id)
@@ -368,6 +486,188 @@ class NearExecutionBoundary:
         )
 
     # -- signing boundary --------------------------------------------------
+
+    # -- wallet-mediated flow (the wallet signs and sends) -----------------
+
+    def prepare_wallet_operation(
+        self,
+        *,
+        service_id: str,
+        account_id: str,
+        receiver_id: str,
+        asset_identifier: str,
+        amount_human: str | Decimal,
+        operation: str | None = None,
+        network: str | NearNetwork | None = None,
+        memo: str | None = None,
+        gas: int = DEFAULT_FT_TRANSFER_GAS,
+        simulated: bool = False,
+        request_id: str | None = None,
+        idempotency_key: str | None = None,
+        policy_action: str | None = None,
+    ) -> PreparedWalletOperation:
+        """Authorize an operation a **connected wallet** will sign and send.
+
+        TraceSettle does not build the transaction here (the wallet owns its own
+        nonce and block hash); it binds the authorization to the *intent* - the
+        signer, the receiver, the operation, the amount and the recipient - and
+        returns the exact request the wallet must approve. Nothing is signed or
+        broadcast by this server.
+        """
+        requested = parse_network(network)
+        if requested is not self.config.network:
+            raise ExecutionError(
+                f"this server is configured for {self.config.network.value}; "
+                f"refusing a {requested.value} operation"
+            )
+        self.verify_network()
+
+        try:
+            asset = resolve_asset(self.config.network, asset_identifier)
+        except AssetError as exc:
+            raise ExecutionError(str(exc)) from exc
+        self._verify_asset_decimals(asset)
+
+        amount = parse_amount(amount_human) if not isinstance(amount_human, Decimal) else amount_human
+        amount_base = to_base_units(amount, asset)
+        if amount_base <= 0:
+            raise ExecutionError("the amount must be greater than zero")
+
+        if asset.is_native:
+            guard_operation = "WITHDRAWAL"
+            wallet_request = {
+                "signerId": account_id,
+                "receiverId": receiver_id,
+                "actions": [{"type": "Transfer", "params": {"deposit": str(amount_base)}}],
+            }
+        else:
+            guard_operation = "WITHDRAWAL"
+            args: dict[str, Any] = {"receiver_id": receiver_id, "amount": str(amount_base)}
+            if memo is not None:
+                args["memo"] = memo
+            wallet_request = {
+                "signerId": account_id,
+                "receiverId": asset.contract or "",
+                "actions": [{
+                    "type": "FunctionCall",
+                    "params": {
+                        "methodName": "ft_transfer",
+                        "args": args,
+                        "gas": str(gas),
+                        "deposit": "1",
+                    },
+                }],
+            }
+
+        request = TransactionRequest(
+            request_id=request_id or f"near-wallet-{service_id}",
+            service_id=service_id,
+            operation=operation or guard_operation,
+            chain=guard_chain_for(self.config.network),
+            asset=asset.identifier.upper(),
+            amount=amount,
+            destination=receiver_id,
+            amount_raw=str(amount),
+            idempotency_key=idempotency_key,
+            simulated=simulated,
+        )
+        decision = self.guard.evaluate(request)
+        authorization = None
+        authorization_id = None
+        if decision.decision is Decision.ALLOW and decision.authorization is not None:
+            authorization = decision.authorization
+            authorization_id = getattr(authorization, "authorization_id", None)
+
+        prepared = PreparedWalletOperation(
+            network=self.config.network,
+            account_id=account_id,
+            receiver_id=wallet_request["receiverId"],
+            operation=OP_TRANSFER if asset.is_native else OP_FT_TRANSFER,
+            asset=asset,
+            amount_base=amount_base,
+            amount_human=from_base_units(amount_base, asset),
+            destination=receiver_id,
+            decision=decision,
+            wallet_request=wallet_request,
+            authorization=authorization,
+            authorization_id=authorization_id,
+        )
+        prepared.binding = self.wallet_binding_fields(prepared)
+        return prepared
+
+    def wallet_binding_fields(self, prepared: PreparedWalletOperation) -> dict[str, str]:
+        """The canonical parameter set a wallet operation's authorization covers."""
+        return canonical_fields(
+            service_id=self._wallet_service_id(prepared),
+            operation="WITHDRAWAL",
+            chain=guard_chain_for(prepared.network),
+            asset=prepared.asset.identifier.upper(),
+            amount=from_base_units(prepared.amount_base, prepared.asset),
+            destination=prepared.destination,
+        )
+
+    @staticmethod
+    def _wallet_service_id(prepared: PreparedWalletOperation) -> str:
+        return prepared.decision.request.service_id if prepared.decision.request else ""
+
+    def verify_wallet_submission(
+        self, prepared: PreparedWalletOperation, tx_hash: str
+    ) -> SettlementVerification:
+        """Verify a wallet-submitted transaction against the authorized intent.
+
+        The wallet has already signed and broadcast, so there are no bytes to
+        bind at this point. What is checked is that the authorization still
+        covers the intent (consuming the single-use nonce, so one authorization
+        verifies at most one submission) and that the on-chain record matches the
+        intent: signer, receiver, operation, amount and recipient. A wallet or
+        provider ``SUCCESS`` alone never establishes ``VERIFIED``.
+        """
+        if not prepared.authorized:
+            raise ExecutionError(
+                f"refusing to verify: the decision was {prepared.decision.decision.value}"
+            )
+        expected = fingerprint_of(self.wallet_binding_fields(prepared))
+        verification = self.guard.authority.validate(
+            prepared.authorization,
+            expected=expected,
+            consume=True,
+            expected_service_id=self._wallet_service_id(prepared) or None,
+        )
+        if not verification.valid:
+            raise ExecutionError(
+                "the authorization does not cover this operation "
+                f"({verification.state.value}); refusing"
+            )
+        intended = IntendedOperation(
+            network=prepared.network,
+            signer_id=prepared.account_id,
+            operation=prepared.operation,
+            receiver_id=prepared.receiver_id,
+            amount_base=prepared.amount_base,
+            destination=prepared.destination,
+            contract=prepared.asset.contract,
+        )
+        result = self.rpc.tx_status(tx_hash, prepared.account_id)
+        return verify_intent(intended=intended, result=result.data, source_status=result.status)
+
+    def wallet_execution_info(self) -> dict[str, Any]:
+        """Describe the wallet flow for the UI. Holds no key and never signs."""
+        return {
+            "enabled": True,
+            "mode": "wallet",
+            "network": self.config.network.value,
+            "signs": False,
+            "broadcasts": False,
+            "note": (
+                "The connected wallet signs and sends the transaction. This "
+                "boundary authorizes the intent, binds it to the transaction, and "
+                "independently verifies the on-chain result. It holds no key."
+            ),
+            "explorer": {
+                "testnet": "https://testnet.nearblocks.io/txns/",
+                "mainnet": "https://nearblocks.io/txns/",
+            },
+        }
 
     def verify_binding(self, prepared: PreparedOperation, *, consume: bool = False) -> Any:
         """Validate the authorization against the *final* transaction.

@@ -46,6 +46,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..model import SourceStatus
+from .networks import NearNetwork
 from .txbuild import OP_FT_TRANSFER, OP_TRANSFER, NearTransaction
 
 
@@ -335,3 +336,128 @@ def _function_call_args(onchain: dict, method_name: str) -> dict | None:
         except (ValueError, TypeError, UnicodeDecodeError):
             return None
     return None
+
+
+@dataclass(frozen=True)
+class IntendedOperation:
+    """What a wallet-signed transaction was *supposed* to do.
+
+    A wallet signs and sends its own transaction, so the exact nonce, block hash
+    and serialized bytes are chosen by the wallet, not by TraceSettle. The
+    independently checkable facts are the ones the authorization was bound to:
+    the signer, the receiver, the operation, the amount, and (for a NEP-141
+    transfer) the recipient carried in the call arguments. Verification checks
+    the on-chain record against exactly these - never against amount or
+    timestamp similarity.
+    """
+
+    network: NearNetwork
+    signer_id: str
+    operation: str
+    receiver_id: str
+    amount_base: int
+    destination: str
+    contract: str | None = None
+
+
+def verify_intent(
+    *,
+    intended: IntendedOperation,
+    result: Any,
+    source_status: SourceStatus,
+) -> SettlementVerification:
+    """Verify a wallet-submitted transaction against the intended operation.
+
+    The same discipline as :func:`verify_transaction`: only the on-chain record
+    establishes a state, a provider/wallet ``SUCCESS`` alone never does, and a
+    contradiction is ``DISPUTED`` rather than ``VERIFIED``.
+    """
+    if source_status is not SourceStatus.OK or not isinstance(result, dict):
+        return SettlementVerification(
+            state=SettlementState.INSUFFICIENT_EVIDENCE,
+            source_status=source_status.value,
+            note="the transaction record could not be obtained; no conclusion is drawn",
+            checks=[Check("record_available", False, source_status.value)],
+        )
+
+    checks: list[Check] = []
+    onchain = result.get("transaction", {}) or {}
+    finality = str(result.get("final_execution_status", ""))
+    status_kind = _get_status_kind(result.get("status"))
+
+    # 1. the signer is the account whose wallet signed.
+    checks.append(
+        Check("signer_matches", str(onchain.get("signer_id", "")) == intended.signer_id,
+              f"expected {intended.signer_id}, got {onchain.get('signer_id')}")
+    )
+    # 2. the transaction's receiver is the one we intended (the token contract
+    #    for a NEP-141 transfer, the recipient for a native transfer).
+    checks.append(
+        Check("receiver_matches", str(onchain.get("receiver_id", "")) == intended.receiver_id,
+              f"expected {intended.receiver_id}, got {onchain.get('receiver_id')}")
+    )
+    # 3. finality. Only the network's own FINAL counts.
+    is_final = finality == "FINAL"
+    checks.append(Check("final", is_final, f"final_execution_status={finality or 'unknown'}"))
+    # 4. execution outcome.
+    checks.append(Check("execution_success", status_kind == "success", f"status={status_kind}"))
+
+    evidence: dict[str, Any] = {
+        "tx_hash": str(onchain.get("hash", "")),
+        "signer_id": onchain.get("signer_id"),
+        "receiver_id": onchain.get("receiver_id"),
+        "nonce": onchain.get("nonce"),
+        "final_execution_status": finality,
+        "status": status_kind,
+        "block_hash": (result.get("transaction_outcome", {}) or {}).get("block_hash"),
+    }
+
+    # 5. the intended operation is present and matches in amount and recipient.
+    if intended.operation == OP_TRANSFER:
+        deposit = _transfer_deposit(onchain)
+        checks.append(
+            Check("transfer_amount_matches", deposit == intended.amount_base,
+                  f"expected {intended.amount_base} yoctoNEAR, found {deposit}")
+        )
+        evidence["transfer_deposit_yocto"] = deposit
+    elif intended.operation == OP_FT_TRANSFER:
+        args = _function_call_args(onchain, "ft_transfer")
+        recipient = (args or {}).get("receiver_id")
+        amount = (args or {}).get("amount")
+        checks.append(
+            Check("ft_transfer_args_match",
+                  recipient == intended.destination and str(amount) == str(intended.amount_base),
+                  f"receiver_id={recipient}, amount={amount}")
+        )
+        events = _ft_transfer_events(result)
+        match = [e for e in events if str(e.get("amount")) == str(intended.amount_base)
+                 and e.get("new_owner_id") == intended.destination
+                 and e.get("old_owner_id") == intended.signer_id]
+        checks.append(
+            Check("ft_transfer_event_matches", bool(match),
+                  f"{len(events)} ft_transfer event(s); {len(match)} matched the intended transfer")
+        )
+        evidence["ft_transfer_events"] = events
+    else:
+        checks.append(Check("operation_recognised", False, f"unknown operation {intended.operation}"))
+
+    hard_fail = [c for c in checks if not c.ok and c.name in {
+        "signer_matches", "receiver_matches", "execution_success",
+        "transfer_amount_matches", "ft_transfer_args_match",
+    }]
+    semantic_missing = [c for c in checks if not c.ok and c.name in {"ft_transfer_event_matches"}]
+
+    if status_kind == "failure":
+        return SettlementVerification(SettlementState.FAILED, checks, evidence, finality,
+                                      "the transaction executed and failed on-chain")
+    if hard_fail:
+        return SettlementVerification(SettlementState.DISPUTED, checks, evidence, finality,
+                                      "the on-chain record contradicts the intended operation")
+    if not is_final:
+        return SettlementVerification(SettlementState.PENDING, checks, evidence, finality,
+                                      "the transaction has not reached finality")
+    if semantic_missing:
+        return SettlementVerification(SettlementState.CONFIRMED, checks, evidence, finality,
+                                      "final and successful, but the transfer event could not be fully checked")
+    return SettlementVerification(SettlementState.VERIFIED, checks, evidence, finality,
+                                  "every required check passed on the on-chain record")

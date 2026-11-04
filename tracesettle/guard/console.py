@@ -266,6 +266,27 @@ CONSOLE_HTML = """<!DOCTYPE html>
       BLOCK, HOLD or UNKNOWN. Nothing here signs or broadcasts a transaction.</p>
 
     <div class="panel">
+      <h2>Connect a NEAR wallet</h2>
+      <p class="small">Connect a NEAR wallet, then authorize and send one transfer. TraceSettle
+        evaluates the real operation against the operator's policy <strong>before</strong> the wallet
+        signs, binds the authorization to the exact transaction, and independently verifies the
+        on-chain result afterwards. The <strong>wallet</strong> signs and sends; this server never
+        holds a key. This panel is active only when the server enables the NEAR execution boundary
+        (<span class="mono">TRACESETTLE_NEAR_EXECUTION=1</span>).</p>
+      <div id="wallet-connect"></div>
+      <div class="row" style="margin-top:12px">
+        <div class="field"><label for="w-receiver">Recipient</label>
+          <input type="text" id="w-receiver" placeholder="recipient.testnet" autocomplete="off"></div>
+        <div class="field"><label for="w-amount">Amount (NEAR)</label>
+          <input type="text" id="w-amount" value="0.02" autocomplete="off"></div>
+      </div>
+      <div class="actions" style="margin-top:12px">
+        <button class="act primary" type="button" id="w-send" disabled>Authorize, sign and send</button>
+      </div>
+      <div id="wallet-output" aria-live="polite"></div>
+    </div>
+
+    <div class="panel">
       <h2>Policy scope</h2>
       <p class="small">An Intents policy protects the INTENTS path. A native NEAR/EVM/Solana
         request is <strong>not</strong> protected by its destinations, budget, timelock, schedule or
@@ -502,6 +523,7 @@ CONSOLE_HTML = """<!DOCTYPE html>
   TRACESETTLE prevents an unauthorized transaction from reaching a signer that consults it. It does
   not sign, hold funds, or broadcast to any chain.
 </footer>
+<script src="/assets/near-connect.js"></script>
 <script>
 "use strict";
 const S = { key: "", tab: "overview", investigations: [] };
@@ -726,6 +748,7 @@ async function loadNear() {
   scopeEl.innerHTML = loading("Loading policy scope…");
   keysEl.innerHTML = loading("Loading access-key analysis…");
   attacksEl.innerHTML = "";
+  loadWallet();
   try {
     const scope = await api("GET", "/api/guard/near/policy-scope");
     const rows = Object.keys(scope.scope).map((name) => {
@@ -831,6 +854,177 @@ async function evalNear(approved) {
       '<div class="small">Findings: ' +
       esc((d.findings || []).map((f) => f.code).join(", ")) + "</div></div>";
   } catch (err) { out.innerHTML = '<div class="note bad">' + esc(err.message) + "</div>"; }
+}
+
+/* ---- NEAR wallet-mediated flow (the connected wallet signs and sends) ---- */
+const WALLET = { connector: null, accountId: null, info: null };
+
+async function loadWallet() {
+  const connectEl = document.getElementById("wallet-connect");
+  const out = document.getElementById("wallet-output");
+  const sendBtn = document.getElementById("w-send");
+  out.innerHTML = "";
+  let info;
+  try {
+    info = await api("GET", "/api/guard/near/wallet");
+  } catch (err) {
+    connectEl.innerHTML = '<div class="note bad">' + esc(err.message) + "</div>";
+    return;
+  }
+  WALLET.info = info;
+  if (!info.enabled) {
+    connectEl.innerHTML = '<div class="note sim">' +
+      esc(info.note || "The NEAR wallet flow is disabled on this server.") + "</div>";
+    sendBtn.disabled = true;
+    return;
+  }
+  if (!window.TraceSettleWallet) {
+    connectEl.innerHTML = '<div class="note bad">The bundled wallet connector did not load, ' +
+      "so a wallet cannot be connected from this page.</div>";
+    sendBtn.disabled = true;
+    return;
+  }
+  const network = info.network || "testnet";
+  connectEl.innerHTML =
+    '<div class="actions"><button class="act primary" type="button" id="w-connect">Connect wallet</button>' +
+    '<span id="w-account" class="small muted" style="margin-left:10px">not connected</span></div>' +
+    '<div class="small muted" style="margin-top:8px">Network: ' + esc(network) +
+    ". The wallet signs and sends; this server authorizes and independently verifies.</div>";
+  document.getElementById("w-connect").onclick = () => connectWallet(network);
+  sendBtn.onclick = sendWalletOperation;
+}
+
+async function connectWallet(network) {
+  const accountEl = document.getElementById("w-account");
+  accountEl.textContent = "connecting…";
+  try {
+    if (!WALLET.connector) {
+      WALLET.connector = new window.TraceSettleWallet.NearConnector({ network: network });
+      WALLET.connector.on("wallet:signIn", (t) => {
+        const accounts = t.accounts || [];
+        WALLET.accountId = accounts.length ? accounts[0].accountId : null;
+        accountEl.textContent = WALLET.accountId || "not connected";
+        document.getElementById("w-send").disabled = !WALLET.accountId;
+      });
+      WALLET.connector.on("wallet:signOut", () => {
+        WALLET.accountId = null;
+        accountEl.textContent = "not connected";
+        document.getElementById("w-send").disabled = true;
+      });
+    }
+    await WALLET.connector.connect();
+    if (!WALLET.accountId) {
+      try {
+        const connected = await WALLET.connector.getConnectedWallet();
+        if (connected && connected.accounts && connected.accounts.length) {
+          WALLET.accountId = connected.accounts[0].accountId;
+        }
+      } catch (ignore) { /* no restored session */ }
+    }
+    accountEl.textContent = WALLET.accountId || "not connected";
+    document.getElementById("w-send").disabled = !WALLET.accountId;
+  } catch (err) {
+    accountEl.textContent = "connection failed";
+    document.getElementById("wallet-output").innerHTML =
+      '<div class="note bad">' + esc(err && err.message ? err.message : String(err)) + "</div>";
+  }
+}
+
+async function sendWalletOperation() {
+  const out = document.getElementById("wallet-output");
+  const sendBtn = document.getElementById("w-send");
+  if (!WALLET.accountId || !WALLET.connector) {
+    out.innerHTML = '<div class="note bad">Connect a wallet first.</div>';
+    return;
+  }
+  const receiver = document.getElementById("w-receiver").value.trim();
+  const amount = document.getElementById("w-amount").value.trim();
+  if (!receiver || !amount) {
+    out.innerHTML = '<div class="note bad">A recipient and an amount are required.</div>';
+    return;
+  }
+  sendBtn.disabled = true;
+  out.innerHTML = loading("Authorizing the operation against policy…");
+  try {
+    const prepared = await api("POST", "/api/guard/near/wallet/prepare", {
+      service_id: "treasury-agent",
+      account_id: WALLET.accountId,
+      receiver_id: receiver,
+      asset: "near:native",
+      amount: amount,
+    });
+    const decision = (prepared.decision || {}).decision || "UNKNOWN";
+    if (!prepared.authorized) {
+      out.innerHTML = '<div class="card"><div class="kv"><dt>Authorization</dt><dd>' +
+        status(decision) + "</dd></div>" +
+        '<div class="small">The operation was not authorized, so nothing is sent to the wallet. ' +
+        "No authorization means nothing to sign.</div>" + decisionFindings(prepared.decision) + "</div>";
+      return;
+    }
+    out.innerHTML = '<div class="card"><div class="kv"><dt>Authorization</dt><dd>' + status("ALLOW") +
+      "</dd><dt>Amount</dt><dd>" + esc(prepared.amount_human) + " NEAR</dd>" +
+      '<dt>Recipient</dt><dd class="mono small">' + esc(prepared.destination) + "</dd></div>" +
+      '<div class="small">The wallet will now ask you to approve this exact transfer. ' +
+      "The authorization is bound to these parameters.</div></div>" +
+      loading("Waiting for the wallet to sign and send…");
+    let outcome;
+    try {
+      const wallet = await WALLET.connector.wallet();
+      outcome = await wallet.signAndSendTransaction(prepared.wallet_request);
+    } catch (werr) {
+      out.innerHTML = '<div class="note bad">The wallet did not send the transaction: ' +
+        esc(werr && werr.message ? werr.message : String(werr)) + "</div>";
+      return;
+    }
+    const txHash = extractTxHash(outcome);
+    if (!txHash) {
+      out.innerHTML = '<div class="note bad">The wallet returned no transaction hash, ' +
+        "so settlement cannot be independently verified.</div>";
+      return;
+    }
+    out.innerHTML = loading("Verifying settlement against the on-chain record…");
+    const verified = await api("POST", "/api/guard/near/wallet/verify", {
+      prepare_id: prepared.prepare_id,
+      tx_hash: txHash,
+    });
+    out.innerHTML = renderWalletVerification(verified);
+  } catch (err) {
+    out.innerHTML = '<div class="note bad">' + esc(err.message) + "</div>";
+  } finally {
+    sendBtn.disabled = !WALLET.accountId;
+  }
+}
+
+function extractTxHash(outcome) {
+  if (!outcome) return null;
+  if (outcome.transaction && outcome.transaction.hash) return outcome.transaction.hash;
+  if (outcome.transaction_outcome && outcome.transaction_outcome.id) return outcome.transaction_outcome.id;
+  return null;
+}
+
+function decisionFindings(decision) {
+  const list = (decision && decision.findings) || [];
+  if (!list.length) return "";
+  return '<div class="small">Findings: ' + esc(list.map((f) => f.code).join(", ")) + "</div>";
+}
+
+function renderWalletVerification(verified) {
+  const v = verified.verification || {};
+  const checks = (v.checks || []).map((c) =>
+    "<tr><td>" + esc(c.name) + '</td><td class="' + (c.ok ? "s-ALLOW" : "s-BLOCK") + '">' +
+    (c.ok ? "pass" : "fail") + '</td><td class="small">' + esc(c.detail) + "</td></tr>").join("");
+  const explorer = (WALLET.info && WALLET.info.explorer) || {};
+  const base = explorer[WALLET.info && WALLET.info.network] || "";
+  return '<div class="card"><div class="kv"><dt>Settlement</dt><dd>' + status(v.state) +
+    '</dd><dt>Transaction</dt><dd class="mono small">' + esc(verified.tx_hash) + "</dd>" +
+    '<dt>Independent evidence</dt><dd class="small">' + esc(v.note || "") + "</dd></div>" +
+    (base ? '<div class="small"><a href="' + esc(base + verified.tx_hash) +
+      '" target="_blank" rel="noopener noreferrer">View the transaction on the explorer</a></div>' : "") +
+    '<table class="table"><caption class="small">Checks performed on the on-chain record</caption>' +
+    "<thead><tr><th>Check</th><th>Result</th><th>Detail</th></tr></thead><tbody>" + checks +
+    "</tbody></table>" +
+    '<div class="small muted">The wallet success message is not evidence. The state above comes ' +
+    "from the on-chain record, checked field by field against the authorized intent.</div></div>";
 }
 
 /* ---- NEAR Intents lifecycle ---- */

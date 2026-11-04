@@ -230,3 +230,54 @@ print(json.dumps({"authorized": prepared.authorized, "decision": prepared.decisi
     result = json.loads(out.stdout.strip().splitlines()[-1])
     assert result["authorized"] is False
     assert result["decision"] == "BLOCK"
+
+
+def test_wallet_asset_is_inside_the_package():
+    """The bundled wallet connector must ship with the package, not the test tree."""
+    from tracesettle import ui
+
+    asset = PACKAGE_ROOT / "static" / "near-connect.js"
+    assert asset.is_file()
+    assert asset.stat().st_size > 10_000
+    assert "/assets/near-connect.js" in ui._STATIC_FILES
+
+
+def test_wallet_routes_answer_from_a_package_only_copy(tmp_path):
+    """The wallet info route and its asset must work with only the package shipped.
+
+    The execution boundary is enabled in-process (no test helper, no network) so
+    the wallet routes are exercised against the real handler.
+    """
+    root = _package_only_copy(tmp_path)
+    script = f"""
+import sys, threading, json, urllib.request
+sys.path.insert(0, {str(root)!r})
+import os
+os.environ["TRACESETTLE_NEAR_EXECUTION"] = "1"
+from tracesettle.ui import InvestigationServer
+
+server = InvestigationServer(("127.0.0.1", 0), timeout_seconds=5.0, max_attempts=1)
+host, port = server.server_address[:2]
+t = threading.Thread(target=server.serve_forever, daemon=True)
+t.start()
+try:
+    out = {{}}
+    for path in ("/api/guard/near/wallet", "/assets/near-connect.js"):
+        try:
+            with urllib.request.urlopen(f"http://{{host}}:{{port}}{{path}}", timeout=10) as r:
+                out[path] = r.status
+        except Exception as exc:
+            out[path] = type(exc).__name__
+    print("RESULT:" + json.dumps(out))
+finally:
+    server.shutdown()
+    server.server_close()
+    t.join(timeout=5)
+"""
+    out = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, timeout=180
+    )
+    assert out.returncode == 0, out.stderr
+    line = [ln for ln in out.stdout.splitlines() if ln.startswith("RESULT:")][-1]
+    results = json.loads(line[len("RESULT:") :])
+    assert results == {"/api/guard/near/wallet": 200, "/assets/near-connect.js": 200}, results

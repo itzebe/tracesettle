@@ -176,6 +176,8 @@ class GuardAPI:
             )
         if path == "/api/guard/near/execution":
             return self._near_execution_info()
+        if path == "/api/guard/near/wallet":
+            return self._near_wallet_info()
         if path == "/api/guard/near/access-keys":
             return ApiResponse(200, {"keys": self._near_access_keys()})
         if path == "/api/guard/near/policy-scope":
@@ -344,6 +346,14 @@ class GuardAPI:
             if not self._identity_matches(body, authenticated_service_id):
                 return ApiResponse(403, {"error": "service identity does not match the credential"})
             return self._near_execution_submit(body, authenticated_service_id)
+        if path == "/api/guard/near/wallet/prepare":
+            if not self._identity_matches(body, authenticated_service_id):
+                return ApiResponse(403, {"error": "service identity does not match the credential"})
+            return self._near_wallet_prepare(body, authenticated_service_id)
+        if path == "/api/guard/near/wallet/verify":
+            if not self._identity_matches(body, authenticated_service_id):
+                return ApiResponse(403, {"error": "service identity does not match the credential"})
+            return self._near_wallet_verify(body, authenticated_service_id)
         if path == "/api/guard/near/lifecycle":
             return self._lifecycle_create(body, authenticated_service_id)
         if path == "/api/guard/near/lifecycle/list":
@@ -561,6 +571,117 @@ class GuardAPI:
 
             store = PreparedOperationStore()
             self._near_execution_store = store
+        return store
+
+    # -- NEAR wallet-mediated flow (the connected wallet signs and sends) ---
+
+    def _near_wallet_info(self) -> ApiResponse:
+        """Describe the wallet flow. Off unless the execution boundary is on."""
+        if self.near_execution is None:
+            return ApiResponse(
+                200,
+                {
+                    "enabled": False,
+                    "mode": "wallet",
+                    "note": (
+                        "The NEAR wallet flow is disabled. Enable it with "
+                        "TRACESETTLE_NEAR_EXECUTION=1. The connected wallet signs "
+                        "and sends; this server holds no key."
+                    ),
+                },
+            )
+        info = self.near_execution.wallet_execution_info()
+        info["network_config"] = self.near_execution.config.to_dict()
+        return ApiResponse(200, info)
+
+    def _near_wallet_prepare(self, body: Any, authenticated_service_id: str | None) -> ApiResponse:
+        """Authorize a wallet operation and return the request the wallet signs.
+
+        TraceSettle does not build or broadcast the transaction here: it evaluates
+        the real intent against the operator policy and, on ALLOW, returns a
+        transaction-bound authorization plus the exact wallet request. The wallet
+        (the user's browser extension/mobile wallet) signs and sends it.
+        """
+        refused = self._require_near_execution()
+        if refused is not None:
+            return refused
+        if not isinstance(body, dict):
+            return _bad_request("request body must be a JSON object")
+        required = ("service_id", "account_id", "receiver_id", "asset", "amount")
+        missing = [f for f in required if not str(body.get(f, "")).strip()]
+        if missing:
+            return _bad_request("missing required field(s): " + ", ".join(missing))
+        from ..near.execution import ExecutionError
+
+        try:
+            prepared = self.near_execution.prepare_wallet_operation(
+                service_id=str(body["service_id"]),
+                account_id=str(body["account_id"]),
+                receiver_id=str(body["receiver_id"]),
+                asset_identifier=str(body["asset"]),
+                amount_human=str(body["amount"]),
+                network=body.get("network"),
+                memo=body.get("memo"),
+                request_id=body.get("request_id"),
+                idempotency_key=body.get("idempotency_key"),
+            )
+        except ExecutionError as exc:
+            return ApiResponse(422, {"error": str(exc)})
+        payload = prepared.to_dict()
+        if prepared.authorized:
+            owner = self._near_execution_owner(authenticated_service_id)
+            prepare_id = self.near_wallet_store().store(prepared, owner)
+            payload["prepare_id"] = prepare_id
+            payload["expires_in_seconds"] = 300
+        return ApiResponse(200, payload)
+
+    def _near_wallet_verify(self, body: Any, authenticated_service_id: str | None) -> ApiResponse:
+        """Verify a wallet-submitted transaction against the authorized intent.
+
+        The prepared operation is looked up server-side (never rebuilt from the
+        request), the single-use authorization nonce is consumed, and the on-chain
+        record is checked against the intent. The outcome is the independent
+        settlement state, not the wallet's "success".
+        """
+        refused = self._require_near_execution()
+        if refused is not None:
+            return refused
+        if not isinstance(body, dict):
+            return _bad_request("request body must be a JSON object")
+        prepare_id = str(body.get("prepare_id", "")).strip()
+        tx_hash = str(body.get("tx_hash", "")).strip()
+        if not prepare_id or not tx_hash:
+            return _bad_request("fields 'prepare_id' and 'tx_hash' are required")
+        owner = self._near_execution_owner(authenticated_service_id)
+        prepared = self.near_wallet_store().take(prepare_id, owner)
+        if prepared is None:
+            return ApiResponse(404, {"error": "unknown or expired prepare_id"})
+        from ..near.execution import ExecutionError
+
+        try:
+            verification = self.near_execution.verify_wallet_submission(prepared, tx_hash)
+        except ExecutionError as exc:
+            return ApiResponse(422, {"error": str(exc)})
+        return ApiResponse(
+            200,
+            {
+                "tx_hash": tx_hash,
+                "account_id": prepared.account_id,
+                "operation": prepared.operation,
+                "asset": prepared.asset.to_dict(),
+                "amount_human": str(prepared.amount_human),
+                "destination": prepared.destination,
+                "verification": verification.to_dict(),
+            },
+        )
+
+    def near_wallet_store(self) -> Any:
+        store = getattr(self, "_near_wallet_store", None)
+        if store is None:
+            from ..near.execution import PreparedWalletStore
+
+            store = PreparedWalletStore()
+            self._near_wallet_store = store
         return store
 
     # -- NEAR Intents lifecycle --------------------------------------------
