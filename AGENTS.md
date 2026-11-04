@@ -1333,3 +1333,44 @@ key and only authorizes the intent and verifies the on-chain result.
   Slack/SendGrid/npm credential. Every `ed25519:…` value in history is a public
   transaction **signature** (`"signature"` / `public_key` fields), never a
   `private_key`/`secret_key`. No `.env` ever tracked. **Audit PASSED.**
+
+## Release audit and wallet-flow completion (2026-11-03)
+
+- **Wallet console flow completed.** The wallet panel previously sent native NEAR
+  only, could not disconnect, and asked the wallet to sign with no final
+  confirmation. It now has an asset selector populated from the server's
+  network-scoped `supported_assets` (a testnet asset is never offered on
+  mainnet), a live parameter preview, a blocking confirmation after server
+  authorization and before signing, and a disconnect control; the approved
+  account is re-read from the wallet on every selector change so an
+  authorization is never bound to a stale identity. The server's decision is
+  unchanged and remains the only thing that permits a sign — the confirmation is
+  a human check layered on top, never a replacement. `wallet_execution_info()`
+  advertises the supported operations and the real assets.
+- **Counts:** **1155 passed, 24 skipped** (1179 collected; 1179 passed with a
+  PostgreSQL server). 29/29 invariants hold (18 core + 11 NEAR); 9/9 attack
+  scenarios pass, including from a package-only copy; pyflakes clean;
+  compileall OK; offline demo byte-identical (md5 `4864f13c…`); near demo
+  byte-identical (md5 `fc2949ef…`); runtime imports stdlib-only.
+- **Secret audit (full history, gitleaks 8.24.3, `--all`):** 10 findings, all
+  false positives (public ERC-20 contract addresses and the literal
+  `totally-invalid-key-123` placeholder). A blob-level scan of every ref found
+  no PAT, AWS key, JWT, PEM, or service credential; every `ed25519:…` value is a
+  public transaction **signature**, not a secret key. No credential in any
+  commit or blob on the TraceSettle branches.
+- **Publication blocker — stray branch `origin/knotwork-backup`.** It is an
+  unrelated history (no common ancestor with `master`; a VR "knotwork" Vite
+  prototype) that also tracks `.openhands/memory/MEMORY.md` containing a real
+  personal email, cross-project internal notes, and sandbox/tooling internals.
+  It must be **deleted before the repository is made public**. The current
+  GitHub token cannot do this: it is a GitHub App installation token with
+  `contents/issues/pull_requests/actions: write` but **no `administration`
+  permission**, so both `PATCH /repos/...` (`private:false`) and
+  `DELETE /repos/.../git/refs/heads/...` are refused `403 Resource not
+  accessible by integration`.
+- **Visibility change is blocked for the same reason.** Making
+  `itzebe/tracesettle` public requires the repository Administration permission
+  (or the owner acting in the web UI). The browser session available to the
+  agent is not authenticated, so the visibility change could not be performed
+  here. Everything else in the release workflow (audit, tests, push, PR, CI)
+  completed.
