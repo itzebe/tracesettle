@@ -193,7 +193,7 @@ NEAR tab.
 
 ## 8. Structural invariants (`guard/invariants.py`)
 
-Seventeen core guarantees (the NEAR-specific ones are listed in
+Eighteen core guarantees (the NEAR-specific ones are listed in
 `docs/NEAR_INTEGRATION.md`), each checked by *running the real code* against an
 isolated service, exposed at `GET /api/guard/invariants` and asserted in
 `tests/test_guard_invariants.py`:
