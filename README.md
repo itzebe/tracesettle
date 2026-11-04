@@ -422,6 +422,15 @@ wallet — not the server — signs and sends. The server holds no key at any po
   third-party script origin is added to the page. The console's
   `Content-Security-Policy` names only the two connector RPC origins it needs;
   every other response keeps the strict default CSP.
+- **The console offers the full transfer flow.** The wallet panel lists the
+  assets the server advertises for the configured network (so a testnet asset is
+  never offered on mainnet), previews the exact asset, recipient, amount and
+  network before anything is signed, asks for a blocking confirmation of those
+  parameters after the server authorizes and before the wallet signs, and
+  offers a disconnect control. The approved account is re-read from the wallet
+  on every change, so an authorization is never bound to a stale identity. The
+  server's decision remains the only thing that permits a sign; the confirmation
+  is a human check on top of it, never a replacement.
 
 **Locally verified:** the flow was exercised over a live local HTTP socket —
 `prepare` returns `VERIFIED`-eligible parameters, replaying a consumed
@@ -529,11 +538,11 @@ a bare interpreter.
 **1. Run the tests.**
 
 ```sh
-python -m pytest tests/ --collect-only -q   # 1175 tests collected
-python -m pytest tests/ -q                  # 1151 passed, 24 skipped
+python -m pytest tests/ --collect-only -q   # 1179 tests collected
+python -m pytest tests/ -q                  # 1155 passed, 24 skipped
 ```
-→ `1151 passed, 24 skipped`. The skips are the PostgreSQL integration
-tests; set `TRACESETTLE_TEST_PG_DSN` to a real server to run them (**1175 passed, 0 skipped**).
+→ `1155 passed, 24 skipped`. The skips are the PostgreSQL integration
+tests; set `TRACESETTLE_TEST_PG_DSN` to a real server to run them (**1179 passed, 0 skipped**).
 
 **2. Prove the enforcement boundary: a permitted request executes, a suspicious
 one cannot.**
