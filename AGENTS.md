@@ -1276,3 +1276,60 @@ execution boundary and completes the publication workflow.
   direct ancestor of the feature branch; the recovery commit `d1d17fb` is
   contained. No merge was required. Branch pushed to the existing open PR #10
   (`feat/near-security-integration` → `master`); no duplicate PR created.
+
+## Wallet-mediated execution flow (2026-11-03)
+
+Completes the mission lifecycle with a real wallet path alongside the opt-in
+server-side execution boundary. The wallet signs and sends; TraceSettle holds no
+key and only authorizes the intent and verifies the on-chain result.
+
+- **`near/verify.py`** gains `IntendedOperation` + `verify_intent()`. Because the
+  wallet chooses its own nonce and block hash, verification checks the
+  *independently checkable* facts: signer, receiver, operation, amount and
+  recipient. A wallet/provider `SUCCESS` alone never yields `VERIFIED`; a
+  contradiction is `DISPUTED`; an unfinalized tx is `PENDING`. `NearNetwork` is
+  imported at module scope (a pyflakes error was fixed here).
+- **`near/execution.py`** gains `prepare_wallet_operation()`,
+  `wallet_binding_fields()`, `verify_wallet_submission()` and
+  `PreparedWalletStore` (bounded, TTL'd, owner-scoped, single-use). The
+  authorization is bound to the canonical parameter set, not to bytes; `verify`
+  consumes the single-use nonce, so one authorization verifies at most one
+  submission.
+- **`guard/api.py`** mounts `GET /api/guard/near/wallet`,
+  `POST .../wallet/prepare`, `POST .../wallet/verify`, gated by
+  `TRACESETTLE_NEAR_EXECUTION=1` (off by default). An identity mismatch is `403`.
+- **`ui.py`** gains per-path CSP (`DEFAULT_CSP` with `default-src 'none'`;
+  `CONSOLE_CSP` adds only the two connector RPC origins) and `_serve_static()`
+  serving `/assets/near-connect.js` same-origin.
+- **`guard/console.py`** gains the "Connect a NEAR wallet" panel and `loadWallet()`,
+  wired into the tab loader map.
+- **Vendored connector:** `tracesettle/static/near-connect.js` (`@hot-labs/near-connect`
+  v0.12.0, MIT; attribution in `tracesettle/static/README.md`). No third-party
+  script origin is added to the page.
+- **Tests:** +15 `tests/test_near_wallet_api.py`, +6 console/CSP/asset assertions
+  in `tests/test_guard_ui.py`, +2 packaging tests in `tests/test_near_packaging.py`
+  (the wallet route and asset answer from a package-only copy).
+- **Counts:** **1151 passed, 24 skipped** (1175 collected; 1175 passed with a
+  PostgreSQL server). 29/29 invariants hold (18 core + 11 NEAR); 9/9 attack
+  scenarios pass; pyflakes clean; compileall OK; both demos byte-identical
+  (offline md5 `4864f13c…`, near md5 `fc2949ef…`); runtime imports stdlib-only.
+- **CI:** all four GitHub Actions jobs pass on `c39f680` (Tests and static
+  analysis; PostgreSQL shared-state integration; Vercel container image; Docker
+  build and runtime). The **Vercel** commit-status is a pre-existing
+  non-code failure ("Deployment was blocked — Git author must have access to the
+  project"), identical on every prior head (`44e2a28`, `b9e4033`, `8e4dd0e`).
+- **BLOCKED (unchanged): repository visibility.** The `ghu_` integration token
+  has no `Administration` permission: `PATCH /repos/itzebe/tracesettle
+  {"private":false}` → `403 Resource not accessible by integration`, and
+  `gh repo edit --visibility public` fails identically. The browser session is
+  unauthenticated (`logged_in: no`) and no PAT is available. Making the repo
+  public requires the owner to do it, or to grant the token `Administration:
+  write`.
+- **Secret audit re-run (publication gate).** gitleaks 8.18.4 full history: 57
+  `generic-api-key` findings, all false positives (public Bitcoin
+  scriptpubkeys/addresses, public ERC-20 contract addresses, an intent hash, and
+  the literal `totally-invalid-key-123` / `user:pass@db-host` placeholders).
+  Targeted scan of every blob in every ref: no PAT/AWS/JWT/PEM/OpenAI/Anthropic/
+  Slack/SendGrid/npm credential. Every `ed25519:…` value in history is a public
+  transaction **signature** (`"signature"` / `public_key` fields), never a
+  `private_key`/`secret_key`. No `.env` ever tracked. **Audit PASSED.**

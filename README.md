@@ -144,6 +144,10 @@ Where each capability stands:
   `Gjs4YNbEPBQKWB3M6MpV2zAwhvJySk7U6Q8NZnKVWCKH`). The default **simulated
   executor** never signs or broadcasts anything — that is by design, and no
   Testnet or Mainnet evidence is claimed for it.
+- **Wallet-mediated flow:** Locally verified — the authorize → prepare → verify
+  path is exercised over a live local HTTP socket (replay refused, tamper
+  `DISPUTED`). The wallet itself is what signs and broadcasts; TRACESETTLE holds
+  no key and claims no Testnet or Mainnet execution of its own for this path.
 
 Stages: `SOURCE_CHAIN_DEPOSIT`, `BRIDGE_DEPOSIT_CREDIT`, `NEAR_SETTLEMENT`,
 `DESTINATION_CHAIN_DELIVERY`, and `REFUND`.
@@ -389,6 +393,42 @@ tests substitute only the RPC transport (a network boundary), so every line of
 `near_execution_never_signs_without_authorization` and
 `near_execution_binding_covers_the_bytes`.
 
+### Wallet-mediated flow (the wallet signs and sends)
+
+The server-side boundary above is for an operator who wants TRACESETTLE to build
+and broadcast. The **wallet-mediated flow** is the other half of the mission: the
+user connects their own NEAR wallet, TRACESETTLE authorizes the *intent*, and the
+wallet — not the server — signs and sends. The server holds no key at any point.
+
+- **Routes** (mounted only when `TRACESETTLE_NEAR_EXECUTION=1`):
+  `GET /api/guard/near/wallet` describes the flow;
+  `POST /api/guard/near/wallet/prepare` runs the seven controls against the
+  actual parameters and, on `ALLOW`, returns the exact wallet request the user
+  must approve plus a transaction-bound authorization;
+  `POST /api/guard/near/wallet/verify` reconciles the submitted transaction hash
+  against the intent.
+- **The authorization is bound to the intent, not to bytes.** Because the wallet
+  chooses its own nonce and block hash, `prepare` binds the authorization to the
+  canonical parameter set (signer, receiver, operation, amount, recipient).
+  `verify` re-derives that binding, consumes the single-use nonce, and reads the
+  chain back with `verify_intent` — checking the signer, receiver, operation,
+  amount and recipient against the on-chain record.
+- **A provider or wallet `SUCCESS` never verifies on its own.** Verification is
+  the same deterministic discipline as everywhere else: a contradiction is
+  `DISPUTED`, an unfinalized transaction is `PENDING`, and only a fully matched,
+  final, successful record reaches `VERIFIED`.
+- **The connector is vendored and served same-origin.** The console loads
+  `@hot-labs/near-connect` (MIT) from `/assets/near-connect.js`, so no
+  third-party script origin is added to the page. The console's
+  `Content-Security-Policy` names only the two connector RPC origins it needs;
+  every other response keeps the strict default CSP.
+
+**Locally verified:** the flow was exercised over a live local HTTP socket —
+`prepare` returns `VERIFIED`-eligible parameters, replaying a consumed
+`prepare_id` is refused (`404`), and a tampered submission resolves to
+`DISPUTED`. Packaging tests prove the wallet route and the vendored asset are
+present in a package-only copy, so the shipped image serves them.
+
 ### Durable investigation history
 
 A settlement investigation is a conclusion drawn from live sources, and those
@@ -454,7 +494,7 @@ refusal is provable: the executor is never called unless the outcome was `ALLOW`
 | H | Native tx wrongly assumed protected by an Intents-only policy | policy-scope rejection |
 | I | Provider reports success without independent evidence | `UNKNOWN` / `UNAVAILABLE` |
 
-Nine NEAR-specific structural guarantees join the invariant set, each
+Eleven NEAR-specific structural guarantees join the invariant set, each
 mutation-tested: `near_policy_must_be_in_force`,
 `near_policy_selection_is_not_client_controlled`,
 `near_native_scope_gap_is_always_stated`,
@@ -489,11 +529,11 @@ a bare interpreter.
 **1. Run the tests.**
 
 ```sh
-python -m pytest tests/ --collect-only -q   # 1153 tests collected
-python -m pytest tests/ -q                  # 1129 passed, 24 skipped
+python -m pytest tests/ --collect-only -q   # 1175 tests collected
+python -m pytest tests/ -q                  # 1151 passed, 24 skipped
 ```
-→ `1129 passed, 24 skipped`. The skips are the PostgreSQL integration
-tests; set `TRACESETTLE_TEST_PG_DSN` to a real server to run them (**1153 passed, 0 skipped**).
+→ `1151 passed, 24 skipped`. The skips are the PostgreSQL integration
+tests; set `TRACESETTLE_TEST_PG_DSN` to a real server to run them (**1175 passed, 0 skipped**).
 
 **2. Prove the enforcement boundary: a permitted request executes, a suspicious
 one cannot.**
@@ -546,7 +586,7 @@ curl -sS -X POST http://127.0.0.1:8080/api/guard/sign \
 curl -sS http://127.0.0.1:8080/api/guard/invariants \
   | python3 -c 'import sys,json;d=json.load(sys.stdin);print("all hold:",d["all_hold"]);[print(" ",i["name"]) for i in d["invariants"]]'
 ```
-→ `all hold: True` and the twenty-seven invariant names, including the nine NEAR
+→ `all hold: True` and the twenty-nine invariant names, including the eleven NEAR
 ones (`near_policy_must_be_in_force`, `near_native_scope_gap_is_always_stated`,
 `near_function_call_key_cannot_transfer_near`,
 `near_provider_success_is_never_verified_without_evidence`,
@@ -880,7 +920,7 @@ transaction request ──▶ │ guard/rules.py      7 controls, all run  │
                         │                     validate, then execute │
                         │ guard/audit.py      hash-chained records  │
                         │ guard/monitor.py    counters + incidents  │
-                        │ guard/invariants.py 27 checked guarantees │
+                        │ guard/invariants.py 29 checked guarantees │
                         └────────────────────┬─────────────────────┘
                                              │ ALLOW + authorization
                                              ▼
@@ -953,7 +993,7 @@ identical decisions.
 | `tracesettle/guard/safeguards.py` | Durable security safeguards: the learning loop's store (SQLite). |
 | `tracesettle/guard/learning.py` | The learning loop: derive a lesson, apply safeguards (only ever tightening). |
 | `tracesettle/guard/state_pg.py` | Optional PostgreSQL backend: shared nonces, counters, revocations, idempotency. |
-| `tracesettle/guard/invariants.py` | The twenty-seven structural guarantees, checked by execution. |
+| `tracesettle/guard/invariants.py` | The twenty-nine structural guarantees, checked by execution. |
 | `tracesettle/guard/api.py` | Guard HTTP routing and JSON serialization. |
 | `tracesettle/guard/console.py` | The security operations console page. |
 | `docs/TRANSACTION_SECURITY.md` | The security layer in full, including what it does not do. |
@@ -962,7 +1002,8 @@ identical decisions.
 | `.github/workflows/ci.yml` | CI: tests, static analysis, Docker build + runtime, demo determinism. |
 | `demo/demonstrate.py` | Read-only walkthrough (live, or `--offline` replay of captures). |
 | `demo/replay_opener.py` | Offline transport that replays `evidence/raw/` through the real code. |
-| `tests/` | 1065 tests (24 PostgreSQL tests skip without `TRACESETTLE_TEST_PG_DSN`). `evidence/raw/` fixtures are real captures; `tests/fixtures/synthetic/` are clearly labelled synthetic. |
+| `tracesettle/static/near-connect.js` | Vendored `@hot-labs/near-connect` (MIT) wallet connector, served same-origin at `/assets/near-connect.js`. |
+| `tests/` | 1175 tests (24 PostgreSQL tests skip without `TRACESETTLE_TEST_PG_DSN`). `evidence/raw/` fixtures are real captures; `tests/fixtures/synthetic/` are clearly labelled synthetic. |
 | `PHASE1_FEASIBILITY.md` | Phase 1 feasibility and API verification. |
 | `submission/` | Hackathon artifacts: API payload shape, technical summary, demo post draft, publication checklist. |
 | `docs/official/` | NEAR documentation captured during Phase 1. |
@@ -1276,7 +1317,7 @@ immutable commit SHA (not a moving tag), and cancels superseded runs.
 ## Tests
 
 ```sh
-python3 -m pytest tests/ -q          # 1129 passed, 24 skipped (1153 with a server)
+python3 -m pytest tests/ -q          # 1151 passed, 24 skipped (1175 with a server)
 python3 -m pytest tests/test_guard_authorization.py -q
 python3 -m pytest tests/test_guard_invariants.py -q
 python3 -m pytest tests/test_guard_end_to_end.py -q
@@ -1336,7 +1377,7 @@ Intents), a function-call key that cannot transfer NEAR, a full-access key that
 forces review, the five outcomes, determinism, an invalid amount failing safe to
 `UNKNOWN`, a client-supplied approval flag never honoured, and the settlement
 assurance rule that a provider success claim is never independently verified
-without decisive evidence. Each of the six NEAR invariants is mutation-tested.
+without decisive evidence. Each of the eleven NEAR invariants is mutation-tested.
 
 ## Read-only guarantee
 
