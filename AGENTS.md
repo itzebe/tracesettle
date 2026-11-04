@@ -1060,9 +1060,17 @@ verification rule was weakened and no production configuration was touched.
   `a284c502` is **green**: all four jobs (Tests and static analysis, PostgreSQL
   shared-state integration, Docker build and runtime, Vercel container image)
   succeeded.
-- **Authorized actions completed:** pushed `feat/near-security-integration`
-  (`d69f9c8..a284c50`), updated PR #10. **Not done:** merge, production deploy, X
-  post, submission.
+- **Authorized actions completed:** pushed `feat/near-security-integration`,
+  updated PR #10. **Not done:** merge, production deploy, X post, submission.
+- **Final release pass (head `21cfcfc`).** Fixed the chain-allowlist bypass (see
+  the Mission 5 section), pushed `724dbba..21cfcfc`, and updated PR #10's title and
+  description. CI on `21cfcfc` is **green** — all four jobs (Tests and static
+  analysis, PostgreSQL shared-state integration, Docker build and runtime, Vercel
+  container image) succeeded. The Vercel *preview* deployment for this branch is
+  `BLOCKED` by project configuration (it is blocked for every branch commit, not
+  just this one), which leaves the commit's combined status `unstable`; it is not
+  a code or test failure. Production is unchanged on the recovery deployment
+  `dpl_2BNfzFsjRHJwmAUynBy84wYTHc3r` (`master` @ `80f8f95`), health `200`.
 
 ## Settlement-engine defect fix + independent origin verification (2026-11-04, HEAD `897ebb8`)
 
