@@ -370,11 +370,11 @@ a bare interpreter.
 **1. Run the tests.**
 
 ```sh
-python -m pytest tests/ --collect-only -q   # 996 tests collected
-python -m pytest tests/ -q                  # 972 passed, 24 skipped
+python -m pytest tests/ --collect-only -q   # 997 tests collected
+python -m pytest tests/ -q                  # 973 passed, 24 skipped
 ```
-→ `972 passed, 24 skipped`. The skips are the PostgreSQL integration
-tests; set `TRACESETTLE_TEST_PG_DSN` to a real server to run them (996 pass).
+→ `973 passed, 24 skipped`. The skips are the PostgreSQL integration
+tests; set `TRACESETTLE_TEST_PG_DSN` to a real server to run them (997 pass).
 
 **2. Prove the enforcement boundary: a permitted request executes, a suspicious
 one cannot.**
@@ -828,7 +828,7 @@ identical decisions.
 | `.github/workflows/ci.yml` | CI: tests, static analysis, Docker build + runtime, demo determinism. |
 | `demo/demonstrate.py` | Read-only walkthrough (live, or `--offline` replay of captures). |
 | `demo/replay_opener.py` | Offline transport that replays `evidence/raw/` through the real code. |
-| `tests/` | 996 tests (24 PostgreSQL tests skip without `TRACESETTLE_TEST_PG_DSN`). `evidence/raw/` fixtures are real captures; `tests/fixtures/synthetic/` are clearly labelled synthetic. |
+| `tests/` | 997 tests (24 PostgreSQL tests skip without `TRACESETTLE_TEST_PG_DSN`). `evidence/raw/` fixtures are real captures; `tests/fixtures/synthetic/` are clearly labelled synthetic. |
 | `PHASE1_FEASIBILITY.md` | Phase 1 feasibility and API verification. |
 | `submission/` | Hackathon artifacts: API payload shape, technical summary, demo post draft, publication checklist. |
 | `docs/official/` | NEAR documentation captured during Phase 1. |
@@ -1127,7 +1127,7 @@ immutable commit SHA (not a moving tag), and cancels superseded runs.
 ## Tests
 
 ```sh
-python3 -m pytest tests/ -q          # 972 passed, 24 skipped (996 with a server)
+python3 -m pytest tests/ -q          # 973 passed, 24 skipped (997 with a server)
 python3 -m pytest tests/test_guard_authorization.py -q
 python3 -m pytest tests/test_guard_invariants.py -q
 python3 -m pytest tests/test_guard_end_to_end.py -q
