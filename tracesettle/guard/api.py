@@ -199,6 +199,18 @@ class GuardAPI:
                     "all_hold": all(r.holds for r in results),
                 },
             )
+        if path == "/api/guard/safeguards":
+            return ApiResponse(
+                200,
+                {
+                    "enabled": self.service.learning.enabled,
+                    "safeguards": [s.to_dict() for s in self.service.learning.list()],
+                    "note": (
+                        "Durable safeguards learned from security failures. They only ever "
+                        "tighten a decision and never replace the operator's policy."
+                    ),
+                },
+            )
         return ApiResponse(404, {"error": "not found"})
 
     # -- NEAR helpers -------------------------------------------------------

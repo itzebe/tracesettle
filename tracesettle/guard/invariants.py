@@ -532,6 +532,114 @@ def _state_store_failure_fails_closed() -> InvariantResult:
     )
 
 
+def _learning_loop_only_tightens_and_survives_restart() -> InvariantResult:
+    """A learned safeguard tightens a later decision and never relaxes one."""
+    import tempfile
+
+    from .safeguards import SafeguardStore
+
+    with tempfile.TemporaryDirectory() as directory:
+        path = f"{directory}/safeguards.db"
+        store = SafeguardStore(path)
+        service = GuardService(policy=DEFAULT_POLICY, safeguard_store=store)
+
+        # A first request to an unapproved destination teaches a lesson.
+        first = service.evaluate_payload(_payload(request_id="learn-1", destination=_UNAPPROVED))
+        if first.learned_safeguard is None:
+            store.close()
+            return InvariantResult(
+                "learning_loop_only_tightens",
+                False,
+                "a refused unapproved-destination request taught no safeguard",
+            )
+        # A later request, larger than the one that tripped the lesson, is now
+        # tightened above the operator's own policy outcome.
+        second = service.evaluate_payload(_payload(request_id="learn-2", amount="5000"))
+        if not second.influenced_by_learning:
+            store.close()
+            return InvariantResult(
+                "learning_loop_only_tightens",
+                False,
+                "a learned safeguard did not tighten a later decision",
+            )
+        if second.decision is Decision.ALLOW or second.authorization is not None:
+            store.close()
+            return InvariantResult(
+                "learning_loop_only_tightens",
+                False,
+                "a learned safeguard still produced an ALLOW with an authorization",
+            )
+        store.close()
+
+        # The lesson is durable: a fresh service on the same store still applies it.
+        reopened = SafeguardStore(path)
+        restarted = GuardService(policy=DEFAULT_POLICY, safeguard_store=reopened)
+        after_restart = restarted.evaluate_payload(_payload(request_id="learn-3", amount="5000"))
+        holds = after_restart.influenced_by_learning and after_restart.decision is not Decision.ALLOW
+        reopened.close()
+        if not holds:
+            return InvariantResult(
+                "learning_loop_only_tightens",
+                False,
+                "a safeguard did not survive a restart",
+            )
+    return InvariantResult(
+        "learning_loop_only_tightens",
+        True,
+        "a learned safeguard tightens later decisions and survives a restart",
+    )
+
+
+def _learning_never_relaxes_the_operators_policy() -> InvariantResult:
+    """A safeguard can only ever make a decision stricter, never weaker."""
+    from .learning import apply_safeguards
+    from .safeguards import DIM_REQUIRE_APPROVAL_ABOVE, DIM_REQUIRE_VERIFICATION, Safeguard
+    from .service import request_from_payload
+
+    request = request_from_payload(_payload(amount="100"))
+    # Even a permissive-looking safeguard (a threshold far above the amount) must
+    # not change an outcome, and a verification safeguard can only HOLD.
+    below = Safeguard(
+        safeguard_id="sg_below",
+        service_id="treasury-agent",
+        asset="USDC",
+        dimension=DIM_REQUIRE_APPROVAL_ABOVE,
+        threshold=Decimal("1000000"),
+        reason_code="TEST",
+        reason="test",
+        created_at=0.0,
+    )
+    verify = Safeguard(
+        safeguard_id="sg_verify",
+        service_id="treasury-agent",
+        asset="USDC",
+        dimension=DIM_REQUIRE_VERIFICATION,
+        threshold=None,
+        reason_code="TEST",
+        reason="test",
+        created_at=0.0,
+    )
+    below_app = apply_safeguards(request, (below,))
+    verify_app = apply_safeguards(request, (verify,))
+    if below_app.applied:
+        return InvariantResult(
+            "learning_never_relaxes_policy",
+            False,
+            "a safeguard above the request amount changed the outcome",
+        )
+    if verify_app.decision is not Decision.HOLD:
+        return InvariantResult(
+            "learning_never_relaxes_policy",
+            False,
+            "a verification safeguard did not produce HOLD",
+        )
+    return InvariantResult(
+        "learning_never_relaxes_policy",
+        True,
+        "safeguards only ever tighten; none can relax an outcome",
+    )
+
+
 def _postgres_shared_state_refuses_cross_instance_replay() -> InvariantResult:
     """With the PostgreSQL backend, a second instance refuses a spent nonce.
 
@@ -1162,6 +1270,8 @@ INVARIANTS: dict[str, Callable[[], InvariantResult]] = {
     "durable_nonce_is_single_use_across_restart": _durable_nonce_is_single_use_across_restart,
     "durable_counters_survive_restart": _durable_counters_survive_restart,
     "state_store_failure_fails_closed": _state_store_failure_fails_closed,
+    "learning_loop_only_tightens": _learning_loop_only_tightens_and_survives_restart,
+    "learning_never_relaxes_policy": _learning_never_relaxes_the_operators_policy,
     "postgres_shared_state_refuses_cross_instance_replay": (
         _postgres_shared_state_refuses_cross_instance_replay
     ),
@@ -1201,6 +1311,8 @@ INVARIANT_DESCRIPTIONS: dict[str, str] = {
     "durable_nonce_is_single_use_across_restart": "A nonce consumed before a process restart is refused as a replay after it.",
     "durable_counters_survive_restart": "Window-volume and velocity counters persist across a restart; a limit is not reset by a bounce.",
     "state_store_failure_fails_closed": "An unreadable durable state store yields HOLD with no authorization, never ALLOW.",
+    "learning_loop_only_tightens": "A durable safeguard learned from a security failure tightens later decisions and survives a restart; it can never relax one.",
+    "learning_never_relaxes_policy": "A learned safeguard can only ever make a decision stricter; none can override or weaken the operator's configured policy.",
     "postgres_shared_state_refuses_cross_instance_replay": "With the PostgreSQL backend, a nonce spent by one instance is refused as a replay by another.",
     "near_policy_must_be_in_force": "A NEAR Intents policy update that is signed or requested but not APPLIED and provider-synced is never treated as active.",
     "near_policy_selection_is_not_client_controlled": "A request cannot choose the NEAR Intents policy it is evaluated against; the operator's configuration governs.",

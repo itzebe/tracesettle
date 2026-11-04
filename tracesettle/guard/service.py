@@ -45,6 +45,7 @@ from .model import (
     fingerprint_of,
     parse_amount,
 )
+from .learning import LearningLoop, SafeguardApplication
 from .monitor import SecurityMonitor
 from .policy import DEFAULT_POLICY, PolicyConfig
 from .rules import evaluate_controls
@@ -211,10 +212,14 @@ class GuardService:
         signer: ReferenceSigner | None = None,
         state_store: GuardStateStore | None = None,
         http_client: Any = None,
+        safeguard_store: Any = None,
     ) -> None:
         self.policy = policy or DEFAULT_POLICY
         self.audit = audit or AuditLog()
         self.monitor = monitor or SecurityMonitor()
+        #: The learning loop. When no safeguard store is configured it is inert,
+        #: so a deployment without durable learning behaves exactly as before.
+        self.learning = LearningLoop(safeguard_store)
         #: When set, the counters that decide velocity, volume, and rejection
         #: limits are read from and written to durable storage, so a restart does
         #: not reset a limit. When None the guard keeps its in-memory behaviour.
@@ -334,6 +339,30 @@ class GuardService:
         decision_id = f"dec_{secrets.token_hex(10)}"
         created_at = _utc_now()
 
+        # The learning loop: apply any durable safeguard learned from a previous
+        # security failure. A safeguard only ever *tightens* the decision, so this
+        # can turn an ALLOW into REQUIRE_APPROVAL or HOLD, never the reverse. It is
+        # applied before the idempotency claim so a safeguarded request never
+        # consumes a client idempotency key as if it had been authorized.
+        application = self.learning.apply(request)
+        safeguards_applied: tuple[Any, ...] = ()
+        safeguard_reasons: tuple[str, ...] = ()
+        if application.applied and application.decision is not None:
+            decision = _stricter(decision, application.decision)
+            safeguards_applied = application.safeguards
+            safeguard_reasons = application.reasons
+            findings = findings + (
+                RiskFinding(
+                    code="LEARNED_SAFEGUARD_APPLIED",
+                    severity=FindingSeverity.HIGH,
+                    title="A learned safeguard tightened this decision",
+                    detail=" ".join(application.reasons),
+                    policy="learning loop (durable safeguard)",
+                    observed={"safeguard_ids": ", ".join(application.safeguard_ids)},
+                ),
+            )
+            risk_level = _worst_severity(findings)
+
         # Idempotency: an ALLOW with a client idempotency key is claimed durably
         # before the authorization is issued, so a retried request cannot obtain a
         # second token or be accounted twice. A key already claimed is a duplicate.
@@ -369,6 +398,19 @@ class GuardService:
             )
 
         summary, explanation = _explain(decision, request, controls, findings)
+        if safeguard_reasons:
+            explanation = explanation + " " + " ".join(safeguard_reasons)
+
+        # The learning loop records the lesson of this decision, if it teaches one.
+        # It runs after the decision is fixed so a lesson can never change the
+        # decision that produced it; it only affects later requests.
+        learned_safeguard = self.learning.observe(
+            request,
+            decision,
+            tuple(f.code for f in findings),
+            decision_id=decision_id,
+        )
+
         result = GuardDecision(
             decision_id=decision_id,
             created_at=created_at,
@@ -392,6 +434,9 @@ class GuardService:
             applicable_policies=tuple(sorted({c.policy for c in controls})),
             authorization=authorization,
             simulated=request.simulated,
+            safeguards_applied=safeguards_applied,
+            safeguard_reasons=safeguard_reasons,
+            learned_safeguard=learned_safeguard,
         )
 
         if self.state_store is not None:
@@ -405,6 +450,17 @@ class GuardService:
                 request.service_id, result.authorization.authorization_id
             )
             self._volume.add(request.service_id, request.asset.strip().upper(), request.amount)
+        if result.influenced_by_learning:
+            self.learning.note_applied(
+                SafeguardApplication(
+                    decision=result.decision,
+                    reasons=result.safeguard_reasons,
+                    safeguard_ids=tuple(
+                        getattr(s, "safeguard_id", "") for s in result.safeguards_applied
+                    ),
+                    safeguards=result.safeguards_applied,
+                )
+            )
         self.monitor.record_decision(result)
         self.audit.append(
             event_type="DECISION",
@@ -653,6 +709,18 @@ class GuardService:
             "length": len(self.audit),
             "head_digest": self.audit.head_digest,
         }
+        metrics["learning"] = {
+            "enabled": self.learning.enabled,
+            "backend": getattr(self.learning.store, "backend", "in-memory")
+            if self.learning.enabled
+            else "disabled",
+            "safeguards": len(self.learning.list()),
+            "note": (
+                "durable safeguards: a security failure tightens later decisions"
+                if self.learning.enabled
+                else "learning loop disabled: no durable safeguard store is configured"
+            ),
+        }
         return metrics
 
     def incidents(self, *, status: Any = None, limit: int = 100):
@@ -748,6 +816,11 @@ def _worst_decision(controls) -> Decision:
         if candidate.severity > worst.severity:
             worst = candidate
     return worst
+
+
+def _stricter(current: Decision, candidate: Decision) -> Decision:
+    """The stricter of two decisions. Used by the learning loop, never the reverse."""
+    return candidate if candidate.severity > current.severity else current
 
 
 def _worst_severity(findings) -> FindingSeverity:

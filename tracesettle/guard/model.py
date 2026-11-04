@@ -487,10 +487,20 @@ class GuardDecision:
     #: An internal, never-exposed key material reference is deliberately absent:
     #: this process holds no private key.
     simulated: bool = False
+    #: The safeguards that changed this decision, if any (the learning loop).
+    safeguards_applied: tuple[Any, ...] = ()
+    #: Human-readable reasons each applied safeguard fired.
+    safeguard_reasons: tuple[str, ...] = ()
+    #: The lesson this decision created, if it created one.
+    learned_safeguard: Any = None
 
     @property
     def authorizes_signing(self) -> bool:
         return self.decision is Decision.ALLOW and self.authorization is not None
+
+    @property
+    def influenced_by_learning(self) -> bool:
+        return bool(self.safeguards_applied)
 
     def to_dict(self, *, include_authorization: bool = False) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -507,6 +517,16 @@ class GuardDecision:
             "controls": [c.to_dict() for c in self.controls],
             "simulated": self.simulated,
             "authorizes_signing": self.authorizes_signing,
+            "safeguards_applied": [
+                s.to_dict() if hasattr(s, "to_dict") else s for s in self.safeguards_applied
+            ],
+            "safeguard_reasons": list(self.safeguard_reasons),
+            "influenced_by_learning": self.influenced_by_learning,
+            "learned_safeguard": (
+                self.learned_safeguard.to_dict()
+                if hasattr(self.learned_safeguard, "to_dict")
+                else self.learned_safeguard
+            ),
         }
         if include_authorization and self.authorization is not None:
             out["authorization"] = self.authorization.to_dict()

@@ -88,7 +88,7 @@ Amounts are exact `Decimal`s: a limit of `0.3` admits `0.3` and refuses
 `0.30000000000000004`. Severity is compared by an explicit rank, never by the
 severity's string value (`"MEDIUM"` sorts after `"HIGH"` alphabetically).
 
-Twenty-three structural guarantees are checked by *running the real code*, on demand, at
+Twenty-seven structural guarantees are checked by *running the real code*, on demand, at
 `GET /api/guard/invariants` — including `refusal_never_reaches_the_executor` and
 `authorization_is_single_use`. Each checker is also mutation-tested: the guarded
 behaviour is deliberately broken and the checker must notice. A checker that
@@ -201,6 +201,42 @@ a confirmation.
 The same capability is exercised end to end in `tests/test_near_acceptance.py`,
 which drives the real server and the real report builder, so it cannot regress
 into an unused library.
+
+### The learning loop (durable safeguards)
+
+The mission lifecycle is *identify → authorize → protect → execute → verify →
+investigate → **learn***. The learning loop is that last step, and it is what makes
+the guard adapt rather than repeat a mistake.
+
+When a decision surfaces a security failure — a client trying to assert its own
+approval, a transfer to an unapproved or denied destination, a rolling-window
+volume breach — the lesson is recorded as a **durable safeguard** and applied to
+later decisions. A safeguard is a restriction, scoped to a service identity and
+(optionally) an asset:
+
+- `require_approval_above` — above the amount that tripped the lesson, a human must
+  approve;
+- `require_verification` — the operation needs independent verification before it
+  may sign.
+
+**Learning can only ever tighten.** A safeguard is applied *on top of* the
+operator's configured policy and the strictest of the two wins; nothing in the loop
+can grant a permission, relax a limit, or edit the policy. A lesson is drawn only
+from a recognised risk finding, never invented from an arbitrary code. A decision
+that already did the right thing (an `ALLOW`) teaches nothing. The safeguards are
+durable: they survive a restart, and the console and
+`GET /api/guard/safeguards` report them honestly. With no safeguard store
+configured (`TRACESETTLE_GUARD_SAFEGUARD_DB` unset) the loop is inert and the guard
+behaves exactly as before.
+
+```sh
+python3 demo/near_demo.py --learning-loop
+```
+→ a failure is refused and teaches a lesson, a later larger request that the policy
+alone would allow is tightened to `REQUIRE_APPROVAL`, and a request below the
+learned floor is unaffected. Two structural invariants
+(`learning_loop_only_tightens`, `learning_never_relaxes_policy`) hold this property
+and are mutation-tested.
 
 ### Independent origin-chain deposit verification
 
@@ -414,10 +450,10 @@ a bare interpreter.
 **1. Run the tests.**
 
 ```sh
-python -m pytest tests/ --collect-only -q   # 1031 tests collected
-python -m pytest tests/ -q                  # 1007 passed, 24 skipped
+python -m pytest tests/ --collect-only -q   # 1065 tests collected
+python -m pytest tests/ -q                  # 1041 passed, 24 skipped
 ```
-→ `1007 passed, 24 skipped`. The skips are the PostgreSQL integration
+→ `1041 passed, 24 skipped`. The skips are the PostgreSQL integration
 tests; set `TRACESETTLE_TEST_PG_DSN` to a real server to run them (1031 pass).
 
 **2. Prove the enforcement boundary: a permitted request executes, a suspicious
@@ -471,7 +507,7 @@ curl -sS -X POST http://127.0.0.1:8080/api/guard/sign \
 curl -sS http://127.0.0.1:8080/api/guard/invariants \
   | python3 -c 'import sys,json;d=json.load(sys.stdin);print("all hold:",d["all_hold"]);[print(" ",i["name"]) for i in d["invariants"]]'
 ```
-→ `all hold: True` and the twenty-five invariant names, including the nine NEAR
+→ `all hold: True` and the twenty-seven invariant names, including the nine NEAR
 ones (`near_policy_must_be_in_force`, `near_native_scope_gap_is_always_stated`,
 `near_function_call_key_cannot_transfer_near`,
 `near_provider_success_is_never_verified_without_evidence`,
@@ -720,6 +756,19 @@ curl -sS http://127.0.0.1:8000/api/guard/investigations/<investigation_id> \
 at the time. The record is **not** re-reconciled against live sources, and the
 console says so. Restart the server and the report is still there.
 
+**18. Watch the learning loop tighten a later decision.**
+
+```sh
+python3 demo/near_demo.py --learning-loop
+```
+→ a request to an unapproved destination is `BLOCK`ed and teaches a durable
+safeguard; a later, larger request that the operator's policy alone would `ALLOW`
+is tightened to `REQUIRE_APPROVAL`; a request at or below the learned floor is
+unaffected. The lesson is durable and only ever tightens — it never overrides the
+operator's policy. With `TRACESETTLE_GUARD_SAFEGUARD_DB` set (see
+[The learning loop store](#the-learning-loop-store)), `GET /api/guard/safeguards`
+lists the safeguards in force and the console's NEAR tab renders them.
+
 ## Supported input and honest limits
 
 | Identifier | What it can do |
@@ -792,7 +841,7 @@ transaction request ──▶ │ guard/rules.py      7 controls, all run  │
                         │                     validate, then execute │
                         │ guard/audit.py      hash-chained records  │
                         │ guard/monitor.py    counters + incidents  │
-                        │ guard/invariants.py 25 checked guarantees │
+                        │ guard/invariants.py 27 checked guarantees │
                         └────────────────────┬─────────────────────┘
                                              │ ALLOW + authorization
                                              ▼
@@ -862,8 +911,10 @@ identical decisions.
 | `tracesettle/guard/monitor.py` | Security counters and incident records. |
 | `tracesettle/guard/service.py` | Orchestration: controls → authorization → monitor → audit. |
 | `tracesettle/guard/state.py` | Durable state: `GuardStateStore` (SQLite), backend-aware `open_state_store`. |
+| `tracesettle/guard/safeguards.py` | Durable security safeguards: the learning loop's store (SQLite). |
+| `tracesettle/guard/learning.py` | The learning loop: derive a lesson, apply safeguards (only ever tightening). |
 | `tracesettle/guard/state_pg.py` | Optional PostgreSQL backend: shared nonces, counters, revocations, idempotency. |
-| `tracesettle/guard/invariants.py` | The twenty-five structural guarantees, checked by execution. |
+| `tracesettle/guard/invariants.py` | The twenty-seven structural guarantees, checked by execution. |
 | `tracesettle/guard/api.py` | Guard HTTP routing and JSON serialization. |
 | `tracesettle/guard/console.py` | The security operations console page. |
 | `docs/TRANSACTION_SECURITY.md` | The security layer in full, including what it does not do. |
@@ -872,7 +923,7 @@ identical decisions.
 | `.github/workflows/ci.yml` | CI: tests, static analysis, Docker build + runtime, demo determinism. |
 | `demo/demonstrate.py` | Read-only walkthrough (live, or `--offline` replay of captures). |
 | `demo/replay_opener.py` | Offline transport that replays `evidence/raw/` through the real code. |
-| `tests/` | 1031 tests (24 PostgreSQL tests skip without `TRACESETTLE_TEST_PG_DSN`). `evidence/raw/` fixtures are real captures; `tests/fixtures/synthetic/` are clearly labelled synthetic. |
+| `tests/` | 1065 tests (24 PostgreSQL tests skip without `TRACESETTLE_TEST_PG_DSN`). `evidence/raw/` fixtures are real captures; `tests/fixtures/synthetic/` are clearly labelled synthetic. |
 | `PHASE1_FEASIBILITY.md` | Phase 1 feasibility and API verification. |
 | `submission/` | Hackathon artifacts: API payload shape, technical summary, demo post draft, publication checklist. |
 | `docs/official/` | NEAR documentation captured during Phase 1. |
@@ -964,7 +1015,7 @@ variable and all documented in `docs/TRANSACTION_SECURITY.md`:
   replay-nonce store all have explicit caps, so a flood cannot exhaust memory.
   When durable state is configured, spent nonces and the limit counters live in
   SQLite instead, so they survive a restart (see **Durable state** below).
-- **Structural invariants, checked by execution.** Twenty-five guarantees at
+- **Structural invariants, checked by execution.** Twenty-seven guarantees at
   `GET /api/guard/invariants`, each mutation-tested so a checker that cannot fail
   is treated as a defect.
 - **Honest audit claim.** In-place modification of an audit record is detectable;
@@ -1044,6 +1095,21 @@ operator can see whether the run is durable.
   application instance. To share one set of nonces and counters across several
   replicas, select the PostgreSQL backend (below). Design and scope are in
   `docs/DURABLE_STATE.md`.
+
+### The learning loop store
+
+The learning loop (see [The learning loop](#the-learning-loop-durable-safeguards))
+needs a durable home for the safeguards it draws. Set
+`TRACESETTLE_GUARD_SAFEGUARD_DB` to a SQLite path to enable it:
+
+```sh
+TRACESETTLE_GUARD_SAFEGUARD_DB=/var/lib/tracesettle/safeguards.db \
+python3 -m tracesettle serve --host 127.0.0.1 --port 8000
+```
+→ `GET /api/guard/safeguards` lists the safeguards in force; the console's NEAR
+tab shows them. Unset, the loop is inert and the guard behaves exactly as before.
+A safeguard store that cannot be read is a **fail-closed** condition: the affected
+request is tightened to `REQUIRE_APPROVAL`, never silently allowed.
 
 ### Shared state across instances (PostgreSQL)
 
@@ -1171,7 +1237,7 @@ immutable commit SHA (not a moving tag), and cancels superseded runs.
 ## Tests
 
 ```sh
-python3 -m pytest tests/ -q          # 1007 passed, 24 skipped (1031 with a server)
+python3 -m pytest tests/ -q          # 1041 passed, 24 skipped (1065 with a server)
 python3 -m pytest tests/test_guard_authorization.py -q
 python3 -m pytest tests/test_guard_invariants.py -q
 python3 -m pytest tests/test_guard_end_to_end.py -q

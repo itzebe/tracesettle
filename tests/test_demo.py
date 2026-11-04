@@ -139,3 +139,20 @@ def test_live_demo_labels_live_mode():
     )
     assert proc.returncode == 0
     assert "--offline" in proc.stdout
+
+
+def test_near_learning_loop_demo_is_deterministic_and_passes():
+    """The learning-loop demonstration is self-contained and reproducible."""
+    proc = subprocess.run(
+        [sys.executable, str(DEMO_DIR / "near_demo.py"), "--learning-loop"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+    out = proc.stdout
+    assert "RESULT: PASS" in out
+    # The lesson tightens a later decision, and a request below the floor is fine.
+    assert "BLOCK" in out
+    assert "REQUIRE_APPROVAL" in out
+    assert "influenced by loop : True" in out

@@ -698,6 +698,7 @@ def _build_guard_service() -> GuardService:
     from .guard.audit import AuditLog
     from .guard.authorization import AuthorizationAuthority
     from .guard.policy import DEFAULT_POLICY, load_policy
+    from .guard.safeguards import open_safeguard_store
     from .guard.state import DurableReplayStore, DurableRevocationStore, open_state_store
 
     if config.GUARD_POLICY_PATH:
@@ -707,6 +708,13 @@ def _build_guard_service() -> GuardService:
     audit = AuditLog(
         path=config.GUARD_AUDIT_LOG_PATH,
         max_records=config.GUARD_AUDIT_MAX_RECORDS,
+    )
+    # The learning loop's durable store. Unset means the loop is inert; a
+    # configured path that cannot be opened raises here, so start-up fails rather
+    # than running with learning silently disabled.
+    safeguard_store = open_safeguard_store(
+        config.GUARD_SAFEGUARD_DB,
+        busy_timeout_ms=config.GUARD_SAFEGUARD_BUSY_TIMEOUT_MS,
     )
     state_store = open_state_store(
         config.GUARD_STATE_DB,
@@ -718,7 +726,7 @@ def _build_guard_service() -> GuardService:
         require_postgres=config.GUARD_REQUIRE_POSTGRES,
     )
     if state_store is None:
-        return GuardService(policy=policy, audit=audit)
+        return GuardService(policy=policy, audit=audit, safeguard_store=safeguard_store)
     authority = AuthorizationAuthority(
         replay_store=DurableReplayStore(
             state_store, counter_retention_seconds=config.GUARD_STATE_RETENTION_SECONDS
@@ -726,7 +734,13 @@ def _build_guard_service() -> GuardService:
         revocations=DurableRevocationStore(state_store),
         ttl_seconds=policy.authorization_ttl_seconds,
     )
-    return GuardService(policy=policy, audit=audit, authority=authority, state_store=state_store)
+    return GuardService(
+        policy=policy,
+        audit=audit,
+        authority=authority,
+        state_store=state_store,
+        safeguard_store=safeguard_store,
+    )
 
 
 def _build_lifecycle(guard_service: GuardService, *, upstream_cache: TtlCache | None = None) -> Any:

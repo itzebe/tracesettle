@@ -91,12 +91,87 @@ def _print_policy_scope() -> None:
     print()
 
 
+def _print_learning_loop() -> int:
+    """Demonstrate the learning loop: a failure tightens a later decision.
+
+    Fully deterministic and self-contained: it uses an in-memory safeguard store,
+    so it never writes to disk and never touches a chain.
+    """
+    import tempfile
+
+    from tracesettle.guard.policy import DEFAULT_POLICY
+    from tracesettle.guard.safeguards import SafeguardStore
+    from tracesettle.guard.service import GuardService
+
+    approved = sorted(DEFAULT_POLICY.approved_destinations)[0]
+    unapproved = "0x9f8A2c4b7e6D1f03aB5C8e2947D6f10B3aE4c5D6"
+
+    def payload(amount: str, destination: str, request_id: str) -> dict:
+        return {
+            "service_id": "treasury-agent",
+            "operation": "WITHDRAWAL",
+            "chain": "eth",
+            "asset": "USDC",
+            "amount": amount,
+            "destination": destination,
+            "request_id": request_id,
+        }
+
+    with tempfile.TemporaryDirectory() as directory:
+        store = SafeguardStore(f"{directory}/safeguards.db")
+        service = GuardService(policy=DEFAULT_POLICY, safeguard_store=store)
+
+        print("Learning loop - a security failure tightens a later decision")
+        print("-" * 70)
+        print("Step 1: an attempt to an unapproved destination is refused and teaches")
+        print("        a durable lesson (the request's amount becomes an approval floor).")
+        first = service.evaluate_payload(payload("100", unapproved, "learn-1"))
+        print(f"        decision           : {first.decision.value}")
+        learned = first.learned_safeguard
+        print(f"        learned safeguard  : {learned.reason_code if learned else '(none)'}")
+        if learned:
+            print(f"        dimension          : {learned.dimension} = {learned.threshold}")
+        print()
+
+        print("Step 2: a later, larger request to an APPROVED destination, which the")
+        print("        operator's policy alone would ALLOW, is now tightened by the lesson.")
+        second = service.evaluate_payload(payload("5000", approved, "learn-2"))
+        print(f"        decision           : {second.decision.value}")
+        print(f"        influenced by loop : {second.influenced_by_learning}")
+        for reason in second.safeguard_reasons:
+            print(f"        reason             : {reason}")
+        print()
+
+        print("Step 3: a request at or below the learned floor is unaffected.")
+        third = service.evaluate_payload(payload("50", approved, "learn-3"))
+        print(f"        decision           : {third.decision.value}")
+        print(f"        influenced by loop : {third.influenced_by_learning}")
+        print()
+
+        print("The lesson is durable and only ever tightens; it never overrides the")
+        print("operator's policy. Safeguards recorded:")
+        for sg in store.all():
+            print(f"  - {sg.safeguard_id} {sg.dimension} {sg.threshold} {sg.reason_code}")
+        print()
+
+        ok = (
+            first.decision.value == "BLOCK"
+            and learned is not None
+            and second.influenced_by_learning
+            and second.decision.value != "ALLOW"
+            and third.decision.value == "ALLOW"
+        )
+        print("RESULT:", "PASS" if ok else "FAIL")
+        return 0 if ok else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="TRACESETTLE NEAR attack demonstration")
     parser.add_argument("--scenario", help="run one scenario by id (A-I)")
     parser.add_argument("--json", action="store_true", help="emit JSON")
     parser.add_argument("--access-keys", action="store_true", help="print access-key analysis")
     parser.add_argument("--policy-scope", action="store_true", help="print the policy scope gap")
+    parser.add_argument("--learning-loop", action="store_true", help="demonstrate the learning loop")
     args = parser.parse_args(argv)
 
     if args.access_keys:
@@ -105,6 +180,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.policy_scope:
         _print_policy_scope()
         return 0
+    if args.learning_loop:
+        return _print_learning_loop()
 
     results = (run_scenario(args.scenario),) if args.scenario else run_all()
 

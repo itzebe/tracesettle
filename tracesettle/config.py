@@ -179,6 +179,18 @@ GUARD_REQUIRE_POSTGRES = (os.environ.get("TRACESETTLE_GUARD_REQUIRE_POSTGRES") o
     "on",
 }
 
+#: Optional SQLite database for durable *security safeguards* (the learning loop).
+#: When set, a security failure or unverified condition recorded from one decision
+#: becomes a persistent restriction applied to later decisions; the lesson and its
+#: effect survive a restart. Unset disables the learning loop entirely, so a
+#: deployment without this variable behaves exactly as before. A configured path
+#: that cannot be opened stops start-up rather than running with learning silently
+#: disabled.
+GUARD_SAFEGUARD_DB = os.environ.get("TRACESETTLE_GUARD_SAFEGUARD_DB") or None
+GUARD_SAFEGUARD_BUSY_TIMEOUT_MS = int(
+    os.environ.get("TRACESETTLE_GUARD_SAFEGUARD_BUSY_TIMEOUT_MS", "5000")
+)
+
 #: Per-client-IP budget for the guard endpoints. Tighter than the investigation
 #: endpoint: these endpoints make no outbound calls, so a high rate is abusive.
 GUARD_RATE_LIMIT_PER_MINUTE = int(os.environ.get("TRACESETTLE_GUARD_RATE_LIMIT_PER_MINUTE", "120"))

@@ -450,6 +450,25 @@ def test_near_scenarios_endpoint_over_http():
     assert len(body["results"]) == 9
 
 
+def test_safeguards_endpoint_reports_the_learning_loop_state():
+    """With no safeguard store configured, the loop is honestly reported disabled."""
+    with running_server() as base:
+        status, body, _ = _request("GET", base + "/api/guard/safeguards")
+    assert status == 200
+    assert body["enabled"] is False
+    assert body["safeguards"] == []
+    assert "tighten" in body["note"]
+
+
+def test_console_near_tab_has_a_learning_loop_panel():
+    with running_server() as base:
+        _, body, _ = _request("GET", base + "/console")
+    html = _html(body)
+    assert "Learning loop" in html
+    assert "durable safeguard" in html.lower()
+    assert "never overrides the operator" in html
+
+
 def test_console_near_demo_destinations_match_the_real_default_policy():
     """The console's one-click demo must use a destination the real policy approves.
 

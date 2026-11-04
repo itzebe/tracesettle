@@ -293,6 +293,15 @@ CONSOLE_HTML = """<!DOCTYPE html>
     </div>
 
     <div class="panel">
+      <h2>Learning loop (durable safeguards)</h2>
+      <p class="small">When a decision surfaces a security failure, the lesson is recorded as a
+        durable safeguard and applied to later decisions. A safeguard only ever <strong>tightens</strong>
+        a decision; it never overrides the operator's policy. With no safeguard store configured the
+        loop is inert, and this panel says so.</p>
+      <div id="near-safeguards"></div>
+    </div>
+
+    <div class="panel">
       <h2>Evaluate one agent transaction</h2>
       <p class="small">Inspects the real parameters, not the agent's explanation. The destination
         below is unapproved, so the default result is BLOCK.</p>
@@ -752,6 +761,32 @@ async function loadNear() {
   runBtn.onclick = runNearAttacks;
   document.getElementById("near-eval-legit").onclick = () => evalNear(true);
   document.getElementById("near-eval-attack").onclick = () => evalNear(false);
+
+  const sgEl = document.getElementById("near-safeguards");
+  sgEl.innerHTML = loading("Loading safeguards…");
+  try {
+    const data = await api("GET", "/api/guard/safeguards");
+    if (!data.enabled) {
+      sgEl.innerHTML = '<div class="note sim">' + esc(data.note) +
+        " No safeguard store is configured, so the learning loop is disabled and every decision " +
+        "is governed by the operator's policy alone.</div>";
+      return;
+    }
+    const list = data.safeguards || [];
+    const rows = list.map((s) =>
+      '<tr><td class="mono small">' + esc(s.safeguard_id) + "</td><td>" + esc(s.service_id) +
+      '</td><td>' + esc(s.asset || "all assets") + "</td><td>" + esc(s.dimension) +
+      "</td><td>" + esc(s.threshold === null ? "—" : s.threshold) + "</td><td>" +
+      esc(s.reason_code) + "</td><td>" + esc(String(s.applied_count)) + "</td></tr>"
+    ).join("");
+    sgEl.innerHTML = '<div class="note">' + esc(data.note) + "</div>" +
+      (list.length
+        ? '<table class="table"><caption class="small">' + list.length +
+          " durable safeguard(s) in force</caption><thead><tr><th>ID</th><th>Service</th>" +
+          "<th>Scope</th><th>Dimension</th><th>Threshold</th><th>Reason</th><th>Applied</th>" +
+          "</tr></thead><tbody>" + rows + "</tbody></table>"
+        : '<p class="small">No safeguard has been learned yet. A security failure will add one.</p>');
+  } catch (err) { sgEl.innerHTML = '<div class="note bad">' + esc(err.message) + "</div>"; }
 }
 
 async function runNearAttacks() {

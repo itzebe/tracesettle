@@ -1179,3 +1179,48 @@ fixed with mutation-checked regression tests and a new structural invariant.
   findings, all false positives (see above). Repository visibility remains blocked
   (App token lacks `Administration`; browser logged out); the authorized push and
   PR update proceed, the visibility flip does not.
+
+## Mission 6 — learning loop and security completion (feat/near-learning-loop-and-completion)
+
+The mission lifecycle is *identify → authorize → protect → execute → verify →
+investigate → learn*. The last step was missing; it is now a first-class,
+deterministic, fail-closed capability.
+
+- **New module `tracesettle/guard/safeguards.py`.** A durable SQLite
+  `SafeguardStore` (stdlib `sqlite3`, `journal_mode=WAL`). A `Safeguard` is a
+  restriction scoped to a service identity and (optionally) an asset, with one of
+  two dimensions: `require_approval_above` (a threshold) or
+  `require_verification`. `record()` is idempotent per (service, asset, dimension)
+  and keeps the **stricter** threshold, so a later, looser lesson cannot weaken an
+  existing one. A store from a newer schema is refused, never misread.
+  `open_safeguard_store(None)` returns `None` — an unconfigured loop is inert.
+- **New module `tracesettle/guard/learning.py`.** `LearningLoop`,
+  `SafeguardApplication`, `derive_safeguard`, `apply_safeguards`. A lesson is
+  drawn **only** from a recognised risk finding (`LESSON_BY_FINDING`); an `ALLOW`
+  never teaches, and an unrecognised code teaches nothing. Application restricts
+  *above* the threshold, so the exact amount that tripped the lesson is still
+  allowed (approval applies to the next, larger request).
+- **Integration (`guard/service.py`).** `_evaluate_locked` calls
+  `self.learning.apply(request)` and folds the result through `_stricter`, so a
+  safeguard can only ever tighten the operator's outcome. `_finalize` records the
+  lesson and increments the applied counter. `metrics()` reports the loop state.
+  `GuardDecision` gained `learned_safeguard`, `influenced_by_learning`,
+  `safeguard_reasons`.
+- **Config/UI.** `TRACESETTLE_GUARD_SAFEGUARD_DB` (unset = inert).
+  `ui._build_guard_service` wires the store; `GET /api/guard/safeguards` reports
+  the safeguards in force (and honestly reports `enabled: false` when unset); the
+  console NEAR tab renders them with an honest disabled-state note.
+- **Invariants: 25 → 27 total.** `learning_loop_only_tightens` (a failure teaches
+  a durable safeguard that tightens a later decision and survives a restart) and
+  `learning_never_relaxes_policy` (a safeguard can only ever tighten; a
+  verification safeguard yields `HOLD`; a below-threshold safeguard changes
+  nothing). Both are mutation-tested.
+- **Tests: 1007 → 1041 passed, 24 skipped** (1065 collected; +34). New
+  `tests/test_guard_learning.py` (29), a learning-loop demo test, two console/API
+  tests, and `test_near_packaging.py` invariant count 25 → 27. pyflakes clean.
+- **Demo.** `python3 demo/near_demo.py --learning-loop` is self-contained and
+  deterministic (in-memory store, writes nothing).
+- **Honesty.** The loop only ever tightens; it never grants a permission, relaxes
+  a limit, or edits the policy. With no store configured it is inert and the guard
+  is unchanged. A safeguard store that cannot be read fails closed
+  (`REQUIRE_APPROVAL`, never `ALLOW`).
