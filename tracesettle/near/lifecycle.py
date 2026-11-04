@@ -494,9 +494,13 @@ class NearIntentsLifecycle:
             refunded_amount=data.refunded_amount,
             amount_out=_swap_detail(data, "amountOut"),
         )
+        lifecycle_dict = lifecycle.to_dict()
+        origin_check = self._origin_verification(record)
+        if origin_check is not None:
+            lifecycle_dict["origin_verification"] = origin_check
         record, changed = self._store.apply_provider_status(
             intent_id, owner=owner, provider_status=data.status,
-            provider_updated_at=data.updated_at, observed_at=at, lifecycle=lifecycle.to_dict(),
+            provider_updated_at=data.updated_at, observed_at=at, lifecycle=lifecycle_dict,
         )
         if changed:
             self._store.append_event(
@@ -509,9 +513,63 @@ class NearIntentsLifecycle:
             "changed": changed,
             "source_status": source_status.value,
             "provider_status": data.status,
-            "lifecycle": lifecycle.to_dict(),
+            "lifecycle": lifecycle_dict,
             "deposit_address": record.deposit_address if record else None,
         }
+
+    # -- independent origin-chain verification of the recorded deposit -------
+
+    def _origin_verification(self, record: Any) -> dict[str, Any] | None:
+        """Independently check the recorded deposit hash against the origin chain.
+
+        The hash the user's wallet reported is a claim; this reads the origin
+        chain and returns a structured verdict. It is read-only and only runs when
+        a hash has actually been recorded. A check that cannot be completed (no
+        source for the chain, or a source outage) is reported as such and never
+        blocks the provider-status read that calls it.
+        """
+        from .origin_verify import origin_contract_address, verify_origin_deposit
+
+        tx_hash = getattr(record, "deposit_tx_hash", None)
+        if not tx_hash:
+            return None
+        origin_asset = getattr(record, "origin_asset", None)
+        # The origin chain is the chain the user funds from. It is recorded on the
+        # evaluated transaction; fall back to the asset id only if it is absent.
+        chain = ""
+        decision = getattr(record, "decision", None)
+        evaluated = decision.get("transaction") if isinstance(decision, dict) else None
+        if isinstance(evaluated, dict) and evaluated.get("chain"):
+            chain = str(evaluated["chain"]).strip().lower()
+        if not chain:
+            chain = _chain_of(origin_asset or "")
+        expected_amount = None
+        quote = record.quote or {}
+        q = quote.get("quote") if isinstance(quote, dict) else None
+        if isinstance(q, dict):
+            amount_in = q.get("amountIn")
+            if isinstance(amount_in, str) and amount_in.isdigit():
+                expected_amount = amount_in
+        try:
+            verification = verify_origin_deposit(
+                chain=chain,
+                tx_hash=tx_hash,
+                deposit_address=record.deposit_address or "",
+                token_contract=origin_contract_address(origin_asset),
+                expected_amount=expected_amount,
+                client=self._http,
+            )
+        except Exception as exc:  # noqa: BLE001 - never let a check break the status read
+            return {
+                "level": "UNAVAILABLE",
+                "chain": chain,
+                "tx_hash": tx_hash,
+                "summary": f"The origin-chain check could not be completed: {exc}",
+                "checks": {},
+                "evidence_url": None,
+                "limitations": [],
+            }
+        return verification.to_dict()
 
     # -- step 5: independent settlement assurance ---------------------------
 
@@ -551,6 +609,7 @@ class NearIntentsLifecycle:
             provider_reported_success=provider_success,
             expected_amount_out=expected_amount_out,
             observed_amount_out=observed_amount_out,
+            evidence=inv.evidence,
         )
         self._store.update(
             intent_id, owner=owner, updated_at=at, assurance=view.to_dict()
@@ -587,10 +646,37 @@ class NearIntentsLifecycle:
             )
             data["state"] = view.label
             data["lifecycle"] = view.to_dict()
+            # The origin-chain check is not re-run on read (that would hit the
+            # network), so carry the last recorded verdict forward.
+            if prior.get("origin_verification"):
+                data["lifecycle"]["origin_verification"] = prior["origin_verification"]
         return data
 
     def list(self, *, owner: str, limit: int = 50) -> list[dict[str, Any]]:
         return [r.to_dict() for r in self._store.list_for_owner(owner, limit=limit)]
+
+    def origin_verification(self, *, owner: str, intent_id: str) -> dict[str, Any] | None:
+        """Independently verify the recorded deposit hash against the origin chain.
+
+        Returns ``None`` when no deposit hash has been recorded. The check is
+        read-only; its verdict is also recorded on the intent so a later read
+        carries it forward without another network call.
+        """
+        record = self._store.get(intent_id, owner=owner)
+        if record is None:
+            return None
+        verification = self._origin_verification(record)
+        if verification is None:
+            return None
+        at = _utc_now()
+        lifecycle = dict(record.lifecycle or {})
+        lifecycle["origin_verification"] = verification
+        self._store.update(intent_id, owner=owner, updated_at=at, lifecycle=lifecycle)
+        self._store.append_event(
+            intent_id, owner=owner, at=at, kind="ORIGIN_VERIFICATION",
+            detail={"level": verification.get("level"), "chain": verification.get("chain")},
+        )
+        return verification
 
 
 # -- helpers ----------------------------------------------------------------

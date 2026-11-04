@@ -147,7 +147,10 @@ Stages: `SOURCE_CHAIN_DEPOSIT`, `BRIDGE_DEPOSIT_CREDIT`, `NEAR_SETTLEMENT`,
 A stage is confirmed **only** by its decisive evidence, never by a neighbouring
 signal:
 
-- source deposit: the origin-chain transaction executed;
+- source deposit: the origin-chain transaction executed **and did not revert** —
+  a transaction confirmed to have reverted is `CONTRADICTORY`, never `CONFIRMED`,
+  because inclusion in a block proves only that it was mined, not that it
+  succeeded (safety invariant `reverted_execution_never_confirms`);
 - bridge deposit credit: an on-chain bridge transfer to `intents.near` carries a
   `BRIDGED_FROM` memo naming **this** deposit's origin transaction hash (for a
   Bitcoin origin, a bridge `utxo_added` event names the origin Bitcoin txid);
@@ -190,6 +193,31 @@ a confirmation.
 The same capability is exercised end to end in `tests/test_near_acceptance.py`,
 which drives the real server and the real report builder, so it cannot regress
 into an unused library.
+
+### Independent origin-chain deposit verification
+
+The deposit hash the operator's wallet reports is a **claim** until it is checked
+against the chain. `POST /api/guard/near/lifecycle/{intent_id}/verify-origin` (and
+the console's **Verify deposit on origin chain** button) reads the origin chain
+directly and compares explicit identifiers — the recipient, the token contract and
+the amount — never a provider's word and never amount/timestamp similarity. The
+verdict is one of `VERIFIED`, `UNCONFIRMED`, `CONTRADICTORY`, `NOT_FOUND`,
+`UNAVAILABLE` or `UNSUPPORTED`:
+
+- `VERIFIED` — the transaction is included, **succeeded**, and pays the deposit
+  address the expected token and amount.
+- `CONTRADICTORY` — the transaction is confirmed to have **reverted**, or it pays a
+  different recipient, so it cannot be the claimed deposit.
+- `UNCONFIRMED` — the transaction was found but a required check did not hold (an
+  unmined transaction, or a value that differs from the quote). This is
+  insufficient evidence, not proof of failure.
+- `NOT_FOUND` / `UNAVAILABLE` / `UNSUPPORTED` — a missing record, a source outage,
+  or no configured source for the chain. None is a verdict that the deposit failed.
+
+The check is read-only and never blocks the provider-status read that calls it; a
+verdict is recorded on the intent and carried forward on later reads without a
+second network call. `tests/test_near_origin_verify.py` (19 tests) covers each
+verdict, and `tests/test_near_lifecycle.py` covers the wiring and persistence.
 
 ### NEAR Intents lifecycle
 
@@ -238,7 +266,7 @@ settle → assurance flow:
 
 The lifecycle never signs, submits, or moves funds: it obtains a deposit address,
 hands it to the operator, and observes the outcome. `tests/test_near_lifecycle.py`
-(29 tests) drives the real lifecycle object and the real durable store, and
+(33 tests) drives the real lifecycle object and the real durable store, and
 `tests/test_near_acceptance.py` drives the **whole journey over a real HTTP
 socket** — create → authorize → live quote → approve → status → assurance — so a
 route wired to the wrong path, gated by the wrong flag, or answered without a body
@@ -342,11 +370,11 @@ a bare interpreter.
 **1. Run the tests.**
 
 ```sh
-python -m pytest tests/ --collect-only -q   # 965 tests collected
-python -m pytest tests/ -q                  # 941 passed, 24 skipped
+python -m pytest tests/ --collect-only -q   # 996 tests collected
+python -m pytest tests/ -q                  # 972 passed, 24 skipped
 ```
-→ `941 passed, 24 skipped`. The skips are the PostgreSQL integration
-tests; set `TRACESETTLE_TEST_PG_DSN` to a real server to run them (965 pass).
+→ `972 passed, 24 skipped`. The skips are the PostgreSQL integration
+tests; set `TRACESETTLE_TEST_PG_DSN` to a real server to run them (996 pass).
 
 **2. Prove the enforcement boundary: a permitted request executes, a suspicious
 one cannot.**
@@ -745,7 +773,7 @@ investigation.py ── orchestrates adapters, correlates via explicit ids
 model.py ── normalized EvidenceItem stream
    │
    ▼
-reconcile.py ── deterministic engine, 11 safety invariants
+reconcile.py ── deterministic engine, 12 safety invariants
    │
    ▼
 report.py ── JSON + Markdown investigation report
@@ -800,7 +828,7 @@ identical decisions.
 | `.github/workflows/ci.yml` | CI: tests, static analysis, Docker build + runtime, demo determinism. |
 | `demo/demonstrate.py` | Read-only walkthrough (live, or `--offline` replay of captures). |
 | `demo/replay_opener.py` | Offline transport that replays `evidence/raw/` through the real code. |
-| `tests/` | 965 tests (24 PostgreSQL tests skip without `TRACESETTLE_TEST_PG_DSN`). `evidence/raw/` fixtures are real captures; `tests/fixtures/synthetic/` are clearly labelled synthetic. |
+| `tests/` | 996 tests (24 PostgreSQL tests skip without `TRACESETTLE_TEST_PG_DSN`). `evidence/raw/` fixtures are real captures; `tests/fixtures/synthetic/` are clearly labelled synthetic. |
 | `PHASE1_FEASIBILITY.md` | Phase 1 feasibility and API verification. |
 | `submission/` | Hackathon artifacts: API payload shape, technical summary, demo post draft, publication checklist. |
 | `docs/official/` | NEAR documentation captured during Phase 1. |
@@ -1099,7 +1127,7 @@ immutable commit SHA (not a moving tag), and cancels superseded runs.
 ## Tests
 
 ```sh
-python3 -m pytest tests/ -q          # 941 passed, 24 skipped (965 with a server)
+python3 -m pytest tests/ -q          # 972 passed, 24 skipped (996 with a server)
 python3 -m pytest tests/test_guard_authorization.py -q
 python3 -m pytest tests/test_guard_invariants.py -q
 python3 -m pytest tests/test_guard_end_to_end.py -q

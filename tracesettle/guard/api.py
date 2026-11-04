@@ -583,6 +583,14 @@ class GuardAPI:
                 )
             if action == "status":
                 return ApiResponse(200, self.lifecycle.refresh_status(owner=owner, intent_id=intent_id))
+            if action == "verify-origin":
+                record = self.lifecycle.get(owner=owner, intent_id=intent_id)
+                if record is None:
+                    return ApiResponse(404, {"error": "no such intent"})
+                verification = self.lifecycle.origin_verification(owner=owner, intent_id=intent_id)
+                if verification is None:
+                    return _bad_request("no deposit transaction hash has been recorded for this intent")
+                return ApiResponse(200, {"intent_id": intent_id, "origin_verification": verification})
             if action == "assurance":
                 return ApiResponse(200, self.lifecycle.assurance(owner=owner, intent_id=intent_id))
             if action == "get":

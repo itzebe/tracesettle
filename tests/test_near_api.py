@@ -438,3 +438,52 @@ def test_lifecycle_transaction_level_key_wins_over_the_top_level_key(tmp_path):
         {"transaction": _tx(amount="1000", operation="WITHDRAWAL"), "idempotency_key": "top-level"},
     )
     assert other.payload["intent_id"] != created.payload["intent_id"]
+
+
+def test_lifecycle_verify_origin_action(tmp_path):
+    """The verify-origin action independently checks the recorded deposit hash."""
+    api, lifecycle, opener = _lifecycle_api(tmp_path)
+    created = api.dispatch(
+        "POST",
+        "/api/guard/near/lifecycle",
+        {},
+        {"transaction": _tx(amount="1000000")},
+    )
+    assert created.status == 200
+    intent_id = created.payload["intent_id"]
+    opener.json("POST", "/v0/quote", {"quote": {"depositAddress": APPROVED}, "correlationId": "c"})
+    api.dispatch("POST", f"/api/guard/near/lifecycle/{intent_id}/quote", {}, {"dry": False})
+    api.dispatch("POST", f"/api/guard/near/lifecycle/{intent_id}/approve", {}, {"approve": True})
+    opener.json("POST", "/v0/deposit/submit", {"status": "ok"})
+    api.dispatch(
+        "POST",
+        f"/api/guard/near/lifecycle/{intent_id}/deposit",
+        {},
+        {"deposit_tx_hash": "0xuserdeposit"},
+    )
+    # The origin asset is USDC on base (an ERC-20), so the receipt must carry a
+    # matching Transfer of that token to the deposit address.
+    token = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+    topic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+    word = "0x" + APPROVED.lower().replace("0x", "").rjust(64, "0")
+    opener.json("POST", "base-rpc", {
+        "jsonrpc": "2.0", "id": 1, "result": {
+            "transactionHash": "0xuserdeposit", "status": "0x1",
+            "from": APPROVED, "to": token, "blockNumber": "0x1",
+            "logs": [{"address": token, "topics": [topic, word, word],
+                      "data": hex(1000000), "logIndex": "0x1"}],
+        },
+    })
+    out = api.dispatch("POST", f"/api/guard/near/lifecycle/{intent_id}/verify-origin", {}, {})
+    assert out.status == 200
+    assert out.payload["origin_verification"]["level"] == "VERIFIED"
+
+
+def test_lifecycle_verify_origin_without_a_hash_is_a_bad_request(tmp_path):
+    api, _, _ = _lifecycle_api(tmp_path)
+    created = api.dispatch(
+        "POST", "/api/guard/near/lifecycle", {}, {"transaction": _tx(amount="1000000")}
+    )
+    intent_id = created.payload["intent_id"]
+    out = api.dispatch("POST", f"/api/guard/near/lifecycle/{intent_id}/verify-origin", {}, {})
+    assert out.status == 400

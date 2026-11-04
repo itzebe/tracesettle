@@ -529,3 +529,79 @@ def test_quote_rejection_is_recorded_and_blocks_the_deposit(opener, store):
         lc.record_deposit(
             owner="treasury-agent", intent_id=created["intent_id"], deposit_tx_hash="0xabc"
         )
+
+
+# -- independent origin-chain verification of the recorded deposit -----------
+
+
+def _wire_origin_receipt(opener, *, to=REAL_DEPOSIT_ADDRESS, status="0x1", logs=None):
+    opener.json("POST", "ethereum-rpc", {
+        "jsonrpc": "2.0", "id": 1, "result": {
+            "transactionHash": "0xuserdeposit",
+            "status": status,
+            "from": "0x1111111111111111111111111111111111111111",
+            "to": to,
+            "blockNumber": "0x1900000",
+            "logs": logs or [],
+        },
+    })
+
+
+def _recorded_deposit(opener, store, *, asset=USDC_ETH, hash_="0xuserdeposit"):
+    lc, _ = _lifecycle(opener, store)
+    created = lc.create_and_authorize(
+        owner="treasury-agent", payload=_intent_payload(origin_asset=asset), policy_read=None,
+        access_key=None, created_at=CREATED_AT,
+    )
+    opener.json("POST", "/v0/quote", {"quote": {"depositAddress": REAL_DEPOSIT_ADDRESS}, "correlationId": "c"})
+    lc.request_quote(owner="treasury-agent", intent_id=created["intent_id"], dry=False)
+    lc.approve_quote(owner="treasury-agent", intent_id=created["intent_id"], approve=True)
+    opener.json("POST", "/v0/deposit/submit", {"status": "ok"})
+    lc.record_deposit(
+        owner="treasury-agent", intent_id=created["intent_id"], deposit_tx_hash=hash_
+    )
+    return lc, created["intent_id"]
+
+
+def test_origin_verification_confirms_a_native_deposit(opener, store):
+    lc, intent_id = _recorded_deposit(opener, store, asset="nep141:eth.omft.near")
+    _wire_origin_receipt(opener)
+    v = lc.origin_verification(owner="treasury-agent", intent_id=intent_id)
+    assert v is not None
+    assert v["level"] == "VERIFIED"
+    assert v["chain"] == "eth"
+
+
+def test_origin_verification_is_contradictory_for_a_reverted_deposit(opener, store):
+    lc, intent_id = _recorded_deposit(opener, store, asset="nep141:eth.omft.near")
+    _wire_origin_receipt(opener, status="0x0")
+    v = lc.origin_verification(owner="treasury-agent", intent_id=intent_id)
+    assert v["level"] == "CONTRADICTORY"
+
+
+def test_origin_verification_requires_a_recorded_hash(opener, store):
+    lc, _ = _lifecycle(opener, store)
+    created = lc.create_and_authorize(
+        owner="treasury-agent", payload=_intent_payload(), policy_read=None, access_key=None,
+        created_at=CREATED_AT,
+    )
+    assert lc.origin_verification(owner="treasury-agent", intent_id=created["intent_id"]) is None
+
+
+def test_origin_verification_survives_a_read_without_a_network_call(opener, store):
+    lc, intent_id = _recorded_deposit(opener, store, asset="nep141:eth.omft.near")
+    _wire_origin_receipt(opener)
+    lc.origin_verification(owner="treasury-agent", intent_id=intent_id)
+    # A later get() must present the stored verdict without re-fetching.
+    calls_before = len(opener.calls)
+    record = lc.get(owner="treasury-agent", intent_id=intent_id)
+    assert record["lifecycle"]["origin_verification"]["level"] == "VERIFIED"
+    assert len(opener.calls) == calls_before
+
+
+def test_status_read_attaches_the_origin_verification(opener, store):
+    lc, intent_id = _recorded_deposit(opener, store, asset="nep141:eth.omft.near")
+    opener.json("GET", "/v0/status", load_raw("oneclick_status_SUCCESS.json"))
+    _wire_origin_receipt(opener)
+    out = lc.refresh_status(owner="treasury-agent", intent_id=intent_id)
+    assert out["lifecycle"]["origin_verification"]["level"] == "VERIFIED"

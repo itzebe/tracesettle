@@ -150,3 +150,21 @@ def test_all_invariants_hold_from_a_package_only_copy(tmp_path):
     result = json.loads(out.stdout.strip().splitlines()[-1])
     assert result["n"] == 23
     assert result["all_hold"] is True
+
+
+def test_origin_verifier_is_shipped_and_importable_from_the_package(tmp_path):
+    """The origin verifier must live in the shipped package, not the test tree."""
+    root = _package_only_copy(tmp_path)
+    script = (
+        "import sys;"
+        f"sys.path.insert(0, {str(root)!r});"
+        "from tracesettle.near.origin_verify import origin_contract_address, OriginVerdict;"
+        "assert origin_contract_address('nep141:eth-0x' + 'a'*40 + '.omft.near') == '0x' + 'a'*40;"
+        "assert origin_contract_address('nep141:eth.omft.near') is None;"
+        "print('ok')"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, timeout=120
+    )
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip().endswith("ok")

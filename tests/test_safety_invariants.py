@@ -34,6 +34,7 @@ def test_all_documented_invariants_are_present():
         "no_amount_or_time_correlation",
         "hash_commitment_is_not_proof",
         "simulated_evidence_never_confirms",
+        "reverted_execution_never_confirms",
     }
     assert expected == set(SAFETY_INVARIANTS)
 
@@ -836,3 +837,102 @@ def test_missing_refund_hash_is_never_fabricated():
     assert result.stage(Stage.REFUND).state is StageState.REPORTED
     assert result.outcome is OverallOutcome.REFUND_REPORTED_UNVERIFIED
     assert result.last_confirmed_stage is None
+
+
+# 12. A confirmed revert never confirms a stage.
+
+
+def test_reverted_origin_transaction_is_never_confirmed():
+    """A confirmed REVERTED origin tx must not confirm the deposit stage."""
+    result = reconcile(
+        [
+            ev(
+                "ev-origin-included",
+                Stage.SOURCE_CHAIN_DEPOSIT,
+                EventType.SOURCE_TX_INCLUDED,
+                Verification.CONFIRMED,
+                source="evm_rpc",
+                reported_status="REVERTED",
+                tx_hash="0xreverted",
+                chain="eth",
+                details={"execution_succeeded": False},
+            ),
+            ev(
+                "ev-origin-executed",
+                Stage.SOURCE_CHAIN_DEPOSIT,
+                EventType.SOURCE_TX_EXECUTED,
+                Verification.CONFIRMED,
+                source="evm_rpc",
+                reported_status="REVERTED",
+                tx_hash="0xreverted",
+                chain="eth",
+                details={"execution_succeeded": False},
+            ),
+        ],
+        {"evm_rpc": SourceStatus.OK},
+    )
+    assert result.stage(Stage.SOURCE_CHAIN_DEPOSIT).state is not StageState.CONFIRMED
+    assert result.stage(Stage.SOURCE_CHAIN_DEPOSIT).state is StageState.CONTRADICTORY
+    assert result.safety["reverted_execution_never_confirms"] is True
+    _assert_no_invariant_violated(result)
+
+
+def test_reverted_destination_transaction_is_never_confirmed():
+    result = reconcile(
+        [
+            ev(
+                "ev-dest-executed",
+                Stage.DESTINATION_CHAIN_DELIVERY,
+                EventType.DESTINATION_TX_EXECUTED,
+                Verification.CONFIRMED,
+                source="evm_rpc",
+                reported_status="REVERTED",
+                tx_hash="0xreverted",
+                chain="base",
+                details={"execution_succeeded": False},
+            ),
+        ],
+        {"evm_rpc": SourceStatus.OK},
+    )
+    assert result.stage(Stage.DESTINATION_CHAIN_DELIVERY).state is not StageState.CONFIRMED
+    _assert_no_invariant_violated(result)
+
+
+def test_a_successful_origin_transaction_still_confirms():
+    """The revert rule must not weaken an ordinary successful deposit."""
+    result = reconcile(
+        [
+            ev(
+                "ev-origin-executed",
+                Stage.SOURCE_CHAIN_DEPOSIT,
+                EventType.SOURCE_TX_EXECUTED,
+                Verification.CONFIRMED,
+                source="evm_rpc",
+                reported_status="SUCCESS",
+                tx_hash="0xok",
+                chain="eth",
+                details={"execution_succeeded": True},
+            ),
+        ],
+        {"evm_rpc": SourceStatus.OK},
+    )
+    assert result.stage(Stage.SOURCE_CHAIN_DEPOSIT).state is StageState.CONFIRMED
+
+
+def test_reported_revert_is_not_treated_as_contradiction():
+    """Only a *confirmed* revert is decisive; a reported-only one is not."""
+    result = reconcile(
+        [
+            ev(
+                "ev-origin-executed",
+                Stage.SOURCE_CHAIN_DEPOSIT,
+                EventType.SOURCE_TX_EXECUTED,
+                Verification.REPORTED,
+                source="oneclick_status",
+                reported_status="REVERTED",
+                details={"execution_succeeded": False},
+            ),
+        ],
+        {"oneclick_status": SourceStatus.OK},
+    )
+    assert result.stage(Stage.SOURCE_CHAIN_DEPOSIT).state is StageState.REPORTED

@@ -390,6 +390,7 @@ CONSOLE_HTML = """<!DOCTYPE html>
         assurance level.</p>
       <div class="actions" style="margin-bottom:12px">
         <button class="act" type="button" id="i-status">Refresh status</button>
+        <button class="act" type="button" id="i-verify-origin">Verify deposit on origin chain</button>
         <button class="act" type="button" id="i-assurance">Run settlement assurance</button>
       </div>
       <div id="intents-assurance-output" aria-live="polite"></div>
@@ -813,6 +814,7 @@ async function loadIntents() {
   document.getElementById("i-dry-quote").onclick = () => stepIntent("quote", { dry: true }, "intents-step-output");
   document.getElementById("i-live-quote").onclick = () => stepIntent("quote", { dry: false }, "intents-step-output");
   document.getElementById("i-status").onclick = () => stepIntent("status", {}, "intents-assurance-output");
+  document.getElementById("i-verify-origin").onclick = () => stepIntent("verify-origin", {}, "intents-assurance-output");
   document.getElementById("i-assurance").onclick = () => stepIntent("assurance", {}, "intents-assurance-output");
   document.getElementById("i-list").onclick = listIntents;
   document.getElementById("i-tokens").onclick = loadTokens;
@@ -905,6 +907,8 @@ async function stepIntent(action, body, targetId) {
         '<pre class="small">' + esc(JSON.stringify(data, null, 2)) + "</pre></div>";
     } else if (action === "status") {
       out.innerHTML = renderLifecycleStatus(data);
+    } else if (action === "verify-origin") {
+      out.innerHTML = renderOriginVerification(data);
     } else if (action === "assurance") {
       out.innerHTML = renderAssurance(data);
     } else {
@@ -965,12 +969,43 @@ function renderLifecycleStatus(data) {
   if (data.deposit_address) rows.push(["Deposit address", "<code>" + esc(data.deposit_address) + "</code>"]);
   if (data.deposit_tx_hash) rows.push(["Recorded deposit hash", "<code>" + esc(data.deposit_tx_hash) + "</code>"]);
   if (data.quote_approved != null) rows.push(["Quote approved", data.quote_approved ? "Yes" : "No"]);
+  const ov = (data.lifecycle && data.lifecycle.origin_verification) || data.origin_verification;
+  if (ov) rows.push(["Origin-chain deposit check", status(ov.level || "UNKNOWN")]);
   if (data.updated_at) rows.push(["Observed", fmtAt(data.updated_at)]);
   return '<div class="card"><h3>Provider status</h3>' +
     '<p class="small muted">This is what the provider reports. A provider success is not proof that ' +
     "funds reached their destination — run Settlement assurance for that.</p>" +
     '<div class="kv">' + rows.map(([k, v]) => "<dt>" + esc(k) + "</dt><dd>" + v + "</dd>").join("") +
     "</div></div>";
+}
+
+function renderOriginVerification(data) {
+  const v = data.origin_verification || data;
+  const level = v.level || "UNKNOWN";
+  const headlines = {
+    VERIFIED: "Independently verified on the origin chain: the transaction succeeded and pays the deposit address.",
+    UNCONFIRMED: "Found, but a required check did not hold — insufficient evidence, not a failure.",
+    CONTRADICTORY: "Confirmed to be something other than this deposit (a revert, or a different recipient).",
+    NOT_FOUND: "The claimed hash is not present on the origin chain — a missing record, not proof of failure.",
+    UNAVAILABLE: "The origin chain could not be queried, so the claim was not checked.",
+    UNSUPPORTED: "No public source is configured for this origin chain, so the claim cannot be checked here.",
+  };
+  const checks = v.checks || {};
+  const rows = Object.keys(checks).map((k) =>
+    "<dt>" + esc(k) + '</dt><dd><code class="mono">' + esc(JSON.stringify(checks[k])) + "</code></dd>").join("");
+  return '<div class="card"><h3>Origin-chain deposit check</h3>' +
+    '<div class="kv"><dt>Verdict</dt><dd>' + status(level) +
+    "</dd><dt>Chain</dt><dd>" + esc(v.chain || "—") +
+    "</dd><dt>Transaction</dt><dd>" + (v.evidence_url
+      ? '<a href="' + esc(v.evidence_url) + '" rel="noopener noreferrer" target="_blank"><code class="mono">' + esc(v.tx_hash || "") + "</code></a>"
+      : '<code class="mono">' + esc(v.tx_hash || "") + "</code>") +
+    "</dd></div>" +
+    '<p class="small">' + esc(headlines[level] || v.summary || "") + "</p>" +
+    (v.summary && headlines[level] ? '<p class="small muted">' + esc(v.summary) + "</p>" : "") +
+    (rows ? '<details><summary class="small">Checks performed</summary><div class="kv">' + rows + "</div></details>" : "") +
+    ((v.limitations || []).length
+      ? '<ul class="small muted">' + v.limitations.map((l) => "<li>" + esc(l) + "</li>").join("") + "</ul>" : "") +
+    "</div>";
 }
 
 function renderAssurance(data) {
@@ -991,7 +1026,19 @@ function renderAssurance(data) {
   };
   const headline = headlines[level] ||
     "Not independently verified — the provider's report alone does not establish receipt.";
-  return '<div class="card"><h3>Settlement assurance</h3>' +
+  const evidence = (a.evidence || []);
+  const byId = {};
+  evidence.forEach((e) => { byId[e.id] = e; });
+  const basisCell = (ids) => {
+    if (!ids || !ids.length) return '<span class="muted">—</span>';
+    return ids.map((id) => {
+      const e = byId[id];
+      const label = e ? (e.source + " " + (e.event_type || "")) : id;
+      const url = e && e.evidence_url;
+      return url ? '<a href="' + esc(url) + '" rel="noopener noreferrer" target="_blank">' + esc(label) + "</a>" : esc(label);
+    }).join("<br>");
+  };
+  let html = '<div class="card"><h3>Settlement assurance</h3>' +
     '<div class="kv"><dt>Level</dt><dd>' + status(level) + "</dd>" +
     "<dt>Independently verified</dt><dd>" + (verified ? "Yes" : "No") + "</dd></div>" +
     '<p class="small ' + (verified ? "muted" : "") + '">' + esc(headline) + "</p>" +
@@ -1001,13 +1048,27 @@ function renderAssurance(data) {
         a.conflicting_evidence.map(esc).join("; ") + "</div>" : "") +
     (a.shortfall && a.shortfall !== "0"
       ? '<div class="note">Shortfall vs the quote: ' + esc(a.shortfall) + " base units.</div>" : "") +
-    (stages.length ? "<table><thead><tr><th>Stage</th><th>State</th><th>Basis</th></tr></thead><tbody>" +
+    (stages.length ? "<table><thead><tr><th>Stage</th><th>State</th><th>Basis</th><th>Independent evidence</th></tr></thead><tbody>" +
       stages.map((x) => "<tr><td>" + esc(x.name || x.stage || "") + "</td><td>" +
-        status(x.state || x.classification || "UNKNOWN") + '</td><td class="small">' +
-        esc(x.detail || x.basis || "") + "</td></tr>").join("") + "</tbody></table>" : "") +
-    (a.limitations && a.limitations.length
+        status(x.state || x.classification || "UNKNOWN") + '</td><td class="small wrap">' +
+        esc(x.detail || x.basis || "") + '</td><td class="small">' +
+        basisCell(x.supporting_evidence_ids) + "</td></tr>").join("") + "</tbody></table>" : "");
+  if (evidence.length) {
+    const simulated = evidence.some((e) => e.provenance === "SIMULATED");
+    html += (simulated ? '<div class="note sim">At least one evidence item is simulated test data.</div>' : "") +
+      '<details><summary class="small">Independent evidence (' + evidence.length + ' items)</summary>' +
+      '<table><thead><tr><th>Source</th><th>Class</th><th>Method</th><th>Reference</th></tr></thead><tbody>' +
+      evidence.map((e) => "<tr><td>" + esc(e.source) + "</td><td>" + status(e.verification) +
+        '</td><td class="small wrap">' + esc(e.verification_method || e.event_type || "") +
+        '</td><td class="small">' + (e.evidence_url
+          ? '<a href="' + esc(e.evidence_url) + '" rel="noopener noreferrer" target="_blank"><code class="mono">' + esc(e.tx_hash || e.source_record_id || e.id) + "</code></a>"
+          : '<code class="mono">' + esc(e.tx_hash || e.source_record_id || e.id) + "</code>") +
+        "</td></tr>").join("") + "</tbody></table></details>";
+  }
+  html += (a.limitations && a.limitations.length
       ? '<ul class="small muted">' + a.limitations.map((l) => "<li>" + esc(l) + "</li>").join("") + "</ul>" : "") +
     "</div>";
+  return html;
 }
 
 async function decideQuote(approve) {

@@ -86,6 +86,10 @@ class StageAssurance:
     confirmed: bool
     reported: bool
     detail: str
+    #: The ids of the evidence items the engine used to reach this state, so a
+    #: reader can jump from a stage to the exact evidence behind it.
+    supporting_evidence_ids: tuple[str, ...] = ()
+    conflicting_evidence_ids: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -95,6 +99,8 @@ class StageAssurance:
             "confirmed": self.confirmed,
             "reported": self.reported,
             "detail": self.detail,
+            "supporting_evidence_ids": list(self.supporting_evidence_ids),
+            "conflicting_evidence_ids": list(self.conflicting_evidence_ids),
         }
 
 
@@ -121,6 +127,11 @@ class NearSettlementAssurance:
     shortfall_fraction: str | None = None
     summary: str = ""
     limitations: tuple[str, ...] = ()
+    #: The normalized evidence items the engine reasoned over, so a VERIFIED
+    #: claim can be inspected: each stage names the evidence ids that support it.
+    #: Carried as plain dicts so the assurance view stays serializable and the
+    #: console needs no knowledge of the engine's dataclasses.
+    evidence: tuple[dict[str, Any], ...] = ()
     engine: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -138,6 +149,7 @@ class NearSettlementAssurance:
             "conflicting_evidence": list(self.conflicting_evidence),
             "summary": self.summary,
             "limitations": list(self.limitations),
+            "evidence": [dict(e) for e in self.evidence],
             "engine": self.engine,
         }
 
@@ -167,6 +179,7 @@ def settlement_assurance_from_result(
     provider_reported_success: bool = False,
     expected_amount_out: str | None = None,
     observed_amount_out: str | None = None,
+    evidence: Any = None,
 ) -> NearSettlementAssurance:
     """Build a :class:`NearSettlementAssurance` from a reconciliation result.
 
@@ -184,16 +197,10 @@ def settlement_assurance_from_result(
     limitation instead. Amounts never *create* a confirmation.
     """
     stages = tuple(
-        StageAssurance(
-            name=name,
-            stage=stage,
-            state=_state_of(result, stage),
-            confirmed=_state_of(result, stage) is StageState.CONFIRMED,
-            reported=_state_of(result, stage) is StageState.REPORTED,
-            detail=_stage_detail(result, stage),
-        )
+        _stage_assurance(result, name, stage)
         for name, stage in NEAR_SETTLEMENT_STAGES
     )
+    evidence_items = _normalize_evidence(evidence)
 
     outcome = result.outcome
     if outcome is OverallOutcome.CONTRADICTORY:
@@ -295,6 +302,7 @@ def settlement_assurance_from_result(
         shortfall_fraction=fraction,
         summary=summary,
         limitations=tuple(limitations),
+        evidence=evidence_items,
         engine=result.to_dict(),
     )
 
@@ -329,6 +337,50 @@ def _amount_shortfall(
 def _state_of(result: ReconciliationResult, stage: Stage) -> StageState:
     assessment = result.stage(stage)
     return assessment.state if assessment else StageState.MISSING
+
+
+def _stage_assurance(result: ReconciliationResult, name: str, stage: Stage) -> StageAssurance:
+    """One stage's assurance, carrying the ids of the evidence behind it.
+
+    The stage state is read from the engine's own assessment; the supporting and
+    conflicting evidence ids are the ones the engine recorded for that stage, so
+    the view never invents a link between a state and an evidence item.
+    """
+    assessment = result.stage(stage)
+    state = assessment.state if assessment else StageState.MISSING
+    return StageAssurance(
+        name=name,
+        stage=stage,
+        state=state,
+        confirmed=state is StageState.CONFIRMED,
+        reported=state is StageState.REPORTED,
+        detail=assessment.summary if assessment else "no assessment was produced for this stage",
+        supporting_evidence_ids=tuple(assessment.supporting_evidence_ids) if assessment else (),
+        conflicting_evidence_ids=tuple(assessment.conflicting_evidence_ids) if assessment else (),
+    )
+
+
+def _normalize_evidence(evidence: Any) -> tuple[dict[str, Any], ...]:
+    """Normalize evidence items (dataclasses or dicts) to plain dicts.
+
+    A ``None`` becomes an empty tuple. An item exposing ``to_dict`` is converted;
+    a mapping is copied; anything else is dropped rather than guessed at, so a
+    malformed item cannot appear as evidence in the view.
+    """
+    if not evidence:
+        return ()
+    out: list[dict[str, Any]] = []
+    for item in evidence:
+        to_dict = getattr(item, "to_dict", None)
+        if callable(to_dict):
+            try:
+                out.append(dict(to_dict()))
+                continue
+            except Exception:  # pragma: no cover - defensive
+                continue
+        if isinstance(item, dict):
+            out.append(dict(item))
+    return tuple(out)
 
 
 def _stage_detail(result: ReconciliationResult, stage: Stage) -> str:
@@ -406,7 +458,7 @@ def verify_settlement(
         expected_origin_tx_hashes=expected_origin_tx_hashes,
     )
     return settlement_assurance_from_result(
-        result, provider_reported_success=provider_reported_success
+        result, provider_reported_success=provider_reported_success, evidence=evidence
     )
 
 

@@ -285,7 +285,9 @@ def build_report(
     # provider success claim is read from the collected evidence and never raises
     # the level on its own.
     assurance = settlement_assurance_from_result(
-        result, provider_reported_success=provider_claims_success_from_evidence(inv.evidence)
+        result,
+        provider_reported_success=provider_claims_success_from_evidence(inv.evidence),
+        evidence=evidence,
     )
     return Report(
         investigation_id=_investigation_id(inv.identifier, evidence),
