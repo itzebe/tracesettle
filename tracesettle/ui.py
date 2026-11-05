@@ -61,9 +61,20 @@ DEFAULT_CSP = (
 #: console alone permits those origins; the API responses and every other page
 #: keep :data:`DEFAULT_CSP`. ``script-src 'self'`` is deliberate - the connector
 #: is served from this origin, so no third-party script is loaded.
+#:
+#: ``connect-src`` also names the public NEAR JSON-RPC endpoints the connector's
+#: wallet integrations call to build and broadcast a transfer (``final`` block
+#: hash, access-key nonce, ``broadcast_tx_commit``). Without them the browser
+#: blocks the fetch and the wallet cannot sign, so the whole wallet-mediated flow
+#: is dead even though every other part works. Each host is an explicit literal;
+#: no wildcard is used. ``rpc.near.nightly.app`` is deliberately absent: it served
+#: a stale chain head and the wallet then broadcast against a mismatched block.
 CONSOLE_CSP = (
     "default-src 'none'; style-src 'unsafe-inline'; script-src 'self' 'unsafe-inline'; "
-    "connect-src 'self' https://cdn.jsdelivr.net https://raw.githubusercontent.com; "
+    "connect-src 'self' https://cdn.jsdelivr.net https://raw.githubusercontent.com "
+    "https://rpc.testnet.near.org https://test.rpc.fastnear.com "
+    "https://rpc.mainnet.near.org https://free.rpc.fastnear.com https://rpc.mainnet.fastnear.com "
+    "https://archival-rpc.mainnet.fastnear.com; "
     "frame-src https://cdn.jsdelivr.net https://raw.githubusercontent.com; "
     "img-src 'self' data:; form-action 'none'; base-uri 'none'"
 )

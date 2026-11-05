@@ -249,6 +249,29 @@ def test_console_csp_allows_the_wallet_connector_but_not_arbitrary_scripts():
     assert "*" not in csp
 
 
+def test_console_csp_allows_the_near_rpc_the_wallet_connector_must_reach():
+    """The wallet integration builds and broadcasts through a NEAR JSON-RPC.
+
+    Without these origins in ``connect-src`` the browser blocks the fetch and the
+    wallet can never sign, so the wallet-mediated flow silently dies. Each host is
+    an explicit literal; the policy must never widen to a wildcard to fix this.
+    """
+    with running_server() as base:
+        _, _, headers = _request("GET", base + "/console")
+    csp = headers.get("Content-Security-Policy", "")
+    connect = csp.split("connect-src", 1)[1].split(";", 1)[0]
+    for host in (
+        "https://rpc.testnet.near.org",
+        "https://test.rpc.fastnear.com",
+        "https://rpc.mainnet.near.org",
+        "https://free.rpc.fastnear.com",
+    ):
+        assert host in connect, host
+    # A stale provider (served an old chain head) must not be re-added.
+    assert "rpc.near.nightly.app" not in connect
+    assert "*" not in csp
+
+
 def test_api_responses_keep_the_strict_default_csp():
     with running_server() as base:
         _, _, headers = _request("GET", base + "/api/health")
