@@ -217,3 +217,46 @@ def test_near_chain_invariant_notices_a_silently_accepted_conflict(monkeypatch):
     monkeypatch.setattr(lifecycle_mod.NearIntentsLifecycle, "create_and_authorize", lenient)
     result = inv.INVARIANTS["near_chain_is_derived_from_the_origin_asset"]()
     assert result.holds is False
+
+
+# --- TEE attestation invariants (genuine TDX verification) ------------------
+
+
+def test_tee_invariants_are_registered():
+    tee = [name for name in inv.INVARIANTS if name.startswith("tee_")]
+    assert len(tee) == 2
+    assert all(name in inv.INVARIANT_DESCRIPTIONS for name in tee)
+
+
+def test_tee_genuine_invariant_notices_a_verifier_that_accepts_anything(monkeypatch):
+    """If the TDX verifier accepted a tampered quote, the invariant must fail."""
+    from tracesettle.near import tdx as tdx_mod
+
+    class _AlwaysVerified:
+        verified = True
+        failures: list = []
+        checks: dict = {}
+
+        def to_dict(self):
+            return {"verified": True, "failures": [], "checks": {}}
+
+    monkeypatch.setattr(tdx_mod, "verify_tdx_quote", lambda *a, **k: _AlwaysVerified())
+    result = inv.INVARIANTS["tee_attestation_verification_is_genuine"]()
+    assert result.holds is False
+
+
+def test_tee_nonce_invariant_notices_a_verifier_that_ignores_the_nonce(monkeypatch):
+    """If a quote verified regardless of the nonce, the binding invariant must fail."""
+    from tracesettle.near import tdx as tdx_mod
+
+    class _AlwaysVerified:
+        verified = True
+        failures: list = []
+        checks: dict = {}
+
+        def to_dict(self):
+            return {"verified": True, "failures": [], "checks": {}}
+
+    monkeypatch.setattr(tdx_mod, "verify_tdx_quote", lambda *a, **k: _AlwaysVerified())
+    result = inv.INVARIANTS["tee_attestation_is_bound_to_the_decision_nonce"]()
+    assert result.holds is False

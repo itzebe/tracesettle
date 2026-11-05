@@ -535,3 +535,93 @@ def test_lifecycle_verify_destination_without_a_hash_is_a_bad_request(tmp_path):
         "POST", f"/api/guard/near/lifecycle/{intent_id}/verify-destination", {}, {}
     )
     assert out.status == 400
+
+
+# --- TEE attestation route (genuine TDX verification) -----------------------
+
+
+def _tee_api(opener=None) -> GuardAPI:
+    from tracesettle.httpclient import HttpClient
+    from tracesettle.near.attestation import TeeAttestationProvider
+
+    client = HttpClient(opener=opener, max_attempts=1, timeout=1.0, backoff_base=0.0)
+    return GuardAPI(_service(), tee_provider=TeeAttestationProvider(client=client))
+
+
+def _attestation_fixture() -> dict:
+    return json.loads((FIXTURE_DIR / "attestation_nearai_cloud.json").read_text())
+
+
+def test_tee_info_is_disabled_by_default():
+    response = _api().dispatch("GET", "/api/guard/near/tee", {}, None)
+    assert response.status == 200
+    assert response.payload["enabled"] is False
+    assert "ever claimed" in response.payload["note"]
+
+
+def test_tee_attest_route_is_absent_when_disabled():
+    response = _api().dispatch("GET", "/api/guard/near/tee/attest", {}, None)
+    assert response.status == 404
+
+
+def test_tee_info_lists_what_is_and_is_not_verified():
+    response = _tee_api().dispatch("GET", "/api/guard/near/tee", {}, None)
+    assert response.status == 200
+    assert response.payload["enabled"] is True
+    assert any("TDX quote signature" in v for v in response.payload["verifies"])
+    assert any("revocation" in n.lower() for n in response.payload["not_verified"])
+
+
+def test_tee_attest_verifies_a_genuine_quote():
+    from conftest import FakeOpener
+
+    fixture = _attestation_fixture()
+    nonce = fixture["request_nonce"]
+    payload = {
+        "gateway_attestation": {
+            "intel_quote": fixture["intel_quote"],
+            "request_nonce": nonce,
+            "report_data": fixture["report_data"],
+            "signing_address": fixture["signing_address"],
+            "tls_cert_fingerprint": fixture["tls_cert_fingerprint"],
+            "info": {"tcb_info": {"event_log": fixture["event_log"]}},
+        }
+    }
+    opener = FakeOpener().json("GET", "cloud-api.near.ai", payload)
+    response = _tee_api(opener).dispatch("GET", "/api/guard/near/tee/attest", {"nonce": nonce}, None)
+    assert response.status == 200
+    assert response.payload["verified"] is True
+    assert response.payload["status"] == "VERIFIED"
+
+
+def test_tee_attest_rejects_a_malformed_nonce():
+    response = _tee_api().dispatch("GET", "/api/guard/near/tee/attest", {"nonce": "zz"}, None)
+    assert response.status == 400
+
+
+def test_tee_attest_derives_a_nonce_when_none_is_supplied():
+    from conftest import FakeOpener
+
+    fixture = _attestation_fixture()
+    # A fresh derived nonce will not match the captured quote, so this must be
+    # UNVERIFIABLE, never a false VERIFIED.
+    opener = FakeOpener().json(
+        "GET",
+        "cloud-api.near.ai",
+        {
+            "gateway_attestation": {
+                "intel_quote": fixture["intel_quote"],
+                "request_nonce": "00" * 32,
+                "report_data": fixture["report_data"],
+                "signing_address": fixture["signing_address"],
+                "tls_cert_fingerprint": fixture["tls_cert_fingerprint"],
+                "info": {"tcb_info": {"event_log": fixture["event_log"]}},
+            }
+        },
+    )
+    response = _tee_api(opener).dispatch(
+        "GET", "/api/guard/near/tee/attest", {"transaction_fingerprint": "sha256:abc"}, None
+    )
+    assert response.status == 200
+    assert response.payload["verified"] is False
+    assert response.payload["status"] == "UNVERIFIABLE"

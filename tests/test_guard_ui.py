@@ -731,3 +731,14 @@ def test_history_is_gated_by_the_api_key_when_one_is_configured(tmp_path):
             assert body["enabled"] is True
     finally:
         store.close()
+
+
+def test_console_near_tab_exposes_real_tee_attestation_verification():
+    with running_server() as base:
+        _, body, _ = _request("GET", base + "/console")
+    html = _html(body)
+    assert "Verifiable execution (Intel TDX attestation)" in html
+    assert "/api/guard/near/tee/attest" in html
+    # The panel states what is not checked, so it cannot over-claim.
+    assert "not</strong> checked" in html or "not checked" in html
+    assert "not a TEE-integrated execution path" in html

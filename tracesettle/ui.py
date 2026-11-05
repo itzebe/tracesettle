@@ -863,6 +863,25 @@ def _build_near_execution(guard_service: GuardService) -> Any:
     return NearExecutionBoundary(guard_service, net_config, rpc=NearRpc(net_config, client=client))
 
 
+def _build_tee_provider() -> Any:
+    """Build the real TEE attestation provider, or ``None`` when it is not enabled.
+
+    The provider fetches a genuine Intel TDX quote from the NEAR AI Cloud gateway
+    and verifies it locally against the pinned Intel SGX Root CA. It is an explicit
+    operator decision (``TRACESETTLE_TEE_ATTESTATION=1``) because it makes an
+    outbound request; when it is disabled no TEE protection is claimed anywhere.
+    """
+    if not config.TEE_ATTESTATION_ENABLED:
+        return None
+    from .near.attestation import TeeAttestationProvider
+
+    client = HttpClient(
+        timeout=config.REQUEST_TIMEOUT_SECONDS,
+        max_attempts=config.MAX_ATTEMPTS,
+    )
+    return TeeAttestationProvider(url=config.TEE_ATTESTATION_URL, client=client)
+
+
 def _build_investigation_store() -> Any:
     """Build the durable investigations store, or ``None`` when unconfigured.
 
@@ -948,6 +967,7 @@ class InvestigationServer(ThreadingHTTPServer):
             lifecycle=self.lifecycle,
             investigation_store=self.investigation_store,
             near_execution=_build_near_execution(self.guard_service),
+            tee_provider=_build_tee_provider(),
         )
         self.guard_limiter = guard_limiter or TokenBucketLimiter(
             config.GUARD_RATE_LIMIT_PER_MINUTE, config.GUARD_RATE_LIMIT_BURST

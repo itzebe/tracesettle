@@ -136,8 +136,18 @@ Where each capability stands:
   read-only against the public provider endpoints. Live provider-*policy*
   integration is **not** claimed: it is unverified unless an operator configures
   `TRACESETTLE_NEAR_AGENT_API_URL` and the read succeeds.
-- **TEE:** not integrated and not claimed (see
-  [`docs/TEE_RESEARCH.md`](docs/TEE_RESEARCH.md)).
+- **TEE:** the confidential-execution path is **not** integrated and no TEE
+  protection is claimed for execution (see
+  [`docs/TEE_RESEARCH.md`](docs/TEE_RESEARCH.md)). One narrow, honest capability is
+  provided and is **Locally verified**: `GET /api/guard/near/tee/attest` fetches
+  the NEAR AI Cloud gateway's **real** Intel TDX quote and verifies it locally
+  against the pinned Intel SGX Root CA — the quote signature, the PCK certificate
+  chain, the attestation key bound to the Quoting Enclave report, the nonce and
+  signing-address binding, and the event log replayed to the RTMRs. This is
+  verification of a genuine hardware quote, not a TEE-integrated execution path:
+  the guard's decisions do not depend on it, and certificate revocation and TCB
+  freshness (which need Intel PCS collateral) are **not** checked, so they are not
+  claimed. Off by default (`TRACESETTLE_TEE_ATTESTATION=1`).
 - **Live NEAR execution boundary:** Testnet verified — the opt-in boundary
   (`TRACESETTLE_NEAR_EXECUTION=1`) built, signed, broadcast and independently
   verified a real NEAR testnet transfer (tx
@@ -574,11 +584,11 @@ a bare interpreter.
 **1. Run the tests.**
 
 ```sh
-python -m pytest tests/ --collect-only -q   # 1199 tests collected
-python -m pytest tests/ -q                  # 1175 passed, 24 skipped
+python -m pytest tests/ --collect-only -q   # 1231 tests collected
+python -m pytest tests/ -q                  # 1207 passed, 24 skipped
 ```
-→ `1175 passed, 24 skipped`. The skips are the PostgreSQL integration
-tests; set `TRACESETTLE_TEST_PG_DSN` to a real server to run them (**1199 passed, 0 skipped**).
+→ `1207 passed, 24 skipped`. The skips are the PostgreSQL integration
+tests; set `TRACESETTLE_TEST_PG_DSN` to a real server to run them (**1231 passed, 0 skipped**).
 
 **2. Prove the enforcement boundary: a permitted request executes, a suspicious
 one cannot.**
@@ -966,7 +976,7 @@ transaction request ──▶ │ guard/rules.py      7 controls, all run  │
                         │                     validate, then execute │
                         │ guard/audit.py      hash-chained records  │
                         │ guard/monitor.py    counters + incidents  │
-                        │ guard/invariants.py 30 checked guarantees │
+                        │ guard/invariants.py 33 checked guarantees │
                         └────────────────────┬─────────────────────┘
                                              │ ALLOW + authorization
                                              ▼
@@ -1039,7 +1049,7 @@ identical decisions.
 | `tracesettle/guard/safeguards.py` | Durable security safeguards: the learning loop's store (SQLite). |
 | `tracesettle/guard/learning.py` | The learning loop: derive a lesson, apply safeguards (only ever tightening). |
 | `tracesettle/guard/state_pg.py` | Optional PostgreSQL backend: shared nonces, counters, revocations, idempotency. |
-| `tracesettle/guard/invariants.py` | The thirty structural guarantees, checked by execution. |
+| `tracesettle/guard/invariants.py` | The thirty-three structural guarantees, checked by execution. |
 | `tracesettle/guard/api.py` | Guard HTTP routing and JSON serialization. |
 | `tracesettle/guard/console.py` | The security operations console page. |
 | `docs/TRANSACTION_SECURITY.md` | The security layer in full, including what it does not do. |
@@ -1363,7 +1373,7 @@ immutable commit SHA (not a moving tag), and cancels superseded runs.
 ## Tests
 
 ```sh
-python3 -m pytest tests/ -q          # 1175 passed, 24 skipped (1199 with a server)
+python3 -m pytest tests/ -q          # 1207 passed, 24 skipped (1231 with a server)
 python3 -m pytest tests/test_guard_authorization.py -q
 python3 -m pytest tests/test_guard_invariants.py -q
 python3 -m pytest tests/test_guard_end_to_end.py -q

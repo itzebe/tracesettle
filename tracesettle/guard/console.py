@@ -319,6 +319,22 @@ CONSOLE_HTML = """<!DOCTYPE html>
     </div>
 
     <div class="panel">
+      <h2>Verifiable execution (Intel TDX attestation)</h2>
+      <p class="small">The NEAR AI Cloud gateway runs inside an Intel TDX confidential VM. TraceSettle
+        fetches the gateway's <strong>real</strong> hardware quote and verifies it locally against the
+        pinned Intel SGX Root CA: the quote signature, the PCK certificate chain, the attestation key
+        bound to the Quoting Enclave report, and the event log replayed to the RTMRs. The quote binds a
+        fresh nonce, so an attestation cannot be replayed for a different decision. This is
+        <strong>verification of a real quote</strong>, not a TEE-integrated execution path; the guard's
+        decisions do not depend on it. Certificate revocation and TCB freshness need Intel PCS
+        collateral and are <strong>not</strong> checked, so they are not claimed.</p>
+      <div class="actions" style="margin-bottom:12px">
+        <button class="act primary" type="button" id="tee-run">Fetch and verify the gateway quote</button>
+      </div>
+      <div id="near-tee"></div>
+    </div>
+
+    <div class="panel">
       <h2>Learning loop (durable safeguards)</h2>
       <p class="small">When a decision surfaces a security failure, the lesson is recorded as a
         durable safeguard and applied to later decisions. A safeguard only ever <strong>tightens</strong>
@@ -787,6 +803,7 @@ async function loadNear() {
 
   const runBtn = document.getElementById("near-run");
   runBtn.onclick = runNearAttacks;
+  document.getElementById("tee-run").onclick = runNearTee;
   document.getElementById("near-eval-legit").onclick = () => evalNear(true);
   document.getElementById("near-eval-attack").onclick = () => evalNear(false);
 
@@ -834,6 +851,32 @@ async function runNearAttacks() {
       '<div class="note ' + (data.all_passed ? "ok" : "bad") + '">' +
       esc((data.all_passed ? "All scenarios matched expectation" : "A scenario did not match")) +
       "</div>";
+  } catch (err) { el.innerHTML = '<div class="note bad">' + esc(err.message) + "</div>"; }
+}
+
+async function runNearTee() {
+  const el = document.getElementById("near-tee");
+  el.innerHTML = loading("Fetching and verifying the gateway quote…");
+  try {
+    const info = await api("GET", "/api/guard/near/tee");
+    if (!info.enabled) {
+      el.innerHTML = '<div class="note sim">' + esc(info.note || "TEE attestation is disabled.") + "</div>";
+      return;
+    }
+    const r = await api("GET", "/api/guard/near/tee/attest?transaction_fingerprint=" +
+      encodeURIComponent("console-demo"));
+    const checks = r.verification && r.verification.checks ? r.verification.checks : {};
+    const rows = Object.keys(checks).map((k) =>
+      "<dt>" + esc(k) + "</dt><dd>" + (checks[k] ? '<span class="small ok">pass</span>'
+        : '<span class="small bad">fail</span>') + "</dd>").join("");
+    el.innerHTML = '<div class="card"><div class="kv"><dt>Status</dt><dd>' +
+      status(r.status) + "</dd><dt>Verified</dt><dd>" + esc(r.verified) +
+      "</dd><dt>Signing address</dt><dd class='small'>" + esc(r.signing_address || "") +
+      "</dd><dt>Pinned root</dt><dd class='small'>" + esc(r.intel_root_fingerprint || "") +
+      "</dd></div><div class='kv small'>" + rows + "</div>" +
+      '<div class="note ' + (r.verified ? "ok" : "bad") + '">' +
+      esc(r.verified ? "The quote is genuine hardware attestation, verified locally." :
+        "The quote did not verify; no protection is claimed.") + "</div></div>";
   } catch (err) { el.innerHTML = '<div class="note bad">' + esc(err.message) + "</div>"; }
 }
 

@@ -66,6 +66,18 @@ from .settlement import (
     settlement_assurance_from_result,
 )
 from .tee import TeeAssessment, assess_verifiable_execution
+from .attestation import (
+    AttestationResult,
+    TeeAttestationProvider,
+    derive_nonce,
+    verified_tee_verifier,
+)
+from .tdx import (
+    INTEL_SGX_ROOT_CA_SHA256,
+    TdxVerification,
+    parse_quote,
+    verify_tdx_quote,
+)
 
 __all__ = [
     "AGENT_DECISION_OUTCOMES",
@@ -96,4 +108,12 @@ __all__ = [
     "parse_access_key",
     "parse_policy",
     "settlement_assurance_from_result",
+    "AttestationResult",
+    "TeeAttestationProvider",
+    "derive_nonce",
+    "verified_tee_verifier",
+    "INTEL_SGX_ROOT_CA_SHA256",
+    "TdxVerification",
+    "parse_quote",
+    "verify_tdx_quote",
 ]

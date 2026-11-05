@@ -55,6 +55,7 @@ class GuardAPI:
         lifecycle: Any = None,
         investigation_store: Any = None,
         near_execution: Any = None,
+        tee_provider: Any = None,
     ) -> None:
         self.service = service
         #: The optional durable settlement-investigation store. When set, a
@@ -69,6 +70,11 @@ class GuardAPI:
         #: settlement. Off by default; a deployment that does not opt in exposes
         #: no route and holds no network path to a signing flow.
         self.near_execution = near_execution
+        #: The optional real TEE attestation provider. When set, a genuine Intel
+        #: TDX quote is fetched from the NEAR AI Cloud gateway and verified
+        #: locally against the pinned Intel root, bound to a fresh decision nonce.
+        #: Off by default; no TEE protection is ever claimed without it.
+        self.tee_provider = tee_provider
 
     def dispatch(
         self,
@@ -184,6 +190,10 @@ class GuardAPI:
             return ApiResponse(200, self._near_policy_scope())
         if path == "/api/guard/near/settlement-demo":
             return ApiResponse(200, self._near_settlement_demo())
+        if path == "/api/guard/near/tee":
+            return self._near_tee_info()
+        if path == "/api/guard/near/tee/attest":
+            return self._near_tee_attest(params)
         if path == "/api/guard/near/lifecycle":
             return self._lifecycle_list(params)
         if path == "/api/guard/near/lifecycle/tokens":
@@ -316,6 +326,91 @@ class GuardAPI:
             "provider_reported_success": True,
             "assurance": assurance.to_dict(),
         }
+
+    def _near_tee_info(self) -> ApiResponse:
+        """Describe the TEE attestation capability honestly."""
+        if self.tee_provider is None:
+            return ApiResponse(
+                200,
+                {
+                    "enabled": False,
+                    "note": (
+                        "TEE attestation verification is disabled. Enable it with "
+                        "TRACESETTLE_TEE_ATTESTATION=1. It fetches a genuine Intel TDX "
+                        "quote from the NEAR AI Cloud gateway and verifies it locally; "
+                        "no TEE protection is ever claimed without a verified quote."
+                    ),
+                },
+            )
+        return ApiResponse(
+            200,
+            {
+                "enabled": True,
+                "provider": "near-ai-cloud",
+                "endpoint": self.tee_provider.url,
+                "verifies": [
+                    "Intel TDX quote signature under the quote's attestation key",
+                    "PCK certificate chain up to the pinned Intel SGX Root CA",
+                    "attestation key bound to the Quoting Enclave report",
+                    "report_data binds a fresh decision nonce",
+                    "report_data binds the signing address and TLS key",
+                    "event-log replay reproduces RTMR0..3",
+                ],
+                "not_verified": [
+                    "PCK certificate revocation status (needs Intel PCS collateral)",
+                    "TCB level against Intel PCS collateral",
+                ],
+                "note": (
+                    "The quote is real hardware attestation and is verified locally against "
+                    "the pinned Intel root. Revocation and TCB freshness require Intel PCS "
+                    "collateral and are not checked here, so they are not claimed."
+                ),
+            },
+        )
+
+    def _near_tee_attest(self, params: dict[str, str]) -> ApiResponse:
+        """Fetch and locally verify a genuine TDX attestation bound to a nonce.
+
+        The nonce is supplied by the caller (so the caller controls the binding
+        value it will check) or derived from the query fields. A failed
+        verification is reported as UNVERIFIABLE, never as protection.
+        """
+        if self.tee_provider is None:
+            return ApiResponse(
+                404,
+                {
+                    "error": "TEE attestation verification is disabled",
+                    "enable_with": "TRACESETTLE_TEE_ATTESTATION=1",
+                },
+            )
+        from ..near.attestation import derive_nonce
+
+        supplied = params.get("nonce", "").strip()
+        if supplied:
+            try:
+                nonce = bytes.fromhex(supplied)
+            except ValueError:
+                return _bad_request("nonce must be hex")
+            if len(nonce) != 32:
+                return _bad_request("nonce must be 32 bytes (64 hex characters)")
+        else:
+            nonce = derive_nonce(
+                transaction_fingerprint=params.get("transaction_fingerprint", ""),
+                policy_revision=params.get("policy_revision", ""),
+                operation_id=params.get("operation_id", ""),
+            )
+        try:
+            result = self.tee_provider.attest(nonce)
+        except Exception as exc:  # noqa: BLE001 - a provider failure is not an acceptance
+            return ApiResponse(
+                502,
+                {
+                    "error": "attestation provider failed",
+                    "detail": type(exc).__name__,
+                    "verified": False,
+                },
+            )
+        return ApiResponse(200, result.to_dict())
 
     # -- POST ---------------------------------------------------------------
 

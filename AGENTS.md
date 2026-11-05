@@ -1504,3 +1504,47 @@ fixed; the rest of the audit found the controls intact.
   (placeholders only). All `detect-secrets` hits are placeholders, CI
   ephemeral-container credentials (`tracesettle:tracesettle`), and public chain
   data. **Scan clean — publication gate passed.**
+
+## Genuine Intel TDX attestation verification (2026-11-03)
+
+Adds a real, locally-verified confidential-computing capability, kept honest and
+out of the enforcement path. No runtime dependency was added; the settlement
+engine and every authorization rule are untouched.
+
+- **`tracesettle/near/tdx.py`** — a self-contained Intel TDX v4 quote verifier
+  (stdlib plus the in-repo `p256`). It parses the quote header, the TD report
+  body, the signature, the attestation key and the certification data, then
+  verifies the quote signature (ECDSA-P256) under the quote's attestation key,
+  the PCK certificate chain up to the **pinned** Intel SGX Root CA, the
+  attestation-key → Quoting-Enclave binding
+  (`QE report_data[0:32] = sha256(AK_raw64 || qe_auth_data)`), the `report_data`
+  binding of a caller nonce / signing address / TLS key, and the event-log replay
+  to RTMR0..3. `INTEL_SGX_ROOT_CA_SHA256` is the pinned root.
+- **`tracesettle/near/attestation.py`** — `TeeAttestationProvider` fetches the
+  NEAR AI Cloud gateway's real quote from the public attestation endpoint and
+  runs the verifier, cross-checking the echoed nonce, signing address and TLS
+  fingerprint. `derive_nonce` and `verified_tee_verifier` bind a quote to a fresh
+  decision nonce.
+- **API:** `GET /api/guard/near/tee` (capability, with what is *not* verified) and
+  `GET /api/guard/near/tee/attest` (fetch + verify, bound to a supplied or
+  derived nonce). Off by default (`TRACESETTLE_TEE_ATTESTATION=1`); both are
+  API-key gated and rate-limited like every other guard route.
+- **Honest scope, repeated everywhere.** This is verification of a *real hardware
+  quote*, not a TEE-integrated execution path. The guard's decisions do not
+  depend on it; the executor still simulates execution and broadcasts nothing.
+  Certificate revocation and TCB freshness need Intel PCS collateral and are
+  **not** checked, so they are not claimed. A failed verification is
+  `UNVERIFIABLE`, never protection.
+- **Invariants:** 31 → **33 total**. New: `tee_attestation_verification_is_genuine`
+  (a real quote verifies, a tampered one is refused) and
+  `tee_attestation_is_bound_to_the_decision_nonce` (a quote for another nonce is
+  refused). Both are mutation-tested: a verifier that accepts anything makes each
+  fail.
+- **Packaging:** the real quote capture lives inside the package
+  (`tracesettle/near/fixtures/attestation_nearai_cloud.json`) so the invariants
+  run from a package-only copy. The packaging test caught an earlier version that
+  read `evidence/raw/`; it now reads the shipped fixture.
+- **Tests:** 1175 → **1207 passed, 24 skipped** (1231 passed with a live
+  PostgreSQL). New `tests/test_near_tdx.py` (11) and
+  `tests/test_near_attestation.py` (9), 6 API tests and 2 mutation tests.
+  pyflakes clean; compileall OK; offline demo byte-identical (md5 `4864f13c…`).

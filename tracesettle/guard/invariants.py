@@ -1607,6 +1607,83 @@ def _near_execution_binding_covers_the_bytes():
     )
 
 
+def _tee_fixture_quote() -> tuple[bytes, bytes, bytes, bytes, list]:
+    """Load the captured genuine NEAR AI Cloud attestation shipped with the package.
+
+    The fixture is real hardware attestation captured live from the public gateway
+    endpoint, kept inside the package so the invariant is checkable from a
+    package-only copy.
+    """
+    import json
+    import pathlib
+
+    path = pathlib.Path(__file__).resolve().parents[1] / "near" / "fixtures" / "attestation_nearai_cloud.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    return (
+        bytes.fromhex(data["intel_quote"]),
+        bytes.fromhex(data["request_nonce"]),
+        bytes.fromhex(data["signing_address"]),
+        bytes.fromhex(data["tls_cert_fingerprint"]),
+        data["event_log"],
+    )
+
+
+def _tee_attestation_verification_is_genuine():
+    """A genuine TDX quote must verify; a tampered quote must not."""
+    from ..near import tdx
+
+    quote, nonce, signing, tls, log = _tee_fixture_quote()
+    good = tdx.verify_tdx_quote(
+        quote, nonce=nonce, signing_address=signing, tls_cert_fingerprint=tls, event_log=log
+    )
+    if not good.verified:
+        return InvariantResult(
+            "tee_attestation_verification_is_genuine",
+            False,
+            "the captured genuine quote did not verify: " + "; ".join(good.failures),
+        )
+    tampered = bytearray(quote)
+    tampered[48 + 520] ^= 0x01  # flip a bit inside report_data
+    bad = tdx.verify_tdx_quote(bytes(tampered), nonce=nonce)
+    if bad.verified:
+        return InvariantResult(
+            "tee_attestation_verification_is_genuine",
+            False,
+            "a tampered quote verified; the signature check is not effective",
+        )
+    return InvariantResult(
+        "tee_attestation_verification_is_genuine",
+        True,
+        "the genuine quote verifies against the pinned Intel root and a tampered quote is refused",
+    )
+
+
+def _tee_attestation_is_bound_to_the_decision_nonce():
+    """A quote obtained for one nonce must not verify for another."""
+    import secrets
+
+    from ..near import tdx
+
+    quote, nonce, signing, tls, log = _tee_fixture_quote()
+    other = secrets.token_bytes(32)
+    if other == nonce:
+        other = bytes(a ^ 0xFF for a in nonce)
+    wrong = tdx.verify_tdx_quote(
+        quote, nonce=other, signing_address=signing, tls_cert_fingerprint=tls, event_log=log
+    )
+    if wrong.verified:
+        return InvariantResult(
+            "tee_attestation_is_bound_to_the_decision_nonce",
+            False,
+            "a quote verified against a different nonce; the binding is not enforced",
+        )
+    return InvariantResult(
+        "tee_attestation_is_bound_to_the_decision_nonce",
+        True,
+        "a quote for a different nonce is refused, so an attestation cannot be replayed for another decision",
+    )
+
+
 def _b58(raw: bytes) -> str:
     alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
     n = int.from_bytes(raw, "big")
@@ -1662,6 +1739,10 @@ INVARIANTS: dict[str, Callable[[], InvariantResult]] = {
         _near_execution_never_signs_without_a_valid_authorization
     ),
     "near_execution_binding_covers_the_bytes": _near_execution_binding_covers_the_bytes,
+    "tee_attestation_verification_is_genuine": _tee_attestation_verification_is_genuine,
+    "tee_attestation_is_bound_to_the_decision_nonce": (
+        _tee_attestation_is_bound_to_the_decision_nonce
+    ),
 }
 
 #: Human-readable statement of each guarantee, for the console and the docs.
@@ -1697,6 +1778,8 @@ INVARIANT_DESCRIPTIONS: dict[str, str] = {
     "near_chain_is_derived_from_the_origin_asset": "The chain the guard evaluates is derived from the origin asset, and an explicit chain that disagrees with it is refused; a caller cannot steer a chain-scoped policy to the wrong chain.",
     "near_execution_never_signs_without_authorization": "The NEAR execution boundary never signs or broadcasts a transaction that did not receive an authorization.",
     "near_execution_binding_covers_the_bytes": "The authorization is bound to the exact bytes that would be broadcast; changing the amount after authorization is refused.",
+    "tee_attestation_verification_is_genuine": "A genuine Intel TDX quote verifies against the pinned Intel SGX Root CA, and a tampered quote is refused.",
+    "tee_attestation_is_bound_to_the_decision_nonce": "A TDX quote obtained for one decision nonce does not verify for another, so an attestation cannot be replayed.",
 }
 
 

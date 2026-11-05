@@ -352,6 +352,22 @@ NEAR_EXECUTION_ENABLED = (
 #: against the RPC before any transaction is built.
 NEAR_EXECUTION_NETWORK = os.environ.get("TRACESETTLE_NEAR_EXECUTION_NETWORK", "testnet").strip() or "testnet"
 
+#: The public NEAR AI Cloud gateway attestation endpoint. It returns a genuine,
+#: hardware-signed Intel TDX quote; TraceSettle verifies it locally. No key is
+#: required and no payment is involved.
+TEE_ATTESTATION_URL = os.environ.get(
+    "TRACESETTLE_TEE_ATTESTATION_URL",
+    "https://cloud-api.near.ai/v1/attestation/report",
+)
+
+#: Whether the TEE attestation route is enabled. Off by default: it makes an
+#: outbound request to the attestation endpoint, so enabling it is an explicit
+#: operator decision rather than something a public bind turns on silently.
+TEE_ATTESTATION_ENABLED = (
+    os.environ.get("TRACESETTLE_TEE_ATTESTATION", "").strip().lower()
+    in {"1", "true", "yes", "on"}
+)
+
 # ---------------------------------------------------------------------------
 # Serve defaults (env-driven so a container image needs no CLI flags)
 # ---------------------------------------------------------------------------
