@@ -381,6 +381,26 @@ NEAR_EXECUTION_TTL_SECONDS = int(
     os.environ.get("TRACESETTLE_NEAR_EXECUTION_TTL_SECONDS", "90") or "90"
 )
 
+#: The durable submission-ledger database (SQLite). Every signed/broadcast
+#: submission is recorded here before it is sent and updated after, so a
+#: submission whose outcome is unknown (a timeout at broadcast) is resolved from
+#: the chain on recovery instead of being blindly retried. Unset means records
+#: live in memory only; a deployment that broadcasts should set it.
+NEAR_LEDGER_DB = os.environ.get("TRACESETTLE_NEAR_LEDGER_DB", "").strip() or None
+
+#: How many times to poll the chain for a *final* execution status after a
+#: broadcast before giving up and reporting the last (possibly non-final) state.
+#: A broadcast commonly returns an optimistic status; polling resolves it to a
+#: final one without ever inflating a pending state to verified.
+NEAR_FINALITY_ATTEMPTS = int(
+    os.environ.get("TRACESETTLE_NEAR_FINALITY_ATTEMPTS", "8") or "8"
+)
+
+#: The delay, in seconds, between finality polls.
+NEAR_FINALITY_DELAY_SECONDS = float(
+    os.environ.get("TRACESETTLE_NEAR_FINALITY_DELAY_SECONDS", "1.0") or "1.0"
+)
+
 #: The public NEAR AI Cloud gateway attestation endpoint. It returns a genuine,
 #: hardware-signed Intel TDX quote; TraceSettle verifies it locally. No key is
 #: required and no payment is involved.

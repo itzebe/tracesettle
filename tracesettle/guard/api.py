@@ -757,6 +757,20 @@ class GuardAPI:
             return ApiResponse(404, {"error": "unknown or expired prepare_id"})
         from ..near.execution import ExecutionError
 
+        pipeline = getattr(self.near_execution, "pipeline", None)
+        if pipeline is not None:
+            # The durable path: the submission is recorded before it is sent, so
+            # an unknown outcome is resolved from the chain rather than retried,
+            # and the execution is polled to a final status before verifying.
+            idempotency_key = str(body.get("idempotency_key", "")).strip()
+            try:
+                executed = pipeline.submit_signed(
+                    prepared, signature, idempotency_key=idempotency_key
+                )
+            except ExecutionError as exc:
+                return ApiResponse(422, {"error": str(exc)})
+            return ApiResponse(200, executed.to_dict())
+
         try:
             executed = self.near_execution.broadcast(prepared, signature)
         except ExecutionError as exc:

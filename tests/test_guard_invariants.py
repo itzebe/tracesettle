@@ -245,3 +245,56 @@ def test_configured_audit_log_invariant_notices_a_truthiness_guard():
         # would therefore report the invariant as broken.
         assert regressed.audit is not audit
         assert not path.exists()
+
+
+def test_access_key_permission_invariant_notices_a_removed_check():
+    """Mutation check: if the boundary stopped enforcing the key's permission, a
+    function-call key would move native NEAR and the checker must fail."""
+    from tracesettle.guard import invariants as inv
+    from tracesettle.near import execution as ex
+
+    original = ex.NearExecutionBoundary._validate_access_key_permission
+
+    def permissive(self, transaction, access_key):  # noqa: ANN001
+        return None  # the mutation: never check the permission
+
+    ex.NearExecutionBoundary._validate_access_key_permission = permissive
+    try:
+        result = inv.INVARIANTS["near_execution_requires_access_key_permission"]()
+        assert result.holds is False
+    finally:
+        ex.NearExecutionBoundary._validate_access_key_permission = original
+
+
+def test_durable_submission_invariant_notices_a_retry_on_unknown_outcome():
+    """Mutation check: if an unknown submission outcome were retried (or recorded
+    as FAILED), the checker must fail."""
+    from tracesettle.guard import invariants as inv
+    from tracesettle.near import pipeline as pl
+    from tracesettle.near.ledger import SubmissionState
+
+    original = pl.NearExecutionPipeline._submit_and_verify
+
+    def retrying(self, record, prepared, *, attempts, delay):  # noqa: ANN001
+        # The mutation: assume "no response" means "not applied" and retry.
+        record.attempts += 1
+        record.transition(SubmissionState.SUBMITTING, reason="mutated retry")
+        self.ledger.put(record)
+        self.boundary.rpc.send_tx(record.signed_b64)
+        record.transition(SubmissionState.FAILED, reason="mutated: assumed failure")
+        self.ledger.put(record)
+        return pl.ExecutionResult(
+            state=SubmissionState.FAILED,
+            tx_hash=record.tx_hash,
+            settlement_state="FAILED",
+            verification=None,
+            signed_b64=record.signed_b64,
+        )
+
+    pl.NearExecutionPipeline._submit_and_verify = retrying
+    try:
+        result = inv.INVARIANTS["near_submission_is_durable_and_recovery_never_resubmits"]()
+        assert result.holds is False
+    finally:
+        pl.NearExecutionPipeline._submit_and_verify = original
+

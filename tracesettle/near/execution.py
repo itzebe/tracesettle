@@ -48,6 +48,11 @@ from ..guard.model import (
 from ..guard.service import GuardService
 from ..model import SourceStatus
 from . import ed25519
+from .access_keys import (
+    AccessKeyPermission,
+    key_supports_operation,
+    parse_access_key,
+)
 from .assets import AssetError, NearAsset, from_base_units, resolve_asset, to_base_units, verify_decimals
 from .networks import NetworkConfig, NetworkError, NearNetwork, parse_network, verify_network_identity
 from .rpc import NearRpc
@@ -471,18 +476,69 @@ class NearExecutionBoundary:
             raise ExecutionError("could not obtain a recent block hash from the network")
         return str(result.data["hash"])
 
-    def _next_nonce(self, account_id: str, public_key: str) -> int:
+    def _read_access_key(self, account_id: str, public_key: str) -> dict[str, Any]:
+        """Read the signer's access key view, failing closed on any doubt.
+
+        A missing key is ``NOT_FOUND``; a node outage is an outage. Neither is
+        ever treated as "fine, proceed".
+        """
         result = self.rpc.view_access_key(account_id, public_key)
         if result.status is SourceStatus.NOT_FOUND:
             raise ExecutionError(
                 "the supplied public key is not an access key of the signer account"
             )
         if not result.ok or not isinstance(result.data, dict):
-            raise ExecutionError("could not read the signer account's access key nonce")
-        nonce = result.data.get("nonce")
+            raise ExecutionError("could not read the signer account's access key")
+        return result.data
+
+    def _next_nonce(self, account_id: str, public_key: str) -> int:
+        data = self._read_access_key(account_id, public_key)
+        nonce = data.get("nonce")
         if not isinstance(nonce, int):
             raise ExecutionError("the access key returned no nonce")
         return next_nonce(nonce)
+
+    def _validate_access_key_permission(
+        self, transaction: NearTransaction, access_key: dict[str, Any]
+    ) -> Any:
+        """Require the key's **on-chain** permission to cover this transaction.
+
+        The nonce read already proves the key exists on the signer account. This
+        additionally reads the key's declared permission and refuses when the
+        transaction is outside it: a function-call key cannot move native NEAR,
+        and cannot call a method or receiver outside its scope. An unrecognised
+        permission shape is treated as unrestricted by the analysis, which is
+        *not* a safe basis to sign - so it is refused here. Returns the analysis
+        so the caller can record what was checked.
+        """
+        try:
+            analysis = parse_access_key(access_key)
+        except ValueError as exc:
+            raise ExecutionError(f"the access key permission could not be read: {exc}") from exc
+
+        if analysis.permission is AccessKeyPermission.UNKNOWN:
+            raise ExecutionError(
+                "the access key permission shape is not recognised; refusing to sign "
+                "with a key whose scope cannot be established"
+            )
+
+        # Only a native transfer moves NEAR. An ``ft_transfer`` attaches the
+        # conventional single yoctoNEAR storage deposit, which a function-call
+        # key is designed to do; it does not move value.
+        moves_near = transaction.operation == OP_TRANSFER
+        method_name = "ft_transfer" if transaction.operation == OP_FT_TRANSFER else None
+        allowed, reason = key_supports_operation(
+            analysis,
+            operation="TRANSFER" if transaction.operation == OP_TRANSFER else "FUNCTION_CALL",
+            receiver_id=transaction.receiver_id,
+            method_name=method_name,
+            transfers_near=moves_near,
+        )
+        if not allowed:
+            raise ExecutionError(
+                f"the access key does not permit this transaction: {reason}"
+            )
+        return analysis
 
     def _verify_asset_decimals(self, asset: NearAsset) -> None:
         if asset.is_native:
@@ -543,7 +599,11 @@ class NearExecutionBoundary:
 
         # 3. Construct the transaction.
         block_hash = self._block_hash()
-        nonce = self._next_nonce(account_id, public_key)
+        access_key = self._read_access_key(account_id, public_key)
+        nonce_value = access_key.get("nonce")
+        if not isinstance(nonce_value, int):
+            raise ExecutionError("the access key returned no nonce")
+        nonce = next_nonce(nonce_value)
         amount = parse_amount(amount_human) if not isinstance(amount_human, Decimal) else amount_human
         if asset.is_native:
             tx = build_transfer(
@@ -570,6 +630,10 @@ class NearExecutionBoundary:
                 service_id=service_id,
             )
             guard_operation = "WITHDRAWAL"
+
+        # 3b. The key's on-chain permission must cover this exact transaction,
+        #     or nothing downstream may sign it.
+        self._validate_access_key_permission(tx, access_key)
 
         # 4. Evaluate with the guard. The chain is the bare chain id so the
         #    operator allowlist is unchanged; the network is bound separately.

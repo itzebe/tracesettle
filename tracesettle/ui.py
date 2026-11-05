@@ -889,13 +889,32 @@ def _build_near_execution(guard_service: GuardService) -> Any:
             ),
         )
 
-    return NearExecutionBoundary(
+    boundary = NearExecutionBoundary(
         guard_service,
         net_config,
         rpc=NearRpc(net_config, client=client),
         tee_authorizer=tee_authorizer,
         tee_provider=tee_provider,
     )
+    # The durable pipeline wraps the boundary for the broadcast route: it records
+    # every submission before it is sent (so an unknown outcome is resolved from
+    # the chain, never blindly retried) and polls for finality. A configured
+    # ledger that cannot be opened is a hard failure, never a silent fallback to
+    # memory. The pipeline never holds a key - the caller signs.
+    from .near.ledger import SubmissionLedger
+    from .near.pipeline import NearExecutionPipeline
+
+    try:
+        ledger = SubmissionLedger(config.NEAR_LEDGER_DB)
+    except Exception as exc:  # noqa: BLE001 - a broken ledger must not start
+        raise RuntimeError(f"TRACESETTLE_NEAR_LEDGER_DB: {exc}") from exc
+    boundary.pipeline = NearExecutionPipeline(
+        boundary,
+        ledger=ledger,
+        finality_attempts=config.NEAR_FINALITY_ATTEMPTS,
+        finality_delay=config.NEAR_FINALITY_DELAY_SECONDS,
+    )
+    return boundary
 
 
 def _build_tee_provider() -> Any:

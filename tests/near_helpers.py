@@ -10,6 +10,7 @@ boundary, not a logic mock - every line of ``execution.py`` runs.
 from __future__ import annotations
 
 from decimal import Decimal
+from typing import Any
 
 from tracesettle.guard.audit import AuditLog
 from tracesettle.guard.authorization import AuthorizationAuthority, InMemoryReplayStore
@@ -108,6 +109,10 @@ class FakeNearRpc:
         self.block_hash_value = BLOCK_HASH
         self.decimals_override: dict | None = None
         self.access_key_missing = False
+        #: The permission the fake key reports. Defaults to the realistic
+        #: full-access shape a NEAR RPC returns; a test can set a function-call
+        #: or unrecognised shape to drive the permission-refusal paths.
+        self.access_key_permission: Any = "FullAccess"
         self.send_result: dict | None = None
         self.send_status = SourceStatus.OK
         self.tx_status_result: dict | None = None
@@ -124,7 +129,10 @@ class FakeNearRpc:
     def view_access_key(self, account_id: str, public_key: str) -> RpcResult:
         if self.access_key_missing:
             return RpcResult(SourceStatus.NOT_FOUND, error="unknown access key")
-        return RpcResult(SourceStatus.OK, {"nonce": self.nonce})
+        return RpcResult(
+            SourceStatus.OK,
+            {"nonce": self.nonce, "permission": self.access_key_permission},
+        )
 
     def call_function(self, account_id, method_name, args=None, *, finality="final") -> RpcResult:
         if self.decimals_override is not None:

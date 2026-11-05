@@ -418,17 +418,41 @@ the chain back. It is deliberately narrow and gated:
   boundary reads the transaction back and confirms the outcome, the signer, the
   receiver and the transferred amount before it reports `VERIFIED`. A provider
   `SUCCESS` alone never yields `VERIFIED`.
+- **The signer's access-key permission is enforced.** Before building anything,
+  the boundary reads the signer account's on-chain access key and refuses unless
+  the key's permission covers the transaction: a function-call key can never move
+  native NEAR, a receiver/method outside the key's scope is refused, an omitted
+  `method_names` means *all methods*, an omitted allowance means *unlimited gas*,
+  and an unrecognised permission shape is never treated as safe.
 - **Standard library only.** Serialization (Borsh), ed25519, the RPC client and
   the verifier are all stdlib — no runtime dependency is added.
 
+**The real testnet executor (`tracesettle/near/pipeline.py` + `ledger.py`).**
+`NearExecutionPipeline` is the production path that replaces the simulated
+executor for a NEAR operation. It composes the pieces above rather than
+duplicating them, and adds two properties the raw boundary does not have:
+
+- **Durability.** Every signed submission is recorded in a SQLite ledger
+  (`TRACESETTLE_NEAR_LEDGER_DB`) *before* it is sent and updated after. A send
+  that times out — the outcome is genuinely unknown — is recorded `UNKNOWN`
+  (never `FAILED`) and resolved by asking the chain what happened; it is never
+  blindly resubmitted. Because a NEAR transaction hash covers its nonce, the
+  *identical* signed bytes can be applied at most once, so a re-send of the same
+  bytes is idempotent while different bytes are never sent.
+- **Finality.** A broadcast commonly returns an *optimistic* (non-final) status.
+  The pipeline polls the chain, bounded, until the execution is `FINAL` before it
+  verifies — it never inflates a pending state to `VERIFIED`.
+
+Two further structural invariants guard it:
+`near_execution_requires_access_key_permission` and
+`near_submission_is_durable_and_recovery_never_resubmits`.
+
 **Locally verified (testnet):** the full pipeline was exercised live on NEAR
 testnet — a funded `*.testnet` account built, signed, broadcast and independently
-verified a real transfer (tx
-`Gjs4YNbEPBQKWB3M6MpV2zAwhvJySk7U6Q8NZnKVWCKH`), reaching state `VERIFIED`. The
-tests substitute only the RPC transport (a network boundary), so every line of
-`execution.py` runs. Two structural invariants guard it:
-`near_execution_never_signs_without_authorization` and
-`near_execution_binding_covers_the_bytes`.
+verified a real transfer, reaching submission state `SETTLED` and settlement state
+`VERIFIED`. The live run moved real testnet value (the receiver's balance rose by
+the transferred amount). The tests substitute only the RPC transport (a network
+boundary), so every line of `execution.py` and `pipeline.py` runs.
 
 ### TEE-bound signing (optional, off by default)
 
@@ -1007,7 +1031,7 @@ transaction request ──▶ │ guard/rules.py      7 controls, all run  │
                         │                     validate, then execute │
                         │ guard/audit.py      hash-chained records  │
                         │ guard/monitor.py    counters + incidents  │
-                        │ guard/invariants.py 36 checked guarantees │
+                        │ guard/invariants.py 38 checked guarantees │
                         └────────────────────┬─────────────────────┘
                                              │ ALLOW + authorization
                                              ▼
@@ -1404,7 +1428,7 @@ immutable commit SHA (not a moving tag), and cancels superseded runs.
 ## Tests
 
 ```sh
-python3 -m pytest tests/ -q          # 1248 passed, 24 skipped (1272 with a server)
+python3 -m pytest tests/ -q          # 1283 passed, 24 skipped (1307 with a server)
 python3 -m pytest tests/test_guard_authorization.py -q
 python3 -m pytest tests/test_guard_invariants.py -q
 python3 -m pytest tests/test_guard_end_to_end.py -q

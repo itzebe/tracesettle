@@ -199,7 +199,7 @@ class Rpc:
     def __init__(self, c): self.c = c
     def status(self): return RpcResult(SourceStatus.OK, {"chain_id": self.c.chain_id, "genesis_hash": self.c.genesis_hash})
     def block_hash(self, *, finality="final"): return RpcResult(SourceStatus.OK, {"hash": "9Gq9bHtf6SKUuWLbzgPMVedA3BtYbYVwb5NVUrQyzoE9", "height": 1})
-    def view_access_key(self, a, p): return RpcResult(SourceStatus.OK, {"nonce": 1})
+    def view_access_key(self, a, p): return RpcResult(SourceStatus.OK, {"nonce": 1, "permission": "FullAccess"})
     def call_function(self, a, m, args=None, *, finality="final"): return RpcResult(SourceStatus.OK, {"decimals": 24})
     def send_tx(self, s, *, wait_until="INCLUDED_FINAL"): return RpcResult(SourceStatus.OK, {})
     def tx_status(self, h, a): return RpcResult(SourceStatus.OK, {})

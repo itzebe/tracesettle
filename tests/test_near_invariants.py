@@ -16,7 +16,7 @@ FIXTURE_DIR = pathlib.Path(__file__).resolve().parent.parent / "tracesettle" / "
 
 def test_near_invariants_are_registered():
     near = [name for name in inv.INVARIANTS if name.startswith("near_")]
-    assert len(near) == 12
+    assert len(near) == 14
     assert all(name in inv.INVARIANT_DESCRIPTIONS for name in near)
 
 

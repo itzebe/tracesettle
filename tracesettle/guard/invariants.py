@@ -1382,7 +1382,7 @@ def _near_execution_never_signs_without_a_valid_authorization():
             from ..near.rpc import RpcResult
             from ..model import SourceStatus
 
-            return RpcResult(SourceStatus.OK, {"nonce": 1})
+            return RpcResult(SourceStatus.OK, {"nonce": 1, "permission": "FullAccess"})
 
         def call_function(self, account_id, method_name, args=None, *, finality="final"):
             from ..near.rpc import RpcResult
@@ -1518,7 +1518,7 @@ def _near_execution_binding_covers_the_bytes():
             from ..near.rpc import RpcResult
             from ..model import SourceStatus
 
-            return RpcResult(SourceStatus.OK, {"nonce": 1})
+            return RpcResult(SourceStatus.OK, {"nonce": 1, "permission": "FullAccess"})
 
         def call_function(self, account_id, method_name, args=None, *, finality="final"):
             from ..near.rpc import RpcResult
@@ -1897,7 +1897,7 @@ class _InvariantRpc:
         from ..near.rpc import RpcResult
         from ..model import SourceStatus
 
-        return RpcResult(SourceStatus.OK, {"nonce": 1})
+        return RpcResult(SourceStatus.OK, {"nonce": 1, "permission": "FullAccess"})
 
     def call_function(self, account_id, method_name, args=None, *, finality="final"):
         from ..near.rpc import RpcResult
@@ -1952,6 +1952,248 @@ def _b58(raw: bytes) -> str:
         out = alphabet[r] + out
     pad = len(raw) - len(raw.lstrip(b"\x00"))
     return "1" * pad + (out or "")
+
+
+class _PermissionRpc:
+    """An RPC transport whose access-key permission the caller controls."""
+
+    def __init__(self, config, permission):
+        self.config = config
+        self.permission = permission
+        self.broadcasts: list[str] = []
+
+    def status(self):
+        from ..near.rpc import RpcResult
+        from ..model import SourceStatus
+
+        return RpcResult(
+            SourceStatus.OK,
+            {"chain_id": self.config.chain_id, "genesis_hash": self.config.genesis_hash},
+        )
+
+    def block_hash(self, *, finality="final"):
+        from ..near.rpc import RpcResult
+        from ..model import SourceStatus
+
+        return RpcResult(
+            SourceStatus.OK,
+            {"hash": "9Gq9bHtf6SKUuWLbzgPMVedA3BtYbYVwb5NVUrQyzoE9", "height": 1},
+        )
+
+    def view_access_key(self, account_id, public_key):
+        from ..near.rpc import RpcResult
+        from ..model import SourceStatus
+
+        return RpcResult(SourceStatus.OK, {"nonce": 1, "permission": self.permission})
+
+    def call_function(self, account_id, method_name, args=None, *, finality="final"):
+        from ..near.rpc import RpcResult
+        from ..model import SourceStatus
+
+        return RpcResult(SourceStatus.OK, {"decimals": 24})
+
+    def send_tx(self, signed_transaction_b64, *, wait_until="INCLUDED_FINAL"):
+        self.broadcasts.append(signed_transaction_b64)
+        from ..near.rpc import RpcResult
+        from ..model import SourceStatus
+
+        return RpcResult(SourceStatus.OK, {})
+
+    def tx_status(self, tx_hash, sender_account_id):
+        from ..near.rpc import RpcResult
+        from ..model import SourceStatus
+
+        return RpcResult(SourceStatus.OK, {})
+
+
+def _near_execution_requires_access_key_permission():
+    """The key's on-chain permission must cover the transaction, or it is refused.
+
+    The boundary is driven twice with a key that on-chain is a *function-call* key
+    (which can never move native NEAR): a native transfer must be refused before
+    any signature, while the same key with a full-access permission must be
+    accepted. This proves the permission check is real and specific, not a
+    blanket refusal.
+    """
+    from ..near.execution import ExecutionError, NearExecutionBoundary
+    from ..near.networks import NETWORKS, NearNetwork
+    from ..near import ed25519
+
+    seed = bytes(range(32))
+    pub = "ed25519:" + _b58(ed25519.public_key(seed))
+    config = NETWORKS[NearNetwork.TESTNET]
+    guard = GuardService(
+        policy=_near_invariant_policy("ok.testnet"),
+        authority=AuthorizationAuthority(
+            key=_INVARIANT_KEY, key_id="i", ephemeral=False, replay_store=InMemoryReplayStore()
+        ),
+    )
+
+    # A function-call key must be refused for a native transfer.
+    fc_rpc = _PermissionRpc(
+        config, {"FunctionCall": {"receiver_id": "ok.testnet", "method_names": []}}
+    )
+    fc_boundary = NearExecutionBoundary(guard, config, rpc=fc_rpc)
+    refused = False
+    try:
+        fc_boundary.prepare(
+            service_id="svc",
+            account_id="agent.testnet",
+            public_key=pub,
+            receiver_id="ok.testnet",
+            asset_identifier="near:native",
+            amount_human="1",
+        )
+    except ExecutionError:
+        refused = True
+    if not refused or fc_rpc.broadcasts:
+        return InvariantResult(
+            "near_execution_requires_access_key_permission",
+            False,
+            "a function-call key was allowed to move native NEAR",
+        )
+
+    # The same operation with a full-access key must be authorized.
+    fa_rpc = _PermissionRpc(config, "FullAccess")
+    fa_boundary = NearExecutionBoundary(guard, config, rpc=fa_rpc)
+    prepared = fa_boundary.prepare(
+        service_id="svc",
+        account_id="agent.testnet",
+        public_key=pub,
+        receiver_id="ok.testnet",
+        asset_identifier="near:native",
+        amount_human="1",
+    )
+    if not prepared.authorized:
+        return InvariantResult(
+            "near_execution_requires_access_key_permission",
+            False,
+            "a full-access key was refused a permitted transfer",
+        )
+    return InvariantResult(
+        "near_execution_requires_access_key_permission",
+        True,
+        "the key's on-chain permission is required: a function-call key cannot move NEAR, "
+        "a full-access key can",
+    )
+
+
+def _near_submission_is_durable_and_recovery_never_resubmits():
+    """An unknown submission outcome is durable, resolved from the chain, and
+    never blindly resubmitted.
+
+    The pipeline is driven with a transport whose send *times out* (the outcome is
+    genuinely unknown). It must record ``UNKNOWN`` - never ``FAILED`` - and send
+    exactly once. When the chain later knows the transaction, ``recover`` must
+    resolve it to a verified settlement *without* sending anything again.
+    """
+    from ..near.networks import NETWORKS, NearNetwork
+    from ..near.pipeline import NearExecutionPipeline
+    from ..near.ledger import SubmissionLedger, SubmissionState
+    from ..near.execution import NearExecutionBoundary
+    from ..near import ed25519
+
+    seed = bytes(range(32))
+    pub = "ed25519:" + _b58(ed25519.public_key(seed))
+    config = NETWORKS[NearNetwork.TESTNET]
+
+    class _FlakyRpc(_PermissionRpc):
+        def __init__(self, config):
+            super().__init__(config, "FullAccess")
+            self.send_status = "TIMEOUT"
+            self.status_result: dict | None = None
+
+        def send_tx(self, signed_transaction_b64, *, wait_until="INCLUDED_FINAL"):
+            self.broadcasts.append(signed_transaction_b64)
+            from ..near.rpc import RpcResult
+            from ..model import SourceStatus
+
+            return RpcResult(SourceStatus.TIMEOUT, None, error="connection timed out")
+
+        def tx_status(self, tx_hash, sender_account_id):
+            from ..near.rpc import RpcResult
+            from ..model import SourceStatus
+
+            if self.status_result is None:
+                return RpcResult(SourceStatus.NOT_FOUND, None, error="unknown transaction")
+            return RpcResult(SourceStatus.OK, self.status_result)
+
+    guard = GuardService(
+        policy=_near_invariant_policy("ok.testnet"),
+        authority=AuthorizationAuthority(
+            key=_INVARIANT_KEY, key_id="i", ephemeral=False, replay_store=InMemoryReplayStore()
+        ),
+    )
+    rpc = _FlakyRpc(config)
+    boundary = NearExecutionBoundary(guard, config, rpc=rpc)
+    pipeline = NearExecutionPipeline(boundary, ledger=SubmissionLedger())
+    prepared = boundary.prepare(
+        service_id="svc",
+        account_id="agent.testnet",
+        public_key=pub,
+        receiver_id="ok.testnet",
+        asset_identifier="near:native",
+        amount_human="1",
+    )
+    if not prepared.authorized:
+        return InvariantResult(
+            "near_submission_is_durable_and_recovery_never_resubmits",
+            False,
+            "the invariant could not be exercised: the operation was not authorized",
+        )
+
+    class _Signer:
+        public_key = pub
+
+        def sign(self, message):
+            return ed25519.sign(message, seed)
+
+    result = pipeline.execute(prepared, _Signer())
+    if result.state != SubmissionState.UNKNOWN:
+        return InvariantResult(
+            "near_submission_is_durable_and_recovery_never_resubmits",
+            False,
+            f"an unknown submission outcome was recorded as {result.state}, not UNKNOWN",
+        )
+    if len(rpc.broadcasts) != 1:
+        return InvariantResult(
+            "near_submission_is_durable_and_recovery_never_resubmits",
+            False,
+            "an unknown submission outcome was retried",
+        )
+
+    # The chain now knows it and the execution is final.
+    rpc.status_result = {
+        "final_execution_status": "FINAL",
+        "status": {"SuccessValue": ""},
+        "transaction": {
+            "hash": prepared.transaction.tx_hash,
+            "signer_id": prepared.transaction.signer_id,
+            "receiver_id": prepared.transaction.receiver_id,
+            "nonce": prepared.transaction.nonce,
+            "actions": [{"Transfer": {"deposit": str(prepared.transaction.amount_base)}}],
+        },
+        "transaction_outcome": {"outcome": {"logs": []}},
+        "receipts_outcome": [],
+    }
+    resolved = pipeline.resolve_unknown(prepared.transaction.tx_hash, prepared=prepared)
+    if resolved is None or resolved.state != SubmissionState.SETTLED:
+        return InvariantResult(
+            "near_submission_is_durable_and_recovery_never_resubmits",
+            False,
+            "recovery did not resolve the unknown submission from the chain",
+        )
+    if len(rpc.broadcasts) != 1:
+        return InvariantResult(
+            "near_submission_is_durable_and_recovery_never_resubmits",
+            False,
+            "recovery re-broadcast the transaction",
+        )
+    return InvariantResult(
+        "near_submission_is_durable_and_recovery_never_resubmits",
+        True,
+        "an unknown submission outcome is durable, resolved from the chain, and never blindly resubmitted",
+    )
 
 
 INVARIANTS: dict[str, Callable[[], InvariantResult]] = {
@@ -2009,6 +2251,12 @@ INVARIANTS: dict[str, Callable[[], InvariantResult]] = {
         _tee_execution_cannot_be_skipped_by_the_state_machine
     ),
     "tee_execution_record_is_transaction_bound": _tee_execution_record_is_transaction_bound,
+    "near_execution_requires_access_key_permission": (
+        _near_execution_requires_access_key_permission
+    ),
+    "near_submission_is_durable_and_recovery_never_resubmits": (
+        _near_submission_is_durable_and_recovery_never_resubmits
+    ),
 }
 
 #: Human-readable statement of each guarantee, for the console and the docs.
@@ -2049,6 +2297,8 @@ INVARIANT_DESCRIPTIONS: dict[str, str] = {
     "tee_execution_requires_a_bound_attestation": "With the TEE gate enabled, the execution boundary refuses to accept a signature until a verified attestation is bound to the transaction.",
     "tee_execution_cannot_be_skipped_by_the_state_machine": "The execution lifecycle reaches signing only from TEE_VERIFIED, and no state can jump straight to a success state.",
     "tee_execution_record_is_transaction_bound": "A TEE-verified execution record authorizes only the exact transaction digest it was bound to; a substituted transaction is refused.",
+    "near_execution_requires_access_key_permission": "The signer's on-chain access-key permission must cover the transaction; a function-call key can never move NEAR, and an unrecognised permission shape is never treated as safe.",
+    "near_submission_is_durable_and_recovery_never_resubmits": "A submission whose outcome is unknown is recorded UNKNOWN (never FAILED) and resolved from the chain; it is never blindly resubmitted.",
 }
 
 

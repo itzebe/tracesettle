@@ -1612,3 +1612,59 @@ signing boundary, honestly scoped.
   `tests/test_near_tee_execution.py` (25), 7 TEE API tests, 3 fail-closed start-up
   tests, 3 mutation tests. pyflakes clean; compileall OK; offline demo
   byte-identical (md5 `4864f13c…`).
+
+## Real NEAR testnet execution pipeline (2026-11-05)
+
+Replaces the *simulated* executor with a real, durable, TEE-gated NEAR **testnet**
+execution path. Additive: the settlement engine, the guard controls, and the
+`SimulatedExecutor` default are untouched.
+
+- **New modules.** `tracesettle/near/pipeline.py` (`NearExecutionPipeline`,
+  `LocalKeySigner`, `ExecutionResult`) and `tracesettle/near/ledger.py`
+  (`SubmissionLedger`, `SubmissionRecord`, `SubmissionState`). The pipeline
+  composes the existing boundary rather than duplicating it: it calls
+  `NearExecutionBoundary.prepare` → `accept_signature` → `send_tx`, then
+  `verify.verify_transaction`.
+- **Access-key permission is enforced at the boundary.** `_read_access_key()` is
+  shared by `_next_nonce()` and the new `_validate_access_key_permission()`, which
+  `prepare()` calls as step 3b. A function-call key can never move native NEAR; a
+  receiver/method outside the key's scope is refused; an omitted `method_names`
+  means *all methods*; an omitted allowance means *unlimited gas*; an unrecognised
+  permission shape is refused (never treated as safe).
+- **Durable, idempotent submission.** Every signed submission is written to the
+  ledger *before* `send_tx`. A send that times out is recorded `UNKNOWN` (never
+  `FAILED`) and resolved by `tx_status`; it is never blindly resubmitted. Because a
+  NEAR tx hash covers its nonce, re-sending the *identical* signed bytes is
+  idempotent; different bytes are never sent. `recover()`/`resolve_unknown()`/
+  `resume_signed()` are the recovery entry points.
+- **Finality polling.** A broadcast commonly returns `EXECUTED_OPTIMISTIC`; the
+  pipeline polls `tx_status`, bounded (`NEAR_FINALITY_ATTEMPTS`/`_DELAY_SECONDS`),
+  until `FINAL` before verifying. It never inflates a pending state to `VERIFIED`.
+- **Wallet path.** `submit_signed()` accepts a client (wallet) signature through
+  the same durable/finality handling; `guard/api.py` uses the pipeline for
+  `POST /api/guard/near/execution/submit` when one is attached, and falls back to
+  `broadcast()` otherwise.
+- **Config:** `NEAR_LEDGER_DB`, `NEAR_FINALITY_ATTEMPTS`,
+  `NEAR_FINALITY_DELAY_SECONDS` (plus the existing `NEAR_EXECUTION_*`/`NEAR_TEE_*`).
+  A configured ledger that cannot be opened is a hard start-up failure.
+- **Invariants:** 36 → **38 total**. New:
+  `near_execution_requires_access_key_permission` (a function-call key cannot move
+  NEAR; a full-access key can — so the check is real, not a blanket refusal) and
+  `near_submission_is_durable_and_recovery_never_resubmits` (an unknown outcome is
+  `UNKNOWN`, resolved from the chain, sent once). Both mutation-tested in
+  `tests/test_guard_invariants.py`.
+- **Live evidence (testnet, 2026-11-05).** A funded `tracesettle-m3-sender-01.testnet`
+  account built, TEE-attestation-gated, signed, broadcast and independently
+  verified a real 0.01 NEAR transfer; submission `SETTLED`, settlement `VERIFIED`,
+  all seven verification checks ok, and the receiver's balance rose by the amount
+  transferred. The opt-in reproduction test is `tests/test_near_live_testnet.py`
+  (skipped unless `TRACESETTLE_TEST_TESTNET_KEY`/`_ACCOUNT`/`_RECEIVER` are set;
+  never mainnet).
+- **Tests:** 1248 → **1283 passed, 24 skipped** (filesystem-only);
+  **1307 passed, 0 skipped** with PostgreSQL 16. New `tests/test_near_pipeline.py`
+  (31) and the opt-in live test. pyflakes clean; compileall OK; offline demo
+  byte-identical (md5 `4864f13c…`).
+- **Honest scope.** The signer is software; the TEE gate enforces that a verified
+  TDX attestation is *bound to the exact bytes* before signing, but the module does
+  not claim the signature was produced inside an enclave. Testnet only — the
+  in-memory signer refuses mainnet.
