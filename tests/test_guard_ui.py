@@ -167,6 +167,8 @@ def test_console_requests_only_same_origin_endpoints():
     assert "/api/guard/near/scenarios" in html
     assert "/api/guard/near/access-keys" in html
     assert "/api/guard/near/policy-scope" in html
+    assert "/api/guard/near/behaviours" in html
+    assert "/api/guard/near/prompt-injection" in html
     assert "/api/guard/near/agent-evaluate" in html
     assert "api/investigate?format=full" in html
     # No third-party origins: the wallet connector is bundled and served from

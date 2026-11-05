@@ -323,3 +323,66 @@ def test_durable_submission_invariant_notices_a_retry_on_unknown_outcome():
     finally:
         pl.NearExecutionPipeline._submit_and_verify = original
 
+
+
+def test_counterparty_invariant_notices_a_read_that_relaxes_a_control():
+    """If a counterparty read could not restrict, the invariant must fail."""
+    from tracesettle.guard import invariants as inv
+    from tracesettle.near import agent_wrapper as aw
+
+    original = aw._evaluate_counterparty
+
+    def permissive(read):  # noqa: ANN001
+        # The mutation: a counterparty read never restricts the outcome.
+        return aw.WrapperOutcome.ALLOW, [], []
+
+    aw._evaluate_counterparty = permissive
+    try:
+        result = inv.INVARIANTS["counterparty_intelligence_only_adds_restriction"]()
+        assert result.holds is False
+    finally:
+        aw._evaluate_counterparty = original
+
+
+def test_approval_invariant_notices_an_approval_that_overrides_a_block():
+    """If a valid approval could override a BLOCK, the invariant must fail."""
+    from tracesettle.guard import invariants as inv
+    from tracesettle.guard import service as svc
+
+    original = svc.GuardService._resolve_approval
+
+    def permissive(self, request, approval, payload_fingerprint):  # noqa: ANN001
+        # The mutation: any presented approval allows, regardless of the decision.
+        if approval is None:
+            return svc.Decision.REQUIRE_APPROVAL, None
+        return svc.Decision.ALLOW, None
+
+    svc.GuardService._resolve_approval = permissive
+    try:
+        result = inv.INVARIANTS["human_approval_cannot_override_a_block"]()
+        assert result.holds is False
+    finally:
+        svc.GuardService._resolve_approval = original
+
+
+def test_approval_invariant_notices_an_unbound_approval():
+    """If an approval were not bound to the payload, a mismatched one would pass."""
+    from tracesettle.guard import invariants as inv
+    from tracesettle.near import approval as ap
+
+    original = ap.ApprovalAuthority.validate
+
+    def unbound(self, token, *, expected_payload_fingerprint, expected_service_id=None, consume=False):  # noqa: ANN001
+        # The mutation: ignore the payload binding entirely.
+        return original(
+            self, token, expected_payload_fingerprint=expected_payload_fingerprint,
+            expected_service_id=expected_service_id, consume=consume,
+        ).__class__(ap.ApprovalState.VALID, "mutated: binding ignored")
+
+    ap.ApprovalAuthority.validate = unbound
+    try:
+        result = inv.INVARIANTS["human_approval_cannot_override_a_block"]()
+        assert result.holds is False
+    finally:
+        ap.ApprovalAuthority.validate = original
+

@@ -191,6 +191,10 @@ class GuardAPI:
             )
         if path == "/api/guard/near/execution":
             return self._near_execution_info()
+        if path == "/api/guard/near/prompt-injection":
+            return self._near_prompt_injection()
+        if path == "/api/guard/near/behaviours":
+            return self._near_behaviours()
         if path == "/api/guard/near/wallet":
             return self._near_wallet_info()
         if path == "/api/guard/near/access-keys":
@@ -264,6 +268,46 @@ class GuardAPI:
         import pathlib
 
         return pathlib.Path(__file__).resolve().parents[1] / "near" / "fixtures"
+
+    def _near_prompt_injection(self) -> ApiResponse:
+        """Run the prompt-injection demonstration and return its audit trail.
+
+        It runs the real guard controls and the real reference signer against a
+        synthetic blocked receiver. Nothing is broadcast. The response is clearly
+        labelled as a simulation.
+        """
+        from ..near.prompt_injection import run_prompt_injection
+
+        audit = run_prompt_injection()
+        return ApiResponse(
+            200,
+            {
+                "note": (
+                    "Simulated demonstration: a synthetic blocked receiver, the real "
+                    "authorization boundary, and a simulated executor that never "
+                    "broadcasts. Not a live attack."
+                ),
+                "audit": audit.to_dict(),
+            },
+        )
+
+    def _near_behaviours(self) -> ApiResponse:
+        """Run the six required agent-authorization behaviours, each labelled."""
+        from ..near.prompt_injection import run_all_behaviours
+
+        results = run_all_behaviours()
+        return ApiResponse(
+            200,
+            {
+                "note": (
+                    "Simulated demonstrations of the six required behaviours: ALLOW, WARN "
+                    "(human approval), BLOCK, tamper, replay and fail-safe failure. The "
+                    "executor is simulated and never broadcasts."
+                ),
+                "behaviours": [b.to_dict() for b in results],
+                "all_held": all(b.held for b in results),
+            },
+        )
 
     def _near_access_keys(self) -> dict[str, Any]:
         """Analyse the documented access-key shapes. Fixtures, clearly labelled."""
@@ -588,11 +632,16 @@ class GuardAPI:
         transaction = body.get("transaction")
         if not isinstance(transaction, dict):
             return _bad_request("field 'transaction' must be a JSON object")
+        approval = self._near_approval(body)
+        if isinstance(approval, ApiResponse):
+            return approval
         try:
             decision = self.service.evaluate_agent_transaction(
                 transaction,
                 policy_read=self._near_policy_read(body),
                 access_key=self._near_access_key(body),
+                counterparty=self._near_counterparty(body),
+                approval=approval,
             )
         except RequestValidationError as exc:
             return _bad_request(str(exc))
@@ -600,6 +649,56 @@ class GuardAPI:
             200,
             decision.to_dict(include_authorization=bool(body.get("return_authorization", False))),
         )
+
+    def _near_counterparty(self, body: Any) -> Any:
+        """The counterparty read for this request.
+
+        Read from the configured reader against the *actual* destination, never
+        from a client-supplied read (a client could otherwise claim a clean
+        counterparty). A client may only ask for the read to be skipped, which
+        the wrapper records as a limitation, never as a clean result.
+        """
+        reader = getattr(self.service, "counterparty_reader", None)
+        if reader is None:
+            return None
+        transaction = body.get("transaction") if isinstance(body, dict) else None
+        if not isinstance(transaction, dict):
+            return None
+        destination = str(transaction.get("destination", "")).strip()
+        if not destination:
+            return None
+        try:
+            return reader.read(destination)
+        except Exception:  # noqa: BLE001 - a failed read must never be a pass
+            from ..near.counterparty import CounterpartyOutcome, CounterpartyRead
+
+            return CounterpartyRead(
+                account_id=destination,
+                chain=str(getattr(reader, "chain", "")),
+                outcome=CounterpartyOutcome.UNKNOWN,
+                limitations=(
+                    "the counterparty reader raised while reading the destination; the "
+                    "counterparty could not be checked",
+                ),
+            )
+
+    def _near_approval(self, body: Any) -> Any:
+        """The human approval presented with this request, or ``None``.
+
+        A malformed approval is refused rather than ignored, so an agent cannot
+        smuggle a bad approval past the route.
+        """
+        from ..near.approval import Approval
+
+        raw = body.get("approval") if isinstance(body, dict) else None
+        if raw is None:
+            return None
+        if not isinstance(raw, dict):
+            return _bad_request("field 'approval' must be a JSON object")
+        try:
+            return Approval.from_dict(raw)
+        except (ValueError, TypeError) as exc:
+            return _bad_request(f"field 'approval': {exc}")
 
     # -- NEAR execution boundary -------------------------------------------
 

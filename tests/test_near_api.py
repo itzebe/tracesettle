@@ -112,6 +112,26 @@ def test_near_policy_scope_endpoint_states_the_gap():
     assert "native" in response.payload["note"].lower()
 
 
+def test_near_prompt_injection_endpoint_returns_a_blocked_audit():
+    response = _api().dispatch("GET", "/api/guard/near/prompt-injection", {}, None)
+    assert response.status == 200
+    audit = response.payload["audit"]
+    assert audit["authorization_result"] == "BLOCK"
+    assert audit["signed"] is False
+    assert audit["broadcast_occurred"] is False
+    assert audit["simulated"] is True
+    assert "simulat" in response.payload["note"].lower()
+
+
+def test_near_behaviours_endpoint_reports_all_held():
+    response = _api().dispatch("GET", "/api/guard/near/behaviours", {}, None)
+    assert response.status == 200
+    assert response.payload["all_held"] is True
+    names = [b["name"] for b in response.payload["behaviours"]]
+    assert names == ["ALLOW", "WARN", "BLOCK", "TAMPER", "REPLAY", "FAILURE"]
+    assert "simulat" in response.payload["note"].lower()
+
+
 # --- agent-evaluate endpoint ------------------------------------------------
 
 

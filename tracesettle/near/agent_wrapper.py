@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import enum
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
@@ -49,6 +50,8 @@ from ..guard.model import (
 from ..guard.service import GuardService
 from ..guard.signer import SignRequest
 from .access_keys import AccessKeyAnalysis, AccessKeyPermission, key_supports_operation
+from .approval import ApprovalRequest
+from .counterparty import CounterpartyOutcome, CounterpartyRead
 from .policy import (
     IntentsPolicy,
     PolicyAvailability,
@@ -219,6 +222,7 @@ class WrapperDecision:
     guard_decision: GuardDecision | None = None
     policy: PolicyRead | None = None
     access_key: AccessKeyAnalysis | None = None
+    counterparty: CounterpartyRead | None = None
     #: Controls that actually protect this request on this path.
     applicable_controls: tuple[str, ...] = ()
     #: Controls a caller might wrongly assume protect this request.
@@ -250,6 +254,7 @@ class WrapperDecision:
             "simulated": self.simulated,
             "policy": self.policy.to_dict() if self.policy else None,
             "access_key": self.access_key.to_dict() if self.access_key else None,
+            "counterparty": self.counterparty.to_dict() if self.counterparty else None,
             "guard_decision": (
                 self.guard_decision.to_dict(include_authorization=include_authorization)
                 if self.guard_decision
@@ -294,6 +299,10 @@ def _finding(
     )
 
 
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 class AgentAuthorizationWrapper:
     """Refuses to let an agent sign until TraceSettle says it may.
 
@@ -307,24 +316,40 @@ class AgentAuthorizationWrapper:
         *,
         policy_read: PolicyRead | None = None,
         access_key: AccessKeyAnalysis | None = None,
+        counterparty: CounterpartyRead | None = None,
     ) -> None:
         self._service = service
         self._policy_read = policy_read
         self._access_key = access_key
+        self._counterparty = counterparty
 
     # -- evaluation ---------------------------------------------------------
 
-    def evaluate(self, transaction: AgentTransaction) -> WrapperDecision:
+    def evaluate(
+        self,
+        transaction: AgentTransaction,
+        *,
+        approval: Any = None,
+        counterparty: CounterpartyRead | None = None,
+    ) -> WrapperDecision:
         """Decide whether the agent may sign this transaction.
 
         Every check runs; the strictest outcome wins. Nothing short-circuits, so
         the returned decision carries the whole picture.
+
+        ``approval`` is a human approval (see
+        :mod:`tracesettle.near.approval`). It is honoured only for a
+        ``REQUIRE_APPROVAL`` outcome and only when bound to this exact payload;
+        it can never override a ``BLOCK``. ``counterparty`` overrides the
+        configured counterparty read for this call (used by tests and the demo);
+        otherwise the wrapper's own read, if any, is used.
         """
         findings: list[WrapperFinding] = []
         limitations: list[str] = []
         proposed: list[WrapperOutcome] = []
 
         scope = transaction.scope
+        cp_read = counterparty if counterparty is not None else self._counterparty
 
         # 1. The guard decision on the real parameters.
         guard_decision: GuardDecision | None = None
@@ -344,7 +369,7 @@ class AgentAuthorizationWrapper:
             request = None
 
         if request is not None:
-            guard_decision = self._service.evaluate(request)
+            guard_decision = self._service.evaluate(request, approval=approval)
             proposed.append(_outcome_from_guard(guard_decision.decision))
             findings.append(
                 _finding(
@@ -379,6 +404,12 @@ class AgentAuthorizationWrapper:
         proposed.append(key_outcome)
         findings.extend(key_findings)
 
+        # 4. Counterparty risk intelligence.
+        cp_outcome, cp_findings, cp_limitations = _evaluate_counterparty(cp_read)
+        proposed.append(cp_outcome)
+        findings.extend(cp_findings)
+        limitations.extend(cp_limitations)
+
         outcome = max(proposed, key=lambda o: o.severity) if proposed else WrapperOutcome.UNKNOWN
         applicable = controls_applicable_to(scope)
         non_applicable = controls_not_applicable_to(scope)
@@ -399,6 +430,7 @@ class AgentAuthorizationWrapper:
             guard_decision=guard_decision,
             policy=self._policy_read,
             access_key=self._access_key,
+            counterparty=cp_read,
             applicable_controls=applicable,
             non_applicable_controls=non_applicable,
             limitations=tuple(limitations),
@@ -407,15 +439,62 @@ class AgentAuthorizationWrapper:
 
     # -- submission ---------------------------------------------------------
 
-    def submit(self, transaction: AgentTransaction, authorization: Any) -> WrapperSubmission:
+    def approval_request(
+        self, transaction: AgentTransaction, *, summary: str | None = None
+    ) -> ApprovalRequest:
+        """Build the approval a human must give before this exact payload may sign.
+
+        The returned :class:`~tracesettle.near.approval.ApprovalRequest` carries
+        the payload fingerprint the eventual approval must be bound to, so the
+        human is approving *these* parameters. It does not approve anything: only
+        a :class:`~tracesettle.near.approval.HumanApprovalChannel` can mint an
+        approval, and the agent holds no reference to one.
+        """
+        request = transaction.to_request()
+        fingerprint = self._service.approval_payload_fingerprint(request)
+        return ApprovalRequest(
+            request_id=transaction.request_id or f"apr-{transaction.service_id}",
+            service_id=transaction.service_id,
+            operation=transaction.operation,
+            chain=transaction.chain,
+            asset=transaction.asset,
+            amount=str(transaction.amount),
+            destination=transaction.destination,
+            payload_fingerprint=fingerprint,
+            summary=summary
+            or (
+                f"{transaction.operation} {transaction.amount} {transaction.asset} to "
+                f"{transaction.destination}"
+            ),
+            created_at=_utc_now_iso(),
+        )
+
+    def submit(
+        self,
+        transaction: AgentTransaction,
+        authorization: Any,
+        *,
+        approval: Any = None,
+        decision: WrapperDecision | None = None,
+    ) -> WrapperSubmission:
         """Sign/submit only if the wrapper allows it, then hand to the signer.
 
         The authorization is validated by the signer against the *actual*
         transaction, so a token minted for a different destination, amount or
         asset is refused even though it is genuine. This is the "changed the
-        destination after approval" case.
+        destination after approval" case. A ``REQUIRE_APPROVAL`` outcome is
+        re-evaluated with ``approval`` so a human approval bound to this exact
+        payload is the only way it can reach the signer.
+
+        ``decision`` may be supplied to reuse a decision already produced by
+        :meth:`evaluate` - which is what a caller does after a human approval,
+        because a human approval is single-use and a second evaluation would
+        consume it. The signer still independently re-derives the binding from
+        the transaction it is asked to sign, so a reused decision cannot smuggle
+        an unauthorized transaction past the boundary.
         """
-        decision = self.evaluate(transaction)
+        if decision is None:
+            decision = self.evaluate(transaction, approval=approval)
         if not decision.permits_signing:
             return WrapperSubmission(
                 outcome=decision.outcome,
@@ -761,6 +840,56 @@ def _outcome_from_guard(decision: Decision) -> WrapperOutcome:
         Decision.HOLD: WrapperOutcome.HOLD,
         Decision.BLOCK: WrapperOutcome.BLOCK,
     }[decision]
+
+
+#: Counterparty outcome mapped to the wrapper outcome it requires. CLEAR adds
+#: nothing; REVIEW asks for a human; BLOCK refuses; UNKNOWN fails safe.
+_COUNTERPARTY_TO_WRAPPER = {
+    CounterpartyOutcome.CLEAR: WrapperOutcome.ALLOW,
+    CounterpartyOutcome.REVIEW: WrapperOutcome.REQUIRE_APPROVAL,
+    CounterpartyOutcome.BLOCK: WrapperOutcome.BLOCK,
+    CounterpartyOutcome.UNKNOWN: WrapperOutcome.UNKNOWN,
+}
+
+#: Counterparty signal severity mapped onto the wrapper's severity scale.
+_CP_SEVERITY = {
+    "INFO": WrapperSeverity.INFO,
+    "LOW": WrapperSeverity.LOW,
+    "MEDIUM": WrapperSeverity.MEDIUM,
+    "HIGH": WrapperSeverity.HIGH,
+    "CRITICAL": WrapperSeverity.CRITICAL,
+}
+
+
+def _evaluate_counterparty(
+    read: CounterpartyRead | None,
+) -> tuple[WrapperOutcome, list[WrapperFinding], list[str]]:
+    """Fold counterparty risk intelligence into the wrapper outcome.
+
+    Counterparty intelligence only ever *adds* restriction: a CLEAR read adds
+    nothing, a REVIEW asks for a human, a BLOCK refuses, and an UNKNOWN (a signal
+    that could not be read) fails safe. It never overrides a mandatory control
+    downward, and with no read configured it is inert.
+    """
+    if read is None:
+        return WrapperOutcome.ALLOW, [], []
+    findings = [
+        _finding(
+            f"COUNTERPARTY_{f.code}",
+            _CP_SEVERITY.get(f.severity.value, WrapperSeverity.MEDIUM),
+            f.title,
+            f.detail,
+            dict(f.observed, source=f.source, method=f.method),
+        )
+        for f in read.findings
+    ]
+    limitations = list(read.limitations)
+    if read.outcome is not CounterpartyOutcome.CLEAR:
+        limitations.append(
+            f"Counterparty intelligence for {read.account_id} resolved to "
+            f"{read.outcome.value}."
+        )
+    return _COUNTERPARTY_TO_WRAPPER[read.outcome], findings, limitations
 
 
 def _summarize(

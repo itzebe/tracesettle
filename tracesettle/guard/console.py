@@ -319,6 +319,28 @@ CONSOLE_HTML = """<!DOCTYPE html>
     </div>
 
     <div class="panel">
+      <h2>Agent authorization behaviours</h2>
+      <p class="small">Six required behaviours, each run against the real controls: a legitimate
+        payment is allowed; an above-threshold payment requires a bound human approval; an
+        unapproved destination is blocked; a tampered payload is refused; a replayed authorization
+        is refused; and an unavailable control fails safe. The executor is simulated and nothing is
+        broadcast.</p>
+      <div id="near-behaviours"></div>
+    </div>
+
+    <div class="panel">
+      <h2>Prompt-injection demonstration</h2>
+      <p class="small">A manipulated agent is told to ignore its instructions and pay an attacker's
+        receiver. TraceSettle evaluates the <strong>actual transaction parameters</strong>, not the
+        agent's explanation, so the payment is blocked and never signed. This is a controlled
+        simulation; the executor is simulated and nothing is broadcast.</p>
+      <div class="actions" style="margin-bottom:12px">
+        <button class="act primary" type="button" id="near-injection-run">Run the injection demo</button>
+      </div>
+      <div id="near-injection"></div>
+    </div>
+
+    <div class="panel">
       <h2>Verifiable execution (Intel TDX attestation)</h2>
       <p class="small">The NEAR AI Cloud gateway runs inside an Intel TDX confidential VM. TraceSettle
         fetches the gateway's <strong>real</strong> hardware quote and verifies it locally against the
@@ -816,6 +838,9 @@ async function loadNear() {
 
   const runBtn = document.getElementById("near-run");
   runBtn.onclick = runNearAttacks;
+  const injBtn = document.getElementById("near-injection-run");
+  if (injBtn) injBtn.onclick = runNearInjection;
+  loadNearBehaviours();
   document.getElementById("tee-run").onclick = runNearTee;
   document.getElementById("near-eval-legit").onclick = () => evalNear(true);
   document.getElementById("near-eval-attack").onclick = () => evalNear(false);
@@ -884,6 +909,50 @@ async function runNearAttacks() {
       '<div class="note ' + (data.all_passed ? "ok" : "bad") + '">' +
       esc((data.all_passed ? "All scenarios matched expectation" : "A scenario did not match")) +
       "</div>";
+  } catch (err) { el.innerHTML = '<div class="note bad">' + esc(err.message) + "</div>"; }
+}
+
+async function loadNearBehaviours() {
+  const el = document.getElementById("near-behaviours");
+  if (!el) return;
+  el.innerHTML = loading("Running the six behaviours…");
+  try {
+    const data = await api("GET", "/api/guard/near/behaviours");
+    el.innerHTML = '<div class="note sim">' + esc(data.note) + "</div>" +
+      (data.behaviours || []).map((b) => {
+        const cls = b.held ? "s-ALLOW" : "s-BLOCK";
+        return '<div class="card"><h3>' + esc(b.name) + " — " + esc(b.title) + "</h3>" +
+          '<div class="kv small"><dt>Expected</dt><dd class="small">' + esc(b.expected) + "</dd>" +
+          "<dt>Observed</dt><dd class='small'>" + esc(b.observed) + "</dd>" +
+          "<dt>Detail</dt><dd class='small'>" + esc(b.detail) + "</dd></div>" +
+          '<div class="small ' + cls + '">' + (b.held ? "HOLDS" : "DID NOT HOLD") + "</div></div>";
+      }).join("") +
+      '<div class="note ' + (data.all_held ? "ok" : "bad") + '">' +
+      esc(data.all_held ? "All six behaviours held" : "A behaviour did not hold") + "</div>";
+  } catch (err) { el.innerHTML = '<div class="note bad">' + esc(err.message) + "</div>"; }
+}
+
+async function runNearInjection() {
+  const el = document.getElementById("near-injection");
+  el.innerHTML = loading("Running the prompt-injection demo…");
+  try {
+    const data = await api("GET", "/api/guard/near/prompt-injection");
+    const a = data.audit || {};
+    el.innerHTML = '<div class="note sim">' + esc(data.note) + "</div>" +
+      '<div class="card"><h3>Agent instruction (untrusted)</h3>' +
+      '<p class="small mono">' + esc(a.injection_text || "") + "</p></div>" +
+      '<div class="card"><h3>What the guard actually evaluated</h3>' +
+      '<div class="kv small"><dt>Requested receiver</dt><dd class="mono small">' +
+      esc(a.actual_receiver || "") + "</dd>" +
+      "<dt>Approved destinations</dt><dd class='mono small'>" +
+      esc((a.approved_destinations || []).join(", ")) + "</dd>" +
+      "<dt>Amount</dt><dd class='small'>" + esc(a.amount || "") + " " + esc(a.asset || "") + "</dd>" +
+      "<dt>Decision</dt><dd>" + status(a.authorization_result) + "</dd>" +
+      "<dt>Signed</dt><dd>" + esc(String(a.signed)) + "</dd>" +
+      "<dt>Broadcast</dt><dd>" + esc(String(a.broadcast_occurred)) + "</dd></div></div>" +
+      '<div class="card"><h3>Why it was refused</h3><ul class="small">' +
+      (a.rejection_reasons || []).map((r) => "<li>" + esc(r) + "</li>").join("") +
+      "</ul></div>";
   } catch (err) { el.innerHTML = '<div class="note bad">' + esc(err.message) + "</div>"; }
 }
 

@@ -785,7 +785,13 @@ def _build_guard_service() -> GuardService:
         require_postgres=config.GUARD_REQUIRE_POSTGRES,
     )
     if state_store is None:
-        return GuardService(policy=policy, audit=audit, safeguard_store=safeguard_store)
+        return GuardService(
+            policy=policy,
+            audit=audit,
+            safeguard_store=safeguard_store,
+            approval_authority=_build_approval_authority(),
+            counterparty_reader=_build_counterparty_reader(),
+        )
     authority = AuthorizationAuthority(
         replay_store=DurableReplayStore(
             state_store, counter_retention_seconds=config.GUARD_STATE_RETENTION_SECONDS
@@ -799,6 +805,82 @@ def _build_guard_service() -> GuardService:
         authority=authority,
         state_store=state_store,
         safeguard_store=safeguard_store,
+        approval_authority=_build_approval_authority(),
+        counterparty_reader=_build_counterparty_reader(),
+    )
+
+
+def _build_approval_authority() -> Any:
+    """Build the human-approval authority, or ``None`` when it is not enabled.
+
+    Off by default: with no authority, a REQUIRE_APPROVAL decision can never be
+    raised to ALLOW, which is the fail-closed default. When enabled, the key is
+    read from ``TRACESETTLE_GUARD_APPROVAL_KEY`` or an ephemeral one is minted
+    (and reported as ephemeral). The key never leaves this object.
+    """
+    if not config.NEAR_APPROVAL_ENABLED:
+        return None
+
+    from .near.approval import ApprovalAuthority
+
+    key = _approval_key()
+    return ApprovalAuthority(
+        key=key,
+        key_id="approval",
+        ttl_seconds=config.NEAR_APPROVAL_TTL_SECONDS,
+    )
+
+
+def _approval_key() -> bytes:
+    """The approval signing key: configured, else a fresh ephemeral key.
+
+    Only the hash of the key id is ever exposed. An ephemeral key is safe for a
+    single process (the approval must be validated in the same process that
+    minted it); a multi-process deployment must configure
+    ``TRACESETTLE_GUARD_APPROVAL_KEY``.
+    """
+    import hashlib
+    import secrets as _secrets
+
+    configured = config.GUARD_APPROVAL_KEY
+    if configured:
+        try:
+            return bytes.fromhex(configured.strip())
+        except ValueError:
+            return hashlib.sha256(configured.encode("utf-8")).digest()
+    return _secrets.token_bytes(32)
+
+
+def _build_counterparty_reader() -> Any:
+    """Build the counterparty intelligence reader, or ``None`` when disabled.
+
+    A configured blocklist that cannot be read or that carries an unevidenced
+    entry is a hard failure: a security control must not silently fall back to a
+    weaker default. The reader performs only public, keyless RPC reads.
+    """
+    if not config.NEAR_COUNTERPARTY_ENABLED:
+        return None
+    from .near.counterparty import Blocklist, CounterpartyIntelligence
+    from .near.networks import network_config
+    from .near.rpc import NearRpc
+
+    blocklist = None
+    if config.NEAR_BLOCKLIST_PATH:
+        try:
+            blocklist = Blocklist.from_file(config.NEAR_BLOCKLIST_PATH)
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(f"TRACESETTLE_NEAR_BLOCKLIST: {exc}") from exc
+    net_config = network_config(config.NEAR_EXECUTION_NETWORK)
+    client = HttpClient(
+        timeout=config.REQUEST_TIMEOUT_SECONDS,
+        max_attempts=config.MAX_ATTEMPTS,
+    )
+    rpc = NearRpc(net_config, client=client)
+    return CounterpartyIntelligence(
+        rpc,
+        chain=net_config.chain_id,
+        blocklist=blocklist,
+        min_account_age_blocks=config.NEAR_COUNTERPARTY_MIN_AGE_BLOCKS,
     )
 
 

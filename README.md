@@ -92,7 +92,7 @@ Amounts are exact `Decimal`s: a limit of `0.3` admits `0.3` and refuses
 `0.30000000000000004`. Severity is compared by an explicit rank, never by the
 severity's string value (`"MEDIUM"` sorts after `"HIGH"` alphabetically).
 
-Forty-three structural guarantees are checked by *running the real code*, on demand, at
+Forty-five structural guarantees are checked by *running the real code*, on demand, at
 `GET /api/guard/invariants` — including `refusal_never_reaches_the_executor` and
 `authorization_is_single_use`. Each checker is also mutation-tested: the guarded
 behaviour is deliberately broken and the checker must notice. A checker that
@@ -597,12 +597,30 @@ restart can be retrieved afterwards with its evidence intact.
 
 An AI agent or a payment service acting for one must ask TRACESETTLE before it
 signs. `AgentAuthorizationWrapper.evaluate(transaction)` reads the **actual**
-parameters — never the agent's explanation — and runs three independent checks,
+parameters — never the agent's explanation — and runs four independent checks,
 where the strictest outcome wins:
 
 1. the Transaction Guard's deterministic decision;
 2. the NEAR Intents policy scope;
-3. the NEAR access-key scope.
+3. the NEAR access-key scope;
+4. **counterparty risk intelligence** (opt-in, `TRACESETTLE_NEAR_COUNTERPARTY=1`):
+   a deterministic read of the destination account from public, keyless NEAR RPC
+   reads — account existence (`view_account`), a contract-vs-account check, and
+   account age in blocks. A non-existent account is `BLOCK`, a contract or a
+   brand-new account forces a review, and a signal that cannot be read fails safe.
+   A counterparty read only ever **adds** restriction; it never overrides a
+   mandatory control downward.
+
+**A human approval is bound to the exact payload.** When a decision is
+`REQUIRE_APPROVAL` and approval is enabled
+(`TRACESETTLE_NEAR_APPROVAL=1`), an authenticated approver signs a payload bound
+to the request's own authorization fingerprint (including the transaction byte
+digest when the caller holds the bytes), single-use and expiring (default 300 s).
+A valid approval can raise `REQUIRE_APPROVAL` to `ALLOW` and nothing else: it can
+never override a `BLOCK` or a `HOLD`, and a tampered, expired, replayed or
+payload-mismatched approval leaves the decision at `REQUIRE_APPROVAL`. Off by
+default, so an unconfigured deployment can never turn a needed approval into an
+allow.
 
 | Outcome | Meaning |
 | --- | --- |
@@ -656,7 +674,10 @@ mutation-tested: `near_policy_must_be_in_force`,
 `near_execution_binding_covers_the_bytes`,
 `near_execution_requires_access_key_permission`, and
 `near_submission_is_durable_and_recovery_never_resubmits` (fourteen NEAR-specific
-in total).
+in total). Two further guarantees cover the newer controls and are mutation-tested
+too: `counterparty_intelligence_only_adds_restriction` (a counterparty read can
+never weaken a decision) and `human_approval_cannot_override_a_block` (an approval
+can never lift a `BLOCK` or a `HOLD`).
 
 ## Try it: do X → see Y
 
@@ -680,11 +701,11 @@ a bare interpreter.
 **1. Run the tests.**
 
 ```sh
-python -m pytest tests/ --collect-only -q   # 1272 tests collected
-python -m pytest tests/ -q                  # 1248 passed, 24 skipped
+python -m pytest tests/ --collect-only -q   # 1429 tests collected
+python -m pytest tests/ -q                  # 1401 passed, 28 skipped
 ```
-→ `1248 passed, 24 skipped`. The skips are the PostgreSQL integration
-tests; set `TRACESETTLE_TEST_PG_DSN` to a real server to run them (**1272 passed, 0 skipped**).
+→ `1401 passed, 28 skipped`. The skips are the PostgreSQL integration
+tests; set `TRACESETTLE_TEST_PG_DSN` to a real server to run them (**1429 passed, 0 skipped**).
 
 **2. Prove the enforcement boundary: a permitted request executes, a suspicious
 one cannot.**
@@ -737,7 +758,7 @@ curl -sS -X POST http://127.0.0.1:8080/api/guard/sign \
 curl -sS http://127.0.0.1:8080/api/guard/invariants \
   | python3 -c 'import sys,json;d=json.load(sys.stdin);print("all hold:",d["all_hold"]);[print(" ",i["name"]) for i in d["invariants"]]'
 ```
-→ `all hold: True` and the forty-three invariant names, including the fourteen NEAR
+→ `all hold: True` and the forty-five invariant names, including the fourteen NEAR
 ones (`near_policy_must_be_in_force`, `near_native_scope_gap_is_always_stated`,
 `near_function_call_key_cannot_transfer_near`,
 `near_unrecognised_access_key_never_allows`,
@@ -894,6 +915,21 @@ curl -sS http://127.0.0.1:8000/api/guard/near/policy-scope \
 → `all passed: True`, and the native scope names the controls that do **not**
 apply (`destinations`, `budget_usd`, `timelock_ms`, `schedule`,
 `owner_approval`).
+
+**14b. See the agent-authorization behaviours and the prompt-injection demo.**
+
+```sh
+curl -sS http://127.0.0.1:8000/api/guard/near/behaviours \
+  | python3 -c 'import sys,json;d=json.load(sys.stdin);print("all held:",d["all_held"]);[print(" ",b["name"],b["observed"]) for b in d["behaviours"]]'
+curl -sS http://127.0.0.1:8000/api/guard/near/prompt-injection \
+  | python3 -c 'import sys,json;a=json.load(sys.stdin)["audit"];print(a["authorization_result"], "signed:", a["signed"], "broadcast:", a["broadcast_occurred"])'
+```
+→ `all held: True` for the six behaviours (ALLOW, WARN, BLOCK, TAMPER, REPLAY,
+FAILURE), and `BLOCK signed: False broadcast: False` for the injection demo: a
+manipulated agent that is told to pay an attacker's receiver is refused because
+the guard evaluates the **actual transaction parameters**, not the instruction,
+and nothing is signed or broadcast. Both panels are also in the console's
+**NEAR agent security** tab.
 
 **15. Evaluate one agent transaction over HTTP — allowed, then blocked.**
 
@@ -1086,7 +1122,7 @@ transaction request ──▶ │ guard/rules.py      7 controls, all run  │
                         │                     validate, then execute │
                         │ guard/audit.py      hash-chained records  │
                         │ guard/monitor.py    counters + incidents  │
-                        │ guard/invariants.py 43 checked guarantees │
+                        │ guard/invariants.py 45 checked guarantees │
                         └────────────────────┬─────────────────────┘
                                              │ ALLOW + authorization
                                              ▼
@@ -1159,7 +1195,7 @@ identical decisions.
 | `tracesettle/guard/safeguards.py` | Durable security safeguards: the learning loop's store (SQLite). |
 | `tracesettle/guard/learning.py` | The learning loop: derive a lesson, apply safeguards (only ever tightening). |
 | `tracesettle/guard/state_pg.py` | Optional PostgreSQL backend: shared nonces, counters, revocations, idempotency. |
-| `tracesettle/guard/invariants.py` | The forty-three structural guarantees, checked by execution. |
+| `tracesettle/guard/invariants.py` | The forty-five structural guarantees, checked by execution. |
 | `tracesettle/guard/api.py` | Guard HTTP routing and JSON serialization. |
 | `tracesettle/guard/console.py` | The security operations console page. |
 | `docs/TRANSACTION_SECURITY.md` | The security layer in full, including what it does not do. |
@@ -1262,7 +1298,7 @@ variable and all documented in `docs/TRANSACTION_SECURITY.md`:
   replay-nonce store all have explicit caps, so a flood cannot exhaust memory.
   When durable state is configured, spent nonces and the limit counters live in
   SQLite instead, so they survive a restart (see **Durable state** below).
-- **Structural invariants, checked by execution.** Forty-three guarantees at
+- **Structural invariants, checked by execution.** Forty-five guarantees at
   `GET /api/guard/invariants`, each mutation-tested so a checker that cannot fail
   is treated as a defect.
 - **Honest audit claim.** In-place modification of an audit record is detectable;
@@ -1484,7 +1520,7 @@ immutable commit SHA (not a moving tag), and cancels superseded runs.
 ## Tests
 
 ```sh
-python3 -m pytest tests/ -q          # 1356 passed, 28 skipped (1380 passed, 4 skipped with PostgreSQL)
+python3 -m pytest tests/ -q          # 1401 passed, 28 skipped (1429 passed, 0 skipped with PostgreSQL)
 python3 -m pytest tests/test_guard_authorization.py -q
 python3 -m pytest tests/test_guard_invariants.py -q
 python3 -m pytest tests/test_guard_end_to_end.py -q

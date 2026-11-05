@@ -1041,6 +1041,138 @@ def _near_function_call_key_cannot_transfer_near():
     )
 
 
+def _counterparty_intelligence_only_adds_restriction():
+    """Counterparty intelligence can only add restriction, never relax a control.
+
+    A CLEAR read must not soften a destination the guard refuses, a REVIEW must
+    raise the outcome, and an UNKNOWN read must fail safe. This is checked by
+    running the real wrapper with each read against a real guard.
+    """
+    from ..model import SourceStatus
+    from ..near.counterparty import CounterpartyIntelligence, CounterpartyOutcome
+    from ..near.rpc import RpcResult
+
+    class _Rpc:
+        def __init__(self, mode: str) -> None:
+            self.mode = mode
+
+        def view_account(self, account_id: str) -> RpcResult:
+            if self.mode == "missing":
+                return RpcResult(SourceStatus.NOT_FOUND, error="UNKNOWN_ACCOUNT")
+            if self.mode == "timeout":
+                return RpcResult(SourceStatus.TIMEOUT, error="timeout")
+            if self.mode == "contract":
+                return RpcResult(SourceStatus.OK, {"code_hash": "abc", "block_height": 1})
+            return RpcResult(SourceStatus.OK, {"code_hash": "1" * 32, "block_height": 1_900_000})
+
+        def block_hash(self, *, finality: str = "final") -> RpcResult:
+            return RpcResult(SourceStatus.OK, {"height": 2_000_000})
+
+    wrapper = _near_wrapper(policy_read=_near_policy_fixture("policy_in_force.json"))
+    from ..near.attacks import ATTACKER_DESTINATION
+
+    approved = _near_legit_tx()
+    unapproved = _near_legit_tx(destination=ATTACKER_DESTINATION)
+
+    clear = CounterpartyIntelligence(_Rpc("user"), chain="near").read(approved.destination)
+    if clear.outcome is not CounterpartyOutcome.CLEAR:
+        return InvariantResult(
+            "counterparty_intelligence_only_adds_restriction", False,
+            "a normal user account did not read as CLEAR",
+        )
+    # CLEAR must not soften a destination the guard refuses.
+    softened = wrapper.evaluate(unapproved, counterparty=clear)
+    if softened.outcome.value != "BLOCK":
+        return InvariantResult(
+            "counterparty_intelligence_only_adds_restriction", False,
+            f"a CLEAR counterparty read softened a guard BLOCK to {softened.outcome.value}",
+        )
+    # A contract read must raise an otherwise-ALLOW request to at least review.
+    review = CounterpartyIntelligence(_Rpc("contract"), chain="near").read(approved.destination)
+    raised = wrapper.evaluate(approved, counterparty=review)
+    if raised.outcome.value in {"ALLOW", "HOLD"}:
+        return InvariantResult(
+            "counterparty_intelligence_only_adds_restriction", False,
+            f"a REVIEW counterparty read did not restrict the outcome (got {raised.outcome.value})",
+        )
+    # An unreadable signal must fail safe.
+    unknown = CounterpartyIntelligence(_Rpc("timeout"), chain="near").read(approved.destination)
+    failed = wrapper.evaluate(approved, counterparty=unknown)
+    if failed.outcome.value != "UNKNOWN" or failed.permits_signing:
+        return InvariantResult(
+            "counterparty_intelligence_only_adds_restriction", False,
+            f"an UNKNOWN counterparty read did not fail safe (got {failed.outcome.value})",
+        )
+    return InvariantResult(
+        "counterparty_intelligence_only_adds_restriction", True,
+        "a CLEAR read never softens a control, a REVIEW raises the outcome, and an "
+        "UNKNOWN read fails safe",
+    )
+
+
+def _human_approval_cannot_override_a_block():
+    """A human approval is honoured only for REQUIRE_APPROVAL and bound to the payload."""
+    from ..near.approval import ApprovalAuthority
+    from ..near.agent_wrapper import AgentAuthorizationWrapper
+
+    authority = AuthorizationAuthority(
+        key=_INVARIANT_KEY, key_id="inv-approval", ephemeral=False,
+        replay_store=InMemoryReplayStore(),
+    )
+    approval_authority = ApprovalAuthority(key=_INVARIANT_KEY, key_id="inv-approval")
+    service = GuardService(
+        policy=DEFAULT_POLICY, authority=authority, approval_authority=approval_authority
+    )
+    wrapper = AgentAuthorizationWrapper(service)
+
+    # A blocked request: even a *valid* approval bound to its payload cannot allow it.
+    blocked = _near_legit_tx(destination=_UNAPPROVED, amount="10", request_id="inv-block")
+    blocked_decision = wrapper.evaluate(blocked)
+    if blocked_decision.outcome.value != "BLOCK":
+        return InvariantResult(
+            "human_approval_cannot_override_a_block", False,
+            f"the setup request did not block (got {blocked_decision.outcome.value})",
+        )
+    request = wrapper.approval_request(blocked)
+    approval = approval_authority.approve(request, approver="ops-human")
+    still_blocked = wrapper.evaluate(blocked, approval=approval)
+    if still_blocked.outcome.value != "BLOCK" or still_blocked.permits_signing:
+        return InvariantResult(
+            "human_approval_cannot_override_a_block", False,
+            "a valid approval overrode a BLOCK decision",
+        )
+
+    # A REQUIRE_APPROVAL request is raised to ALLOW only by an approval bound to
+    # this exact payload; an approval for a different payload is refused.
+    needs = _near_legit_tx(destination=_APPROVED, amount="6000", request_id="inv-approve")
+    base = wrapper.evaluate(needs)
+    if base.outcome.value != "REQUIRE_APPROVAL":
+        return InvariantResult(
+            "human_approval_cannot_override_a_block", False,
+            f"the above-threshold request did not require approval (got {base.outcome.value})",
+        )
+    good = approval_authority.approve(wrapper.approval_request(needs), approver="ops-human")
+    wrong_payload = approval_authority.approve(
+        wrapper.approval_request(
+            _near_legit_tx(destination=_APPROVED, amount="7000", request_id="inv-approve")
+        ),
+        approver="ops-human",
+    )
+    refused = wrapper.evaluate(needs, approval=wrong_payload)
+    allowed = wrapper.evaluate(needs, approval=good)
+    if refused.outcome.value != "REQUIRE_APPROVAL" or allowed.outcome.value != "ALLOW":
+        return InvariantResult(
+            "human_approval_cannot_override_a_block", False,
+            f"approval binding is wrong: wrong-payload={refused.outcome.value}, "
+            f"correct={allowed.outcome.value}",
+        )
+    return InvariantResult(
+        "human_approval_cannot_override_a_block", True,
+        "a BLOCK ignores even a valid approval, and a REQUIRE_APPROVAL is raised only by an "
+        "approval bound to this exact payload",
+    )
+
+
 def _near_provider_success_is_never_verified_without_evidence():
     """A provider success claim must never produce an independently-verified level."""
     from ..model import OverallOutcome, ReconciliationResult, Stage, StageAssessment, StageState
@@ -2764,6 +2896,10 @@ INVARIANTS: dict[str, Callable[[], InvariantResult]] = {
     "provider_policy_reads_fail_closed_and_verify_identity": (
         _provider_policy_reads_fail_closed_and_verify_identity
     ),
+    "counterparty_intelligence_only_adds_restriction": (
+        _counterparty_intelligence_only_adds_restriction
+    ),
+    "human_approval_cannot_override_a_block": _human_approval_cannot_override_a_block,
 }
 
 #: Human-readable statement of each guarantee, for the console and the docs.
@@ -2811,6 +2947,8 @@ INVARIANT_DESCRIPTIONS: dict[str, str] = {
     "enclave_signing_key_is_isolated_from_the_host": "The host cannot obtain a usable signature without the verified enclave key: a signature that does not verify over the exact bytes is refused, and a revoked or rotated key never signs again.",
     "tee_attestation_freshness_is_enforced": "The enclave provisioning nonce is fresh on every call and a provider policy read beyond its freshness bound (or with no timestamp) is refused, so a stale attestation or policy is never treated as current.",
     "provider_policy_reads_fail_closed_and_verify_identity": "A live provider policy read is refused unless it is authenticated, comes from the pinned provider host and is for the configured agent; a caller can never point the read at its own provider.",
+    "counterparty_intelligence_only_adds_restriction": "Counterparty risk intelligence can only ever add restriction: a CLEAR read never softens a control, a REVIEW raises the outcome, and an unreadable signal fails safe.",
+    "human_approval_cannot_override_a_block": "A human approval is honoured only for a REQUIRE_APPROVAL decision and only when bound to the exact transaction payload; it can never override a BLOCK, and an approval for a different payload is refused.",
 }
 
 

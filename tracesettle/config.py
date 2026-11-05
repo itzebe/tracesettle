@@ -267,6 +267,13 @@ def load_service_registry():
 #: read by ``guard.authorization.load_key``; only its presence is inspected here.
 GUARD_AUTH_KEY_CONFIGURED = bool(os.environ.get("TRACESETTLE_GUARD_AUTH_KEY"))
 
+#: Optional key for signing human approvals (see ``tracesettle.near.approval``).
+#: Hex (64 chars) or any passphrase (hashed to 32 bytes). Unset mints an
+#: ephemeral per-process key, which is safe for a single instance; a multi-process
+#: deployment must configure it so an approval minted by one instance validates on
+#: another. The value is never logged or returned.
+GUARD_APPROVAL_KEY = os.environ.get("TRACESETTLE_GUARD_APPROVAL_KEY") or None
+
 # ---------------------------------------------------------------------------
 # NEAR Intents agent API (read-only policy inspection)
 # ---------------------------------------------------------------------------
@@ -326,6 +333,44 @@ NEAR_ALLOW_CLIENT_POLICY_SELECTION = (
         "yes",
         "on",
     }
+)
+
+#: Whether the agent path reads counterparty risk intelligence from the NEAR RPC.
+#: Off by default (the loopback default), so a deployment that does not opt in
+#: has no counterparty signal. When on, an account that does not exist is
+#: blocked, a contract or a brand-new account forces a review, and a signal that
+#: cannot be read fails safe. Only public, keyless RPC reads are used.
+NEAR_COUNTERPARTY_ENABLED = (
+    os.environ.get("TRACESETTLE_NEAR_COUNTERPARTY", "").strip().lower()
+    in {"1", "true", "yes", "on"}
+)
+
+#: Optional path to an evidence-backed counterparty blocklist (JSON). Every
+#: entry must name a source, or loading fails. Unset means no blocklist. The file
+#: holds only public identifiers and published evidence, never secrets.
+NEAR_BLOCKLIST_PATH = os.environ.get("TRACESETTLE_NEAR_BLOCKLIST") or None
+
+#: The account-age floor, in blocks, below which a counterparty is reviewed as
+#: "new". At roughly one block per second, the default (86400) is about a day.
+NEAR_COUNTERPARTY_MIN_AGE_BLOCKS = int(
+    os.environ.get("TRACESETTLE_NEAR_COUNTERPARTY_MIN_AGE_BLOCKS", "86400") or "86400"
+)
+
+#: Whether the agent path can validate a human approval for a REQUIRE_APPROVAL
+#: decision. Off by default, so a request that needs approval can never become
+#: ALLOW on an unconfigured deployment (the fail-closed default). When on, an
+#: approval must be bound to the exact transaction payload, is single-use, and
+#: expires. The signing key is generated from ``TRACESETTLE_GUARD_APPROVAL_KEY``
+#: when set, otherwise an ephemeral key is used and reported as ephemeral.
+NEAR_APPROVAL_ENABLED = (
+    os.environ.get("TRACESETTLE_NEAR_APPROVAL", "").strip().lower()
+    in {"1", "true", "yes", "on"}
+)
+
+#: Seconds an approval remains valid. A short window keeps a stale approval from
+#: outliving the transaction it approved.
+NEAR_APPROVAL_TTL_SECONDS = int(
+    os.environ.get("TRACESETTLE_NEAR_APPROVAL_TTL_SECONDS", "300") or "300"
 )
 
 #: Path to the durable NEAR Intents lifecycle database (SQLite). Unset means the

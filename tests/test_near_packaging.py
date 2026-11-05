@@ -99,6 +99,8 @@ try:
         "/api/guard/near/access-keys",
         "/api/guard/near/policy-scope",
         "/api/guard/near/settlement-demo",
+        "/api/guard/near/prompt-injection",
+        "/api/guard/near/behaviours",
         "/api/guard/invariants",
     ):
         try:
@@ -123,6 +125,8 @@ finally:
         "/api/guard/near/access-keys": 200,
         "/api/guard/near/policy-scope": 200,
         "/api/guard/near/settlement-demo": 200,
+        "/api/guard/near/prompt-injection": 200,
+        "/api/guard/near/behaviours": 200,
         "/api/guard/invariants": 200,
     }, results
 
