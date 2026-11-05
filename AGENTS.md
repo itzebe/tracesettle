@@ -1452,3 +1452,55 @@ production connector path, not the demo emulator.
   `dd2490a`; all five CI checks green (`Tests and static analysis`, `Docker build
   and runtime`, `PostgreSQL shared-state integration`, `Vercel`, `Vercel
   container image`).
+
+## Independent security audit — access-key fail-open (2026-11-03)
+
+Final pre-publication audit of the NEAR integration. One real defect found and
+fixed; the rest of the audit found the controls intact.
+
+- **Defect: an unrecognised access-key permission produced `ALLOW`.**
+  `near/access_keys.py::parse_access_key` classifies a permission shape that is
+  neither `FullAccess` nor `FunctionCall` as `UNKNOWN` at `AccessKeyRisk.CRITICAL`
+  and treats it as unrestricted. But `AgentAuthorizationWrapper._evaluate_access_key`
+  only forced a review for `FULL_ACCESS`; the `UNKNOWN` case fell through to
+  `key_supports_operation`, which returns `(True, "unrecognised permission treated
+  as unrestricted")`. On a native request whose policy method switch is on, that
+  reached `ALLOW`/`permits_signing` — a `CRITICAL`-risk key treated as *safer*
+  than a full-access key (which only warns). This violated "unrecognised
+  permission structures are never treated as safe".
+- **Fix.** `_evaluate_access_key` now fails closed to `REQUIRE_APPROVAL` for
+  `AccessKeyPermission.UNKNOWN` on **every** path (Intents and native), emitting an
+  `ACCESS_KEY_PERMISSION_UNKNOWN` finding at `CRITICAL`. It is at least as strict
+  as the full-access treatment.
+- **New structural invariant** `near_unrecognised_access_key_never_allows` (NEAR
+  invariants 11 → 12; total 30 → 31), mutation-tested: reverting the branch makes
+  it fail. Two wrapper regression tests:
+  `test_an_unrecognised_access_key_permission_forces_review` and
+  `test_an_unrecognised_access_key_permission_does_not_allow_a_native_transfer`.
+- **Probe-design lesson.** The first invariant draft used an amount/asset the demo
+  guard already blocks, so the guard's `BLOCK` masked the access-key branch and the
+  mutation test failed to fail. The probe now uses a fully-approved request
+  (`NEAR`, amount `5`, an approved destination) so the *key* check is the only
+  thing under test. An invariant that cannot fail proves nothing.
+- **Audit confirmed intact (no change needed):** the five outcomes with
+  strictest-wins `max`; `UNKNOWN` strictest; no executor unless `ALLOW`;
+  transaction-bound HMAC authorization and replay refusal; server-side policy
+  resolution with `policy_fixture` off by default and a public bind refusing when
+  it is on; service-identity binding and credential rejection; `status == APPLIED
+  && provider_policy_synced` gating; native requests never described as
+  Intents-protected; function-call keys can never transfer NEAR or attach NEAR;
+  provider `SUCCESS` never yields `VERIFIED`; amount/timestamp never correlation.
+- **Counts:** 1175 passed, 24 skipped filesystem-only; **1199 passed, 0 skipped**
+  with a local `postgres:16-alpine` (`TRACESETTLE_TEST_PG_DSN`). pyflakes clean;
+  compileall OK; no module-level third-party runtime import; offline demo
+  byte-identical (md5 `4864f13c…`); 9/9 attack scenarios and 31/31 invariants from
+  a package-only copy. PR #10 head `4e0568d`, all five CI checks green.
+- **Publication secret scan (full history).** 634 blobs / 865 objects across all
+  local branches (remote has 11 heads) and 0 tags. High-signal regexes (`ghp_`,
+  `gho_`, `github_pat_`, `sk-`, `AKIA`, `AIza`, `xox`, PEM private keys, JWTs,
+  Neon DSNs, seed phrases) → **0 matches**. No key-like JSON field in any blob.
+  `.openhands/` and `.pytest_cache/` are gitignored and untracked. The only
+  ever-added env-like file is `deploy/production/.env.production.example`
+  (placeholders only). All `detect-secrets` hits are placeholders, CI
+  ephemeral-container credentials (`tracesettle:tracesettle`), and public chain
+  data. **Scan clean — publication gate passed.**
