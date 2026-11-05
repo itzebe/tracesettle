@@ -917,6 +917,56 @@ def _build_near_execution(guard_service: GuardService) -> Any:
     return boundary
 
 
+def _build_enclave_boundary() -> Any:
+    """Build the enclave signing boundary, or ``None`` when it is not configured.
+
+    Enclave signing is an explicit operator decision (``TRACESETTLE_ENCLAVE_SIGN_URL``
+    plus ``TRACESETTLE_ENCLAVE_APPROVED_MEASUREMENT``). With no signing endpoint
+    the boundary reports itself unavailable and refuses to sign, so hardware
+    execution stays disabled rather than silently falling back to a software key.
+    A malformed approved measurement is a hard failure at start-up.
+    """
+    if not config.ENCLAVE_SIGN_URL:
+        return None
+    from .near.collateral import PcsCollateralClient
+    from .near.enclave import (
+        ApprovedMeasurement,
+        EnclaveKeyRegistry,
+        EnclaveSigningBoundary,
+        HttpEnclaveTransport,
+        MeasurementPolicy,
+    )
+
+    try:
+        fields = config.parse_approved_measurement(config.ENCLAVE_APPROVED_MEASUREMENT)
+    except ValueError as exc:
+        raise RuntimeError(f"TRACESETTLE_ENCLAVE_APPROVED_MEASUREMENT: {exc}") from exc
+    approved = [ApprovedMeasurement("operator-approved", fields)] if fields else []
+    client = HttpClient(
+        timeout=config.REQUEST_TIMEOUT_SECONDS,
+        max_attempts=config.MAX_ATTEMPTS,
+    )
+    registry = EnclaveKeyRegistry(config.ENCLAVE_KEY_DB)
+    return EnclaveSigningBoundary(
+        transport=HttpEnclaveTransport(
+            base_url=_attestation_base_url(), sign_url=config.ENCLAVE_SIGN_URL, client=client
+        ),
+        measurements=MeasurementPolicy(approved, require_pin=True),
+        registry=registry,
+        collateral_client=PcsCollateralClient(),
+    )
+
+
+def _attestation_base_url() -> str:
+    """The attested gateway origin, derived from the configured attestation URL."""
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(config.TEE_ATTESTATION_URL)
+    if parts.scheme and parts.netloc:
+        return f"{parts.scheme}://{parts.netloc}"
+    return "https://cloud-api.near.ai"
+
+
 def _build_tee_provider() -> Any:
     """Build the real TEE attestation provider, or ``None`` when it is not enabled.
 
@@ -1022,6 +1072,7 @@ class InvestigationServer(ThreadingHTTPServer):
             investigation_store=self.investigation_store,
             near_execution=_build_near_execution(self.guard_service),
             tee_provider=_build_tee_provider(),
+            enclave=_build_enclave_boundary(),
         )
         self.guard_limiter = guard_limiter or TokenBucketLimiter(
             config.GUARD_RATE_LIMIT_PER_MINUTE, config.GUARD_RATE_LIMIT_BURST

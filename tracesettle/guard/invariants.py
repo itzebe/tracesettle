@@ -2283,6 +2283,399 @@ def _near_submission_is_durable_and_recovery_never_resubmits():
     )
 
 
+def _enclave_signing_requires_a_verified_attestation():
+    """Enclave signing must refuse without a verified, pinned, bound attestation.
+
+    A stand-in enclave with a real keypair is used, and the injected verifier is
+    mutated in turn to prove the guard is real: an unverified quote, a
+    measurement that does not match the approved identity, and a nonce bound to a
+    different request must each refuse to provision a key. A boundary that
+    provisioned on any of those would fail here.
+    """
+    import base64
+    import hashlib
+
+    from ..near import ed25519
+    from ..near.enclave import (
+        ApprovedMeasurement,
+        EnclaveError,
+        EnclaveSigningBoundary,
+        MeasurementPolicy,
+        ProvisioningRequest,
+    )
+    from ..near.tdx import TdxVerification
+
+    seed = bytes(range(32))
+    measurement = {"mr_config_id": "aa" * 48}
+
+    class _Transport:
+        sign_url = "http://enclave.invariant/sign"
+
+        def attestation_report(self, nonce_hex):
+            return {
+                "gateway_attestation": {
+                    "intel_quote": "00" * 64,
+                    "signing_algo": "ed25519",
+                    "signing_address": ed25519.public_key(seed).hex(),
+                }
+            }
+
+        def sign(self, payload):
+            message = base64.b64decode(payload["message"])
+            return {
+                "signing_algo": "ed25519",
+                "signing_address": ed25519.public_key(seed).hex(),
+                "message_digest": hashlib.sha256(message).hexdigest(),
+                "signature": base64.b64encode(ed25519.sign(message, seed)).decode(),
+            }
+
+    request = ProvisioningRequest(
+        key_id="k",
+        purpose="execute",
+        execution_id="e",
+        transaction_digest="d" * 64,
+        decision_nonce="n" * 64,
+        policy_version="v1",
+    )
+
+    def _verifier(*, verified=True, nonce_override=None, measurement_override=None):
+        def _v(quote, *, nonce=None, signing_address=None, **kwargs):  # noqa: A002
+            result = TdxVerification(verified=verified)
+            result.nonce = nonce_override if nonce_override is not None else (nonce or b"").hex()
+            result.measurement = dict(measurement_override or measurement)
+            result.checks = {"collateral_verified": True}
+            result.signing_address = ed25519.public_key(seed).hex()
+            if not verified:
+                result.failures.append("unverified")
+            return result
+
+        return _v
+
+    def _boundary(**kw):
+        return EnclaveSigningBoundary(
+            transport=_Transport(),
+            measurements=MeasurementPolicy(
+                [ApprovedMeasurement("m", {"mr_config_id": "aa" * 48})], require_pin=True
+            ),
+            verifier=kw.get("verifier", _verifier()),
+        )
+
+    # A genuine, pinned, bound attestation provisions a key and signs.
+    good = _boundary()
+    key = good.provision(request)
+    signature = good.sign(key, request, b"tx hash")
+    if not signature.verified:
+        return InvariantResult(
+            "enclave_signing_requires_a_verified_attestation",
+            False,
+            "a verified, pinned, bound attestation did not produce a usable signature",
+        )
+
+    # An unverified attestation must refuse.
+    try:
+        _boundary(verifier=_verifier(verified=False)).provision(request)
+        return InvariantResult(
+            "enclave_signing_requires_a_verified_attestation",
+            False,
+            "an unverified attestation provisioned a key",
+        )
+    except EnclaveError:
+        pass
+
+    # A measurement that is not the approved identity must refuse.
+    try:
+        _boundary(
+            verifier=_verifier(measurement_override={"mr_config_id": "bb" * 48})
+        ).provision(request)
+        return InvariantResult(
+            "enclave_signing_requires_a_verified_attestation",
+            False,
+            "an unapproved measurement provisioned a key",
+        )
+    except EnclaveError:
+        pass
+
+    # A nonce bound to a different request must refuse.
+    try:
+        _boundary(verifier=_verifier(nonce_override="de" * 32)).provision(request)
+        return InvariantResult(
+            "enclave_signing_requires_a_verified_attestation",
+            False,
+            "an attestation bound to a different request provisioned a key",
+        )
+    except EnclaveError:
+        pass
+
+    return InvariantResult(
+        "enclave_signing_requires_a_verified_attestation",
+        True,
+        "enclave signing provisions a key only from a verified, measurement-pinned, "
+        "transaction-bound attestation; unverified, unpinned and unbound all refuse",
+    )
+
+
+def _enclave_signing_key_is_isolated_from_the_host():
+    """The host cannot obtain a usable signature without the enclave, or a revoked key.
+
+    A signature that does not verify over the exact bytes must be refused, and a
+    revoked or rotated key must never sign again. A boundary that returned a
+    tampered signature, or that kept a revoked key usable, would fail here.
+    """
+    import base64
+    import hashlib
+
+    from ..near import ed25519
+    from ..near.enclave import (
+        ApprovedMeasurement,
+        EnclaveError,
+        EnclaveSigningBoundary,
+        KeyNotUsable,
+        MeasurementPolicy,
+        ProvisioningRequest,
+    )
+    from ..near.tdx import TdxVerification
+
+    seed = bytes(range(32))
+    measurement = {"mr_config_id": "aa" * 48}
+
+    class _Transport:
+        sign_url = "http://enclave.invariant/sign"
+        tamper = False
+
+        def attestation_report(self, nonce_hex):
+            return {
+                "gateway_attestation": {
+                    "intel_quote": "00" * 64,
+                    "signing_algo": "ed25519",
+                    "signing_address": ed25519.public_key(seed).hex(),
+                }
+            }
+
+        def sign(self, payload):
+            message = base64.b64decode(payload["message"])
+            signature = ed25519.sign(message, seed)
+            if self.tamper:
+                signature = bytes([signature[0] ^ 0xFF]) + signature[1:]
+            return {
+                "signing_algo": "ed25519",
+                "signing_address": ed25519.public_key(seed).hex(),
+                "message_digest": hashlib.sha256(message).hexdigest(),
+                "signature": base64.b64encode(signature).decode(),
+            }
+
+    def _verifier(quote, *, nonce=None, signing_address=None, **kwargs):  # noqa: A002
+        result = TdxVerification(verified=True)
+        result.nonce = (nonce or b"").hex()
+        result.measurement = dict(measurement)
+        result.checks = {"collateral_verified": True}
+        result.signing_address = ed25519.public_key(seed).hex()
+        return result
+
+    request = ProvisioningRequest(
+        key_id="k",
+        purpose="execute",
+        execution_id="e",
+        transaction_digest="d" * 64,
+        decision_nonce="n" * 64,
+        policy_version="v1",
+    )
+    transport = _Transport()
+    boundary = EnclaveSigningBoundary(
+        transport=transport,
+        measurements=MeasurementPolicy(
+            [ApprovedMeasurement("m", {"mr_config_id": "aa" * 48})], require_pin=True
+        ),
+        verifier=_verifier,
+    )
+    key = boundary.provision(request)
+
+    # A tampered signature must be refused.
+    transport.tamper = True
+    try:
+        boundary.sign(key, request, b"tx hash")
+        return InvariantResult(
+            "enclave_signing_key_is_isolated_from_the_host",
+            False,
+            "a tampered enclave signature was accepted",
+        )
+    except EnclaveError:
+        pass
+    transport.tamper = False
+
+    # A revoked key must never sign again.
+    boundary.registry.revoke(key.key_id)
+    try:
+        boundary.sign(key, request, b"tx hash")
+        return InvariantResult(
+            "enclave_signing_key_is_isolated_from_the_host",
+            False,
+            "a revoked enclave key still produced a signature",
+        )
+    except KeyNotUsable:
+        pass
+
+    return InvariantResult(
+        "enclave_signing_key_is_isolated_from_the_host",
+        True,
+        "a tampered signature and a revoked key are both refused; the host cannot obtain a "
+        "usable signature without the verified enclave key",
+    )
+
+
+def _tee_attestation_freshness_is_enforced():
+    """A stale attestation or policy read must be refused, never treated as current.
+
+    The provisioning nonce must be fresh per call, and a provider policy read
+    whose ``as_of`` is beyond the freshness bound (or missing) must be refused.
+    """
+    from datetime import datetime, timezone
+
+    from ..near.enclave import ProvisioningRequest, derive_provisioning_nonce
+    from ..near.policy import PolicyAdapter, PolicyAvailability
+
+    request = ProvisioningRequest(
+        key_id="k",
+        purpose="execute",
+        execution_id="e",
+        transaction_digest="d" * 64,
+        decision_nonce="n" * 64,
+        policy_version="v1",
+    )
+    if derive_provisioning_nonce(request) == derive_provisioning_nonce(request):
+        return InvariantResult(
+            "tee_attestation_freshness_is_enforced",
+            False,
+            "the provisioning nonce is not fresh per call; a stale attestation could be reused",
+        )
+
+    class _Stale:
+        def get_json(self, url, params=None, headers=None):
+            class _R:
+                ok = True
+                http_status = 200
+                status = "SourceStatus.OK"
+                data = {
+                    "agent_id": "a",
+                    "revision": 1,
+                    "status": "APPLIED",
+                    "provider_policy_synced": True,
+                    "as_of": "2020-01-01T00:00:00Z",
+                }
+
+            return _R()
+
+    adapter = PolicyAdapter(
+        base_url="https://provider.invalid",
+        api_key="k",
+        http_client=_Stale(),
+        max_age_seconds=60,
+        now=lambda: datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+    read = adapter.read_policy("a")
+    if read.availability is PolicyAvailability.AVAILABLE:
+        return InvariantResult(
+            "tee_attestation_freshness_is_enforced",
+            False,
+            "a stale provider policy was reported available",
+        )
+    return InvariantResult(
+        "tee_attestation_freshness_is_enforced",
+        True,
+        "the provisioning nonce is fresh per call and a stale provider policy is refused",
+    )
+
+
+def _provider_policy_reads_fail_closed_and_verify_identity():
+    """A live policy read must verify provider identity and agent, and fail closed.
+
+    An unauthenticated read, a read from a non-pinned host, and a read for a
+    different agent must each be refused rather than reported as a policy. A
+    caller must never be able to point the read at its own provider.
+    """
+    from ..near.policy import PolicyAdapter, PolicyAvailability
+
+    def _client(data):
+        class _C:
+            def get_json(self, url, params=None, headers=None):
+                class _R:
+                    ok = True
+                    http_status = 200
+                    status = "SourceStatus.OK"
+
+                _R.data = data
+                return _R()
+
+        return _C()
+
+    body = {
+        "agent_id": "a",
+        "revision": 1,
+        "status": "APPLIED",
+        "provider_policy_synced": True,
+    }
+
+    # No key: refuse without making a request.
+    no_key = PolicyAdapter(
+        base_url="https://provider.invalid", http_client=_client(body)
+    ).read_policy("a")
+    if no_key.availability is PolicyAvailability.AVAILABLE:
+        return InvariantResult(
+            "provider_policy_reads_fail_closed_and_verify_identity",
+            False,
+            "an unauthenticated policy read was reported available",
+        )
+
+    # Wrong host: refuse.
+    wrong_host = PolicyAdapter(
+        base_url="https://attacker.invalid",
+        api_key="k",
+        http_client=_client(body),
+        expected_host="provider.invalid",
+    ).read_policy("a")
+    if wrong_host.availability is PolicyAvailability.AVAILABLE:
+        return InvariantResult(
+            "provider_policy_reads_fail_closed_and_verify_identity",
+            False,
+            "a policy read from a non-pinned host was reported available",
+        )
+
+    # Wrong agent in the body: refuse.
+    other_agent = dict(body, agent_id="someone-else")
+    wrong_agent = PolicyAdapter(
+        base_url="https://provider.invalid",
+        api_key="k",
+        http_client=_client(other_agent),
+        expected_agent_id="a",
+    ).read_policy("a")
+    if wrong_agent.availability is PolicyAvailability.AVAILABLE:
+        return InvariantResult(
+            "provider_policy_reads_fail_closed_and_verify_identity",
+            False,
+            "a policy read for a different agent was reported available",
+        )
+
+    # A correct, authenticated read is available (so the check is not vacuous).
+    ok = PolicyAdapter(
+        base_url="https://provider.invalid",
+        api_key="k",
+        http_client=_client(body),
+        expected_host="provider.invalid",
+        expected_agent_id="a",
+    ).read_policy("a")
+    if not ok.ok:
+        return InvariantResult(
+            "provider_policy_reads_fail_closed_and_verify_identity",
+            False,
+            "a correct authenticated policy read was refused",
+        )
+    return InvariantResult(
+        "provider_policy_reads_fail_closed_and_verify_identity",
+        True,
+        "an unauthenticated read, a non-pinned host and a different agent are all refused; "
+        "a correct authenticated read succeeds",
+    )
+
+
 INVARIANTS: dict[str, Callable[[], InvariantResult]] = {
     "non_allow_never_authorizes": _non_allow_never_authorizes,
     "refusal_never_reaches_the_executor": _refusal_never_reaches_the_executor,
@@ -2347,6 +2740,16 @@ INVARIANTS: dict[str, Callable[[], InvariantResult]] = {
     "near_submission_is_durable_and_recovery_never_resubmits": (
         _near_submission_is_durable_and_recovery_never_resubmits
     ),
+    "enclave_signing_requires_a_verified_attestation": (
+        _enclave_signing_requires_a_verified_attestation
+    ),
+    "enclave_signing_key_is_isolated_from_the_host": (
+        _enclave_signing_key_is_isolated_from_the_host
+    ),
+    "tee_attestation_freshness_is_enforced": _tee_attestation_freshness_is_enforced,
+    "provider_policy_reads_fail_closed_and_verify_identity": (
+        _provider_policy_reads_fail_closed_and_verify_identity
+    ),
 }
 
 #: Human-readable statement of each guarantee, for the console and the docs.
@@ -2390,6 +2793,10 @@ INVARIANT_DESCRIPTIONS: dict[str, str] = {
     "tee_execution_record_is_transaction_bound": "A TEE-verified execution record authorizes only the exact transaction digest it was bound to; a substituted transaction is refused.",
     "near_execution_requires_access_key_permission": "The signer's on-chain access-key permission must cover the transaction; a function-call key can never move NEAR, and an unrecognised permission shape is never treated as safe.",
     "near_submission_is_durable_and_recovery_never_resubmits": "A submission whose outcome is unknown is recorded UNKNOWN (never FAILED) and resolved from the chain; it is never blindly resubmitted.",
+    "enclave_signing_requires_a_verified_attestation": "An enclave signing key is provisioned only from a verified Intel TDX attestation whose measurement is an approved identity and whose nonce is bound to the exact transaction; an unverified, unpinned or unbound attestation provisions nothing.",
+    "enclave_signing_key_is_isolated_from_the_host": "The host cannot obtain a usable signature without the verified enclave key: a signature that does not verify over the exact bytes is refused, and a revoked or rotated key never signs again.",
+    "tee_attestation_freshness_is_enforced": "The enclave provisioning nonce is fresh on every call and a provider policy read beyond its freshness bound (or with no timestamp) is refused, so a stale attestation or policy is never treated as current.",
+    "provider_policy_reads_fail_closed_and_verify_identity": "A live provider policy read is refused unless it is authenticated, comes from the pinned provider host and is for the configured agent; a caller can never point the read at its own provider.",
 }
 
 

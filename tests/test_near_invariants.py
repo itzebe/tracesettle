@@ -224,7 +224,7 @@ def test_near_chain_invariant_notices_a_silently_accepted_conflict(monkeypatch):
 
 def test_tee_invariants_are_registered():
     tee = [name for name in inv.INVARIANTS if name.startswith("tee_")]
-    assert len(tee) == 6
+    assert len(tee) == 7
     assert all(name in inv.INVARIANT_DESCRIPTIONS for name in tee)
 
 
@@ -324,3 +324,89 @@ def test_tee_nonce_invariant_notices_a_verifier_that_ignores_the_nonce(monkeypat
     monkeypatch.setattr(tdx_mod, "verify_tdx_quote", lambda *a, **k: _AlwaysVerified())
     result = inv.INVARIANTS["tee_attestation_is_bound_to_the_decision_nonce"]()
     assert result.holds is False
+
+
+def test_enclave_signing_invariant_notices_a_permissive_measurement_policy(monkeypatch):
+    """If any measurement were accepted, the enclave provisioning invariant must fail."""
+    from tracesettle.near import enclave as enclave_mod
+
+    monkeypatch.setattr(
+        enclave_mod.MeasurementPolicy,
+        "evaluate",
+        lambda self, measurement: enclave_mod.ApprovedMeasurement("mutated", {"mr_config_id": "aa" * 48}),
+    )
+    result = inv.INVARIANTS["enclave_signing_requires_a_verified_attestation"]()
+    assert result.holds is False
+
+
+def test_enclave_signing_invariant_notices_a_verifier_that_ignores_the_nonce(monkeypatch):
+    """If the nonce binding were ignored, the enclave provisioning invariant must fail."""
+    from tracesettle.near import enclave as enclave_mod
+
+    monkeypatch.setattr(
+        enclave_mod.EnclaveSigningBoundary, "_nonce_matches", staticmethod(lambda v, n: True)
+    )
+    result = inv.INVARIANTS["enclave_signing_requires_a_verified_attestation"]()
+    assert result.holds is False
+
+
+def test_enclave_key_isolation_invariant_notices_an_unverified_signature(monkeypatch):
+    """If a tampered signature were accepted, the key-isolation invariant must fail."""
+    from tracesettle.near import enclave as enclave_mod
+
+    monkeypatch.setattr(enclave_mod.ed25519, "verify", lambda *a, **k: True)
+    result = inv.INVARIANTS["enclave_signing_key_is_isolated_from_the_host"]()
+    assert result.holds is False
+
+
+def test_enclave_key_isolation_invariant_notices_a_revoked_key_that_still_signs(monkeypatch):
+    """If a revoked key still signed, the key-isolation invariant must fail."""
+    from tracesettle.near import enclave as enclave_mod
+
+    monkeypatch.setattr(enclave_mod.EnclaveKeyRegistry, "is_usable", lambda self, key_id: True)
+    monkeypatch.setattr(enclave_mod.EnclaveKeyRegistry, "state", lambda self, key_id: "ACTIVE")
+    result = inv.INVARIANTS["enclave_signing_key_is_isolated_from_the_host"]()
+    assert result.holds is False
+
+
+def test_freshness_invariant_notices_a_stale_policy_that_is_accepted(monkeypatch):
+    """If a stale policy were accepted, the freshness invariant must fail."""
+    from tracesettle.near import policy as policy_mod
+
+    monkeypatch.setattr(policy_mod.PolicyAdapter, "_freshness", lambda self, policy: None)
+    result = inv.INVARIANTS["tee_attestation_freshness_is_enforced"]()
+    assert result.holds is False
+
+
+def test_provider_policy_invariant_notices_an_unverified_read(monkeypatch):
+    """If a read were reported available regardless, the provider-policy invariant must fail."""
+    from tracesettle.near import policy as policy_mod
+
+    monkeypatch.setattr(
+        policy_mod.PolicyAdapter,
+        "read_policy",
+        lambda self, agent_id: policy_mod.PolicyRead(
+            availability=policy_mod.PolicyAvailability.AVAILABLE,
+            policy=policy_mod.parse_policy(
+                {
+                    "agent_id": "a",
+                    "revision": 1,
+                    "status": "APPLIED",
+                    "provider_policy_synced": True,
+                }
+            ),
+        ),
+    )
+    result = inv.INVARIANTS["provider_policy_reads_fail_closed_and_verify_identity"]()
+    assert result.holds is False
+
+
+def test_new_invariants_are_registered():
+    for name in (
+        "enclave_signing_requires_a_verified_attestation",
+        "enclave_signing_key_is_isolated_from_the_host",
+        "tee_attestation_freshness_is_enforced",
+        "provider_policy_reads_fail_closed_and_verify_identity",
+    ):
+        assert name in inv.INVARIANTS
+        assert name in inv.INVARIANT_DESCRIPTIONS

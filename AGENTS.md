@@ -1734,3 +1734,52 @@ now fetched, signature-verified and evaluated.
   Intel-published trust state. The executor still simulates execution and
   broadcasts nothing; the guard's decisions do not depend on the TEE, and the
   signing key is software-held. No TEE *confidentiality* protection is claimed.
+
+## Enclave signing boundary + hardening (2026-11-04, branch `feat/near-security-integration`)
+
+Adds the enclave signing boundary end to end, on top of the TEE-bound NEAR
+execution path, and hardens the shipped package. Runtime stays standard-library
+only; no verification rule was weakened and the settlement engine is untouched.
+
+- **New module `tracesettle/near/enclave.py`.** `EnclaveSigningBoundary` provisions
+  a signing key only against a verified Intel TDX attestation whose measurement is
+  an operator-approved identity (`MeasurementPolicy`/`ApprovedMeasurement`; every
+  pinned field must match exactly, and an empty pin is refused) and whose nonce is
+  bound to the exact transaction (`derive_provisioning_nonce` over the request's
+  canonical bytes). It then verifies the returned signature **over the exact bytes**
+  with the provisioned key; a signature that does not verify, comes from a
+  different key, or echoes a different digest is refused. `EnclaveTransactionSigner`
+  adapts it to the pipeline's `TransactionSigner` and is **testnet-only** (refuses
+  mainnet at construction). `HttpEnclaveTransport` refuses to sign with no
+  configured `sign_url`, so hardware execution is off until genuinely set up.
+- **Fail-closed start-up.** `securityconfig.validate_startup` refuses a
+  non-loopback/public bind when `TRACESETTLE_ENCLAVE_REQUIRED`/TEE-required is set
+  without a signing endpoint / attestation provider. `config.py` gains
+  `ENCLAVE_KEY_DB`, `ENCLAVE_REQUIRED`, and approved-measurement parsing.
+- **Routes.** `GuardAPI` accepts `enclave`; `GET /api/guard/near/enclave` reports
+  the boundary honestly (`enabled:false` with a plain note when unconfigured), and
+  `POST /api/guard/near/execution/enclave-sign` signs a prepared transaction
+  through the boundary. `ui._build_enclave_boundary()` returns `None` unless
+  `TRACESETTLE_ENCLAVE_SIGN_URL` + an approved measurement are configured.
+- **Console.** The security console gains an "Enclave signing boundary" panel that
+  renders the configured state, the approved measurements, and the signing
+  algorithm — never a fabricated protection badge.
+- **Two new invariants (now 43 total):**
+  `enclave_signing_requires_a_verified_attestation` and
+  `enclave_signing_key_is_isolated_from_the_host`, both mutation-tested in
+  `tests/test_near_invariants.py`.
+- **Demos.** `demo/near_enclave_demo.py` runs five checks against the real boundary
+  logic with a deterministic stand-in enclave transport (real ed25519 keypair, no
+  network): provision+verify, non-approved measurement refused, mainnet refused,
+  non-verifying signature refused, request/key mismatch refused. Byte-identical
+  across runs; `tests/test_demo.py::test_near_enclave_demo_is_deterministic_and_passes`
+  guards it. No transaction is signed for a chain and no key is requested.
+- **Tests:** **1380 passed, 1 skipped** (full suite; the 1 skip needs a live
+  enclave/TEE endpoint). New `tests/test_enclave.py`, `tests/test_enclave_execution.py`,
+  enclave cases in `tests/test_near_execution_api.py` and `tests/test_securityconfig.py`.
+  pyflakes clean; compileall OK; offline demo byte-identical (md5 `4864f13c…`);
+  `demo/near_demo.py` 9/9; packaging 10 passed.
+- **Honest scope.** The only substitution in tests/demo is the enclave transport;
+  genuineness of real quote verification is covered by the live hardware harness
+  and `tee_attestation_verification_is_genuine`. The boundary is testnet-only and
+  no mainnet signing is claimed.

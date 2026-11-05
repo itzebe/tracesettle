@@ -222,3 +222,84 @@ def test_tee_gate_with_both_dependencies_starts(monkeypatch):
     monkeypatch.setattr(config, "NEAR_EXECUTION_ENABLED", True)
     profile = _validate("127.0.0.1")
     assert profile.public_binding is False
+
+
+# --- enclave signing gate ---------------------------------------------------
+
+
+def _with_config(monkeypatch, **attrs):
+    from tracesettle import config
+
+    for key, value in attrs.items():
+        monkeypatch.setattr(config, key, value, raising=False)
+
+
+def test_enclave_required_without_a_sign_url_is_refused(monkeypatch):
+    _with_config(
+        monkeypatch,
+        ENCLAVE_REQUIRED=True,
+        ENCLAVE_SIGN_URL=None,
+        ENCLAVE_APPROVED_MEASUREMENT="mr_config_id=aa",
+        NEAR_EXECUTION_ENABLED=True,
+    )
+    with pytest.raises(ConfigurationError) as exc:
+        _validate("127.0.0.1")
+    assert "TRACESETTLE_ENCLAVE_SIGN_URL" in str(exc.value)
+
+
+def test_enclave_required_without_a_measurement_pin_is_refused(monkeypatch):
+    _with_config(
+        monkeypatch,
+        ENCLAVE_REQUIRED=True,
+        ENCLAVE_SIGN_URL="https://enclave.invalid/sign",
+        ENCLAVE_APPROVED_MEASUREMENT=None,
+        NEAR_EXECUTION_ENABLED=True,
+    )
+    with pytest.raises(ConfigurationError) as exc:
+        _validate("127.0.0.1")
+    assert "TRACESETTLE_ENCLAVE_APPROVED_MEASUREMENT" in str(exc.value)
+
+
+def test_enclave_required_without_execution_is_refused(monkeypatch):
+    _with_config(
+        monkeypatch,
+        ENCLAVE_REQUIRED=True,
+        ENCLAVE_SIGN_URL="https://enclave.invalid/sign",
+        ENCLAVE_APPROVED_MEASUREMENT="mr_config_id=aa",
+        NEAR_EXECUTION_ENABLED=False,
+    )
+    with pytest.raises(ConfigurationError) as exc:
+        _validate("127.0.0.1")
+    assert "TRACESETTLE_NEAR_EXECUTION" in str(exc.value)
+
+
+def test_enclave_required_with_full_configuration_starts(monkeypatch):
+    _with_config(
+        monkeypatch,
+        ENCLAVE_REQUIRED=True,
+        ENCLAVE_SIGN_URL="https://enclave.invalid/sign",
+        ENCLAVE_APPROVED_MEASUREMENT="mr_config_id=aa",
+        NEAR_EXECUTION_ENABLED=True,
+    )
+    profile = _validate("127.0.0.1")
+    assert profile.public_binding is False
+
+
+def test_approved_measurement_parses_field_value_pairs():
+    from tracesettle.config import parse_approved_measurement
+
+    assert parse_approved_measurement(None) == {}
+    assert parse_approved_measurement("") == {}
+    assert parse_approved_measurement("mr_config_id=AABB, rt_mr3=CC") == {
+        "mr_config_id": "aabb",
+        "rt_mr3": "cc",
+    }
+
+
+def test_approved_measurement_rejects_a_malformed_entry():
+    from tracesettle.config import parse_approved_measurement
+
+    with pytest.raises(ValueError):
+        parse_approved_measurement("mr_config_id")
+    with pytest.raises(ValueError):
+        parse_approved_measurement("=aabb")

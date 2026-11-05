@@ -295,6 +295,19 @@ NEAR_AGENT_ID = os.environ.get("TRACESETTLE_NEAR_AGENT_ID") or "treasury-agent"
 #: Whether live policy reads are configured. Only presence is inspected here.
 NEAR_AGENT_API_CONFIGURED = bool(NEAR_AGENT_API_URL)
 
+#: The provider host a live policy read must come from. When set, a read whose
+#: base URL host differs is refused (provider identity). Unset means the operator
+#: has not pinned a host; the base URL is then trusted as configured.
+NEAR_AGENT_API_EXPECTED_HOST = (
+    os.environ.get("TRACESETTLE_NEAR_AGENT_API_EXPECTED_HOST", "").strip().lower() or None
+)
+
+#: Maximum age (seconds) of a live policy revision. 0 disables the check. When
+#: set, a policy whose ``as_of`` is older (or missing) is refused as not current.
+NEAR_AGENT_POLICY_MAX_AGE_SECONDS = int(
+    os.environ.get("TRACESETTLE_NEAR_AGENT_POLICY_MAX_AGE_SECONDS", "0") or "0"
+)
+
 #: Whether a request may name the policy it is evaluated against.
 #:
 #: Off by default, and that is the security-relevant default: the policy a
@@ -374,6 +387,61 @@ NEAR_TEE_EXPECTED_MEASUREMENT = (
 #: live in memory only, which is the loopback default; a deployment that relies
 #: on the TEE gate should set it so a record survives a restart.
 NEAR_EXECUTION_DB = os.environ.get("TRACESETTLE_NEAR_EXECUTION_DB", "").strip() or None
+
+#: The enclave signing endpoint. Unset disables enclave signing: the boundary
+#: reports itself unavailable and refuses to sign, so hardware-required
+#: execution stays disabled until a genuine endpoint is supplied. It is NOT
+#: invented; the operator must configure it.
+ENCLAVE_SIGN_URL = os.environ.get("TRACESETTLE_ENCLAVE_SIGN_URL", "").strip() or None
+
+#: The approved enclave measurement, as ``field=hex`` pairs separated by commas
+#: (for example ``mr_config_id=01dc14...000``). Every field is checked against the
+#: verified quote. Unset means no identity is approved, so provisioning is
+#: refused (fail-closed) rather than trusting an unpinned measurement.
+ENCLAVE_APPROVED_MEASUREMENT = (
+    os.environ.get("TRACESETTLE_ENCLAVE_APPROVED_MEASUREMENT", "").strip() or None
+)
+
+#: Whether enclave signing is required for execution. When set, a transaction is
+#: never signed by the software signer; it must come from a verified enclave.
+ENCLAVE_REQUIRED = (
+    os.environ.get("TRACESETTLE_ENCLAVE_REQUIRED", "").strip().lower()
+    in {"1", "true", "yes", "on"}
+)
+
+#: The durable enclave-key lifecycle database (SQLite). Unset keeps the lifecycle
+#: in memory, which is the loopback default; a deployment that revokes keys
+#: should set it so a revocation survives a restart.
+ENCLAVE_KEY_DB = os.environ.get("TRACESETTLE_ENCLAVE_KEY_DB", "").strip() or None
+
+
+def parse_approved_measurement(raw: str | None) -> dict[str, str]:
+    """Parse ``field=hex,field=hex`` into a mapping, raising on a malformed value.
+
+    A malformed value is a hard error: an operator who tried to pin an identity
+    and mistyped it must not end up with a boundary that pins nothing (which,
+    fail-closed, refuses everything — but silently, which is worse than a clear
+    start-up failure).
+    """
+    if not raw:
+        return {}
+    fields: dict[str, str] = {}
+    for pair in raw.split(","):
+        pair = pair.strip()
+        if not pair:
+            continue
+        if "=" not in pair:
+            raise ValueError(
+                f"approved measurement entry {pair!r} is not 'field=hex'; refusing to "
+                "start with a malformed measurement pin"
+            )
+        key, value = pair.split("=", 1)
+        key, value = key.strip(), value.strip().lower()
+        if not key or not value:
+            raise ValueError(f"approved measurement entry {pair!r} has an empty field or value")
+        fields[key] = value
+    return fields
+
 
 #: The TTL, in seconds, of an execution record. It is the window in which an
 #: authorization may be signed; after it the record is EXPIRED and refuses.

@@ -101,10 +101,12 @@ class HttpClient:
 
     # -- public API ---------------------------------------------------------
 
-    def get_json(self, url: str, params: dict[str, str] | None = None) -> FetchResult:
+    def get_json(
+        self, url: str, params: dict[str, str] | None = None, headers: dict[str, str] | None = None
+    ) -> FetchResult:
         if params:
             url = f"{url}?{urllib.parse.urlencode(params)}"
-        return self._request(url, method="GET", body=None)
+        return self._request(url, method="GET", body=None, extra_headers=headers)
 
     def get_text(self, url: str) -> FetchResult:
         """Fetch a plain-text body (e.g. a raw Bitcoin transaction in hex).
@@ -115,31 +117,47 @@ class HttpClient:
         """
         return self._request(url, method="GET", body=None, expect_json=False)
 
-    def post_json(self, url: str, payload: dict[str, Any]) -> FetchResult:
+    def post_json(
+        self, url: str, payload: dict[str, Any], headers: dict[str, str] | None = None
+    ) -> FetchResult:
         body = json.dumps(payload).encode("utf-8")
-        return self._request(url, method="POST", body=body)
+        return self._request(url, method="POST", body=body, extra_headers=headers)
 
     # -- internals ----------------------------------------------------------
 
     def _request(
-        self, url: str, method: str, body: bytes | None, expect_json: bool = True
+        self,
+        url: str,
+        method: str,
+        body: bytes | None,
+        expect_json: bool = True,
+        extra_headers: dict[str, str] | None = None,
     ) -> FetchResult:
         # A cacheable GET is served from cache when possible, and a miss is
         # coalesced so concurrent identical requests trigger one network call.
-        cache_key = self._cache_key(url, method, body, expect_json)
+        # A request carrying extra headers (e.g. an API key) is never cached, so
+        # a credential can never be written to a shared cache.
+        cache_key = self._cache_key(url, method, body, expect_json, extra_headers)
         if cache_key is not None:
             return self._cache.get_or_load(  # type: ignore[union-attr]
                 cache_key,
-                lambda: self._request_uncached(url, method, body, expect_json),
+                lambda: self._request_uncached(url, method, body, expect_json, extra_headers),
                 cache_if=lambda result: result.status is SourceStatus.OK,
             )
-        return self._request_uncached(url, method, body, expect_json)
+        return self._request_uncached(url, method, body, expect_json, extra_headers)
 
     def _cache_key(
-        self, url: str, method: str, body: bytes | None, expect_json: bool
+        self,
+        url: str,
+        method: str,
+        body: bytes | None,
+        expect_json: bool,
+        extra_headers: dict[str, str] | None = None,
     ) -> str | None:
         """A stable cache key for a read-only GET, or ``None`` when not cacheable."""
         if self._cache is None or method != "GET":
+            return None
+        if extra_headers:
             return None
         path = urllib.parse.urlsplit(url).path
         if not any(path.startswith(prefix) for prefix in _CACHEABLE_GET_PREFIXES):
@@ -148,7 +166,12 @@ class HttpClient:
         return f"GET:{'json' if expect_json else 'text'}:{digest}"
 
     def _request_uncached(
-        self, url: str, method: str, body: bytes | None, expect_json: bool = True
+        self,
+        url: str,
+        method: str,
+        body: bytes | None,
+        expect_json: bool = True,
+        extra_headers: dict[str, str] | None = None,
     ) -> FetchResult:
         headers = {
             "Accept": "application/json",
@@ -156,6 +179,8 @@ class HttpClient:
         }
         if body is not None:
             headers["Content-Type"] = "application/json"
+        if extra_headers:
+            headers.update(extra_headers)
 
         # A per-host budget stops one caller from exhausting a free public
         # endpoint's shared rate limit for everyone.

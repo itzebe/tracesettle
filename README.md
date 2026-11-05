@@ -88,7 +88,7 @@ Amounts are exact `Decimal`s: a limit of `0.3` admits `0.3` and refuses
 `0.30000000000000004`. Severity is compared by an explicit rank, never by the
 severity's string value (`"MEDIUM"` sorts after `"HIGH"` alphabetically).
 
-Thirty structural guarantees are checked by *running the real code*, on demand, at
+Forty-three structural guarantees are checked by *running the real code*, on demand, at
 `GET /api/guard/invariants` — including `refusal_never_reaches_the_executor` and
 `authorization_is_single_use`. Each checker is also mutation-tested: the guarded
 behaviour is deliberately broken and the checker must notice. A checker that
@@ -163,6 +163,22 @@ Where each capability stands:
      error on any binding.
   The attestation *reporting* routes are separately off by default
   (`TRACESETTLE_TEE_ATTESTATION=1`).
+  3. A prepared NEAR transaction can be signed **inside a measured enclave**
+     (`tracesettle/near/enclave.py`, **Locally verified**). `EnclaveSigningBoundary`
+     provisions a signing key only against a verified Intel TDX attestation whose
+     measurement is an operator-approved identity (`mr_config_id` and any further
+     pinned fields must match exactly) and whose nonce is bound to the exact
+     transaction, then verifies the returned signature over those exact bytes with
+     the provisioned key. With no signing endpoint configured
+     (`TRACESETTLE_ENCLAVE_SIGN_URL`) the boundary reports itself unavailable and
+     refuses — it never falls back to a software key. The boundary is
+     **testnet-only**: it refuses to sign for mainnet. The only substitution in the
+     tests and the demo is the enclave transport (a deterministic stand-in with a
+     real ed25519 keypair); the genuineness of real quote verification is covered
+     separately by the live hardware harness (`tracesettle/near/enclave_harness.py`)
+     and the `tee_attestation_verification_is_genuine` invariant. Enabling enclave
+     signing without a sign endpoint, or TEE-required without an attestation
+     provider, is a fail-closed start-up error on any binding.
 - **Live NEAR execution boundary:** Testnet verified — the opt-in boundary
   (`TRACESETTLE_NEAR_EXECUTION=1`) built, signed, broadcast and independently
   verified a real NEAR testnet transfer (tx
@@ -607,7 +623,7 @@ refusal is provable: the executor is never called unless the outcome was `ALLOW`
 | H | Native tx wrongly assumed protected by an Intents-only policy | policy-scope rejection |
 | I | Provider reports success without independent evidence | `UNKNOWN` / `UNAVAILABLE` |
 
-Twelve NEAR-specific structural guarantees join the invariant set, each
+Fourteen NEAR-specific structural guarantees join the invariant set, each
 mutation-tested: `near_policy_must_be_in_force`,
 `near_policy_selection_is_not_client_controlled`,
 `near_native_scope_gap_is_always_stated`,
@@ -618,8 +634,11 @@ mutation-tested: `near_policy_must_be_in_force`,
 `near_terminal_states_are_evidence_distinguished`,
 `near_destination_delivery_requires_the_destination_chain`,
 `near_chain_is_derived_from_the_origin_asset`,
-`near_execution_never_signs_without_authorization`, and
-`near_execution_binding_covers_the_bytes` (twelve NEAR-specific in total).
+`near_execution_never_signs_without_authorization`,
+`near_execution_binding_covers_the_bytes`,
+`near_execution_requires_access_key_permission`, and
+`near_submission_is_durable_and_recovery_never_resubmits` (fourteen NEAR-specific
+in total).
 
 ## Try it: do X → see Y
 
@@ -700,7 +719,7 @@ curl -sS -X POST http://127.0.0.1:8080/api/guard/sign \
 curl -sS http://127.0.0.1:8080/api/guard/invariants \
   | python3 -c 'import sys,json;d=json.load(sys.stdin);print("all hold:",d["all_hold"]);[print(" ",i["name"]) for i in d["invariants"]]'
 ```
-→ `all hold: True` and the thirty-nine invariant names, including the twelve NEAR
+→ `all hold: True` and the forty-three invariant names, including the fourteen NEAR
 ones (`near_policy_must_be_in_force`, `near_native_scope_gap_is_always_stated`,
 `near_function_call_key_cannot_transfer_near`,
 `near_unrecognised_access_key_never_allows`,
@@ -963,6 +982,20 @@ operator's policy. With `TRACESETTLE_GUARD_SAFEGUARD_DB` set (see
 [The learning loop store](#the-learning-loop-store)), `GET /api/guard/safeguards`
 lists the safeguards in force and the console's NEAR tab renders them.
 
+**19. See the enclave signing boundary hold its guarantees.**
+
+```sh
+python3 demo/near_enclave_demo.py
+```
+→ five checks against the real boundary logic, using a deterministic stand-in
+enclave transport (a real ed25519 keypair, no network): A a key provisioned against
+a verified, measurement-pinned, transaction-bound attestation signs the exact
+bytes and the signature verifies; B a non-approved measurement is refused; C
+mainnet signing is refused (testnet-only); D a signature that does not verify is
+refused; E a key cannot be used with a different provisioning request. Expected:
+`5/5 checks produced the expected outcome.` and `No transaction was signed for a
+chain.` The demo is byte-identical across runs.
+
 ## Supported input and honest limits
 
 | Identifier | What it can do |
@@ -1108,7 +1141,7 @@ identical decisions.
 | `tracesettle/guard/safeguards.py` | Durable security safeguards: the learning loop's store (SQLite). |
 | `tracesettle/guard/learning.py` | The learning loop: derive a lesson, apply safeguards (only ever tightening). |
 | `tracesettle/guard/state_pg.py` | Optional PostgreSQL backend: shared nonces, counters, revocations, idempotency. |
-| `tracesettle/guard/invariants.py` | The thirty-nine structural guarantees, checked by execution. |
+| `tracesettle/guard/invariants.py` | The forty-three structural guarantees, checked by execution. |
 | `tracesettle/guard/api.py` | Guard HTTP routing and JSON serialization. |
 | `tracesettle/guard/console.py` | The security operations console page. |
 | `docs/TRANSACTION_SECURITY.md` | The security layer in full, including what it does not do. |
@@ -1118,7 +1151,7 @@ identical decisions.
 | `demo/demonstrate.py` | Read-only walkthrough (live, or `--offline` replay of captures). |
 | `demo/replay_opener.py` | Offline transport that replays `evidence/raw/` through the real code. |
 | `tracesettle/static/near-connect.js` | Vendored `@hot-labs/near-connect` (MIT) wallet connector, served same-origin at `/assets/near-connect.js`. |
-| `tests/` | 1192 tests (24 PostgreSQL tests skip without `TRACESETTLE_TEST_PG_DSN`). `evidence/raw/` fixtures are real captures; `tests/fixtures/synthetic/` are clearly labelled synthetic. |
+| `tests/` | 1381 tests (24 PostgreSQL tests skip without `TRACESETTLE_TEST_PG_DSN`; 1 further test skips without a live enclave/TEE endpoint). `evidence/raw/` fixtures are real captures; `tests/fixtures/synthetic/` are clearly labelled synthetic. |
 | `PHASE1_FEASIBILITY.md` | Phase 1 feasibility and API verification. |
 | `submission/` | Hackathon artifacts: API payload shape, technical summary, demo post draft, publication checklist. |
 | `docs/official/` | NEAR documentation captured during Phase 1. |
@@ -1128,7 +1161,8 @@ tracesettle/near/          NEAR agent protection: policy scope, access-key
                           analysis, the agent authorization wrapper, the attack
                           scenarios, the settlement assurance view, the Intents
                           lifecycle (create → authorize → quote → approve →
-                          deposit → settle), TEE research
+                          deposit → settle), TEE research, and the enclave
+                          signing boundary
 
 ## Runtime dependencies
 
@@ -1210,7 +1244,7 @@ variable and all documented in `docs/TRANSACTION_SECURITY.md`:
   replay-nonce store all have explicit caps, so a flood cannot exhaust memory.
   When durable state is configured, spent nonces and the limit counters live in
   SQLite instead, so they survive a restart (see **Durable state** below).
-- **Structural invariants, checked by execution.** Thirty-nine guarantees at
+- **Structural invariants, checked by execution.** Forty-three guarantees at
   `GET /api/guard/invariants`, each mutation-tested so a checker that cannot fail
   is treated as a defect.
 - **Honest audit claim.** In-place modification of an audit record is detectable;

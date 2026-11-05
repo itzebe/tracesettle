@@ -132,6 +132,31 @@ def validate_startup(
                 "boundary, or unset TRACESETTLE_NEAR_TEE_REQUIRED"
             )
 
+    # The enclave signing boundary fails closed. Asking for enclave signing
+    # without an endpoint to reach or an approved measurement to pin would
+    # silently drop the guarantee the operator asked for, so it is a hard error
+    # on any binding.
+    if config.ENCLAVE_REQUIRED:
+        if not config.ENCLAVE_SIGN_URL:
+            raise ConfigurationError(
+                "TRACESETTLE_ENCLAVE_REQUIRED is set but TRACESETTLE_ENCLAVE_SIGN_URL is not; "
+                "there is no enclave signing endpoint to reach. Configure it, or unset "
+                "TRACESETTLE_ENCLAVE_REQUIRED"
+            )
+        if not config.ENCLAVE_APPROVED_MEASUREMENT:
+            raise ConfigurationError(
+                "TRACESETTLE_ENCLAVE_REQUIRED is set but TRACESETTLE_ENCLAVE_APPROVED_MEASUREMENT "
+                "is not; no enclave identity is approved, so provisioning would fail closed "
+                "against every measurement. Pin the approved measurement, or unset "
+                "TRACESETTLE_ENCLAVE_REQUIRED"
+            )
+        if not config.NEAR_EXECUTION_ENABLED:
+            raise ConfigurationError(
+                "TRACESETTLE_ENCLAVE_REQUIRED is set but TRACESETTLE_NEAR_EXECUTION is not; "
+                "there is no execution boundary for the enclave to sign for. Enable the "
+                "execution boundary, or unset TRACESETTLE_ENCLAVE_REQUIRED"
+            )
+
     if not public_binding:
         return profile
 

@@ -56,6 +56,7 @@ class GuardAPI:
         investigation_store: Any = None,
         near_execution: Any = None,
         tee_provider: Any = None,
+        enclave: Any = None,
     ) -> None:
         self.service = service
         #: The optional durable settlement-investigation store. When set, a
@@ -75,6 +76,14 @@ class GuardAPI:
         #: locally against the pinned Intel root, bound to a fresh decision nonce.
         #: Off by default; no TEE protection is ever claimed without it.
         self.tee_provider = tee_provider
+        #: The optional enclave signing boundary. When set, a prepared operation
+        #: can be signed inside a measured enclave: the boundary provisions a key
+        #: only from a verified, measurement-pinned, transaction-bound attestation
+        #: and returns a signature that verifies over the exact bytes. With no
+        #: signing endpoint configured it reports itself unavailable and refuses,
+        #: so hardware execution stays disabled rather than falling back to a
+        #: software key.
+        self.enclave = enclave
 
     def dispatch(
         self,
@@ -192,6 +201,8 @@ class GuardAPI:
             return ApiResponse(200, self._near_settlement_demo())
         if path == "/api/guard/near/tee":
             return self._near_tee_info()
+        if path == "/api/guard/near/enclave":
+            return self._near_enclave_info()
         if path == "/api/guard/near/tee/attest":
             return self._near_tee_attest(params)
         if path.startswith("/api/guard/near/execution/record/"):
@@ -371,6 +382,51 @@ class GuardAPI:
             },
         )
 
+    def _near_enclave_info(self) -> ApiResponse:
+        """Describe the enclave signing boundary honestly.
+
+        Enclave signing is *not* enabled unless an endpoint is configured; the
+        response says so plainly and never claims hardware protection that is not
+        present. The report is derived from the configured boundary.
+        """
+        if self.enclave is None:
+            return ApiResponse(
+                200,
+                {
+                    "enabled": False,
+                    "note": (
+                        "Enclave signing is disabled. Configure TRACESETTLE_ENCLAVE_SIGN_URL "
+                        "and TRACESETTLE_ENCLAVE_APPROVED_MEASUREMENT to sign inside a "
+                        "measured enclave. No enclave protection is ever claimed without a "
+                        "verified, measurement-pinned, transaction-bound attestation."
+                    ),
+                },
+            )
+        available = bool(getattr(self.enclave, "available", lambda: False)())
+        approved = getattr(self.enclave.measurements, "approved", [])
+        return ApiResponse(
+            200,
+            {
+                "enabled": True,
+                "available": available,
+                "measurements": [m.to_dict() for m in approved],
+                "signing_algo": "ed25519",
+                "verifies": [
+                    "the Intel TDX quote against the pinned Intel root",
+                    "the measurement against the operator's approved identity",
+                    "the attestation nonce is bound to the exact transaction",
+                    "the returned signature over the exact bytes with the provisioned key",
+                ],
+                "note": (
+                    "A key is provisioned only against a verified, measurement-pinned, "
+                    "transaction-bound attestation; the host cannot obtain a usable "
+                    "signature without it."
+                    if available
+                    else "No signing endpoint is configured; the boundary refuses to sign."
+                ),
+            },
+        )
+
     def _near_tee_attest(self, params: dict[str, str]) -> ApiResponse:
         """Fetch and locally verify a genuine TDX attestation bound to a nonce.
 
@@ -444,6 +500,10 @@ class GuardAPI:
             if not self._identity_matches(body, authenticated_service_id):
                 return ApiResponse(403, {"error": "service identity does not match the credential"})
             return self._near_execution_attest(body, authenticated_service_id)
+        if path == "/api/guard/near/execution/enclave-sign":
+            if not self._identity_matches(body, authenticated_service_id):
+                return ApiResponse(403, {"error": "service identity does not match the credential"})
+            return self._near_execution_enclave_sign(body, authenticated_service_id)
         if path == "/api/guard/near/execution/submit":
             if not self._identity_matches(body, authenticated_service_id):
                 return ApiResponse(403, {"error": "service identity does not match the credential"})
@@ -776,6 +836,86 @@ class GuardAPI:
         except ExecutionError as exc:
             return ApiResponse(422, {"error": str(exc)})
         return ApiResponse(200, executed.to_dict())
+
+    def _near_execution_enclave_sign(self, body: Any, authenticated_service_id: str | None) -> ApiResponse:
+        """Sign a prepared operation inside a verified enclave.
+
+        The prepared operation is looked up from the server-side store (never
+        rebuilt from the request), so the bytes signed are the bytes that were
+        prepared and authorized. The enclave boundary provisions a key only
+        against a verified, measurement-pinned attestation bound to this exact
+        transaction, and the returned signature is verified over the exact
+        transaction-hash bytes. Nothing is broadcast here; the caller submits the
+        returned signature through ``/api/guard/near/execution/submit``.
+        """
+        refused = self._require_near_execution()
+        if refused is not None:
+            return refused
+        if self.enclave is None:
+            return ApiResponse(
+                409,
+                {
+                    "error": (
+                        "enclave signing is not configured; set TRACESETTLE_ENCLAVE_SIGN_URL "
+                        "and TRACESETTLE_ENCLAVE_APPROVED_MEASUREMENT, or sign with a wallet"
+                    )
+                },
+            )
+        if not isinstance(body, dict):
+            return _bad_request("request body must be a JSON object")
+        prepare_id = str(body.get("prepare_id", "")).strip()
+        if not prepare_id:
+            return _bad_request("field 'prepare_id' is required")
+        owner = self._near_execution_owner(authenticated_service_id)
+        prepared = self.near_execution_store().peek(prepare_id, owner)
+        if prepared is None:
+            return ApiResponse(404, {"error": "unknown or expired prepare_id"})
+
+        from ..near.enclave import (
+            EnclaveError,
+            EnclaveTransactionSigner,
+            ProvisioningRequest,
+        )
+
+        import base64
+
+        transaction = prepared.transaction
+        request = ProvisioningRequest(
+            key_id=str(body.get("key_id", "")).strip() or "enclave-signing-key",
+            purpose="near-execution",
+            execution_id=prepared.execution_id or transaction.tx_hash,
+            transaction_digest=transaction.tx_hash_bytes.hex(),
+            decision_nonce=prepared.tee_nonce or transaction.tx_hash,
+            policy_version="v1",
+        )
+        try:
+            key = self.enclave.provision(request)
+            signer = EnclaveTransactionSigner(
+                boundary=self.enclave,
+                key=key,
+                request=request,
+                account_id=transaction.signer_id,
+                network=transaction.network,
+            )
+            signature = signer.sign(transaction.tx_hash_bytes)
+        except EnclaveError as exc:
+            return ApiResponse(422, {"error": str(exc)})
+
+        return ApiResponse(
+            200,
+            {
+                "prepare_id": prepare_id,
+                "tx_hash": transaction.tx_hash,
+                "public_key": signer.public_key,
+                "signing_algo": key.signing_algo,
+                "measurement": key.measurement_name,
+                "signature": base64.b64encode(signature).decode("ascii"),
+                "note": (
+                    "the signature was produced inside the measured enclave and verified "
+                    "over the exact transaction bytes; submit it to broadcast"
+                ),
+            },
+        )
 
     def near_execution_store(self) -> Any:
         store = getattr(self, "_near_execution_store", None)
@@ -1168,6 +1308,9 @@ class GuardAPI:
                 base_url=config.NEAR_AGENT_API_URL,
                 api_key=config.NEAR_AGENT_API_KEY,
                 http_client=self.service.http_client,
+                expected_host=config.NEAR_AGENT_API_EXPECTED_HOST,
+                expected_agent_id=config.NEAR_AGENT_ID,
+                max_age_seconds=config.NEAR_AGENT_POLICY_MAX_AGE_SECONDS,
             )
             agent_id = (
                 body.get("agent_id") if allow_client_selection else None

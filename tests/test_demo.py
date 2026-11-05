@@ -156,3 +156,23 @@ def test_near_learning_loop_demo_is_deterministic_and_passes():
     assert "BLOCK" in out
     assert "REQUIRE_APPROVAL" in out
     assert "influenced by loop : True" in out
+
+
+def test_near_enclave_demo_is_deterministic_and_passes():
+    """The enclave boundary demonstration is self-contained and reproducible."""
+    first = subprocess.run(
+        [sys.executable, str(DEMO_DIR / "near_enclave_demo.py")],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert first.returncode == 0, first.stderr
+    assert "5/5 checks produced the expected outcome." in first.stdout
+    assert "No transaction was signed for a chain." in first.stdout
+    second = subprocess.run(
+        [sys.executable, str(DEMO_DIR / "near_enclave_demo.py")],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert second.stdout == first.stdout

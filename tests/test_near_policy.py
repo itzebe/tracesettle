@@ -163,9 +163,11 @@ class _FakeClient:
     def __init__(self, result):
         self._result = result
         self.calls: list[str] = []
+        self.headers: list[dict] = []
 
-    def get_json(self, url):
+    def get_json(self, url, params=None, headers=None):
         self.calls.append(url)
+        self.headers.append(headers or {})
         return self._result
 
 
@@ -183,35 +185,132 @@ def test_configured_adapter_reads_a_policy():
     assert read.availability is PolicyAvailability.AVAILABLE
     assert read.policy.in_force is True
     assert client.calls == ["https://example.invalid/v1/agents/demo-agent.near/policy"]
+    # The API key is sent as X-API-Key, never as a query parameter.
+    assert client.headers == [{"X-API-Key": "secret"}]
+
+
+def test_adapter_requires_a_key_and_refuses_an_unauthenticated_read():
+    client = _FakeClient(_FakeResult(ok=True, data=load("policy_in_force.json"), http_status=200))
+    adapter = PolicyAdapter(base_url="https://example.invalid", http_client=client)
+    read = adapter.read_policy("demo-agent.near")
+    assert read.availability is PolicyAvailability.UNAUTHENTICATED
+    assert client.calls == []  # no unauthenticated request was made
+
+
+def test_adapter_pins_the_provider_host():
+    client = _FakeClient(_FakeResult(ok=True, data=load("policy_in_force.json"), http_status=200))
+    adapter = PolicyAdapter(
+        base_url="https://attacker.invalid",
+        api_key="secret",
+        http_client=client,
+        expected_host="agents.near-intents.test",
+    )
+    read = adapter.read_policy("demo-agent.near")
+    assert read.availability is PolicyAvailability.MALFORMED
+    assert client.calls == []
+
+
+def test_adapter_refuses_a_read_for_a_different_agent():
+    client = _FakeClient(_FakeResult(ok=True, data=load("policy_in_force.json"), http_status=200))
+    adapter = PolicyAdapter(
+        base_url="https://example.invalid",
+        api_key="secret",
+        http_client=client,
+        expected_agent_id="the-operator-agent",
+    )
+    read = adapter.read_policy("demo-agent.near")
+    assert read.availability is PolicyAvailability.MALFORMED
+    assert client.calls == []
+
+
+def test_adapter_refuses_a_body_for_a_different_agent():
+    raw = load("policy_in_force.json")
+    raw["agent_id"] = "someone-elses-agent"
+    client = _FakeClient(_FakeResult(ok=True, data=raw, http_status=200))
+    adapter = PolicyAdapter(
+        base_url="https://example.invalid",
+        api_key="secret",
+        http_client=client,
+        expected_agent_id="demo-agent.near",
+    )
+    read = adapter.read_policy("demo-agent.near")
+    assert read.availability is PolicyAvailability.MALFORMED
+
+
+def test_adapter_refuses_a_stale_policy_when_a_freshness_bound_is_set():
+    from datetime import datetime, timezone
+
+    raw = load("policy_in_force.json")
+    raw["as_of"] = "2020-01-01T00:00:00Z"
+    client = _FakeClient(_FakeResult(ok=True, data=raw, http_status=200))
+    adapter = PolicyAdapter(
+        base_url="https://example.invalid",
+        api_key="secret",
+        http_client=client,
+        max_age_seconds=60,
+        now=lambda: datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+    read = adapter.read_policy("demo-agent.near")
+    assert read.availability is PolicyAvailability.UNAVAILABLE
+    assert "old" in read.detail or "freshness" in read.detail
+
+
+def test_adapter_accepts_a_fresh_policy_within_the_bound():
+    from datetime import datetime, timezone
+
+    raw = load("policy_in_force.json")
+    raw["as_of"] = "2026-01-01T00:00:30Z"
+    client = _FakeClient(_FakeResult(ok=True, data=raw, http_status=200))
+    adapter = PolicyAdapter(
+        base_url="https://example.invalid",
+        api_key="secret",
+        http_client=client,
+        max_age_seconds=60,
+        now=lambda: datetime(2026, 1, 1, 0, 1, 0, tzinfo=timezone.utc),
+    )
+    read = adapter.read_policy("demo-agent.near")
+    assert read.availability is PolicyAvailability.AVAILABLE
+
+
+def test_adapter_refuses_a_policy_with_no_timestamp_when_a_bound_is_set():
+    client = _FakeClient(_FakeResult(ok=True, data=load("policy_in_force.json"), http_status=200))
+    adapter = PolicyAdapter(
+        base_url="https://example.invalid",
+        api_key="secret",
+        http_client=client,
+        max_age_seconds=60,
+    )
+    read = adapter.read_policy("demo-agent.near")
+    assert read.availability is PolicyAvailability.UNAVAILABLE
 
 
 def test_adapter_reports_unauthenticated_on_401():
     client = _FakeClient(_FakeResult(ok=False, http_status=401, status="SourceStatus.UNAUTHORIZED"))
-    adapter = PolicyAdapter(base_url="https://example.invalid", http_client=client)
+    adapter = PolicyAdapter(base_url="https://example.invalid", api_key="secret", http_client=client)
     read = adapter.read_policy("demo-agent.near")
     assert read.availability is PolicyAvailability.UNAUTHENTICATED
 
 
 def test_adapter_reports_not_found_on_404():
     client = _FakeClient(_FakeResult(ok=False, http_status=404))
-    adapter = PolicyAdapter(base_url="https://example.invalid", http_client=client)
+    adapter = PolicyAdapter(base_url="https://example.invalid", api_key="secret", http_client=client)
     read = adapter.read_policy("demo-agent.near")
     assert read.availability is PolicyAvailability.NOT_FOUND
 
 
 def test_adapter_reports_unavailable_on_a_transport_failure():
     class _Boom:
-        def get_json(self, url):
+        def get_json(self, url, params=None, headers=None):
             raise TimeoutError("no route")
 
-    adapter = PolicyAdapter(base_url="https://example.invalid", http_client=_Boom())
+    adapter = PolicyAdapter(base_url="https://example.invalid", api_key="secret", http_client=_Boom())
     read = adapter.read_policy("demo-agent.near")
     assert read.availability is PolicyAvailability.UNAVAILABLE
 
 
 def test_adapter_reports_malformed_on_a_bad_shape():
     client = _FakeClient(_FakeResult(ok=True, data={"limits": {"per_transaction": {"x": 1.5}}}, http_status=200))
-    adapter = PolicyAdapter(base_url="https://example.invalid", http_client=client)
+    adapter = PolicyAdapter(base_url="https://example.invalid", api_key="secret", http_client=client)
     read = adapter.read_policy("demo-agent.near")
     assert read.availability is PolicyAvailability.MALFORMED
 

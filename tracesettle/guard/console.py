@@ -335,6 +335,19 @@ CONSOLE_HTML = """<!DOCTYPE html>
     </div>
 
     <div class="panel">
+      <h2>Enclave signing boundary</h2>
+      <p class="small">When configured, a prepared NEAR transaction can be signed <strong>inside a
+        measured enclave</strong> rather than by a software key held here. The boundary provisions a
+        signing key only against a verified Intel TDX attestation that is pinned to the operator's
+        approved measurement and bound to the exact transaction, and it verifies the returned
+        signature over those exact bytes. With no signing endpoint configured it reports itself
+        unavailable and refuses — it never falls back to a software key. This is a
+        <strong>testnet-only</strong> signing boundary; it refuses mainnet, and it is not a claim of
+        protection for any path that has not been configured.</p>
+      <div id="near-enclave"></div>
+    </div>
+
+    <div class="panel">
       <h2>Learning loop (durable safeguards)</h2>
       <p class="small">When a decision surfaces a security failure, the lesson is recorded as a
         durable safeguard and applied to later decisions. A safeguard only ever <strong>tightens</strong>
@@ -832,6 +845,26 @@ async function loadNear() {
           "</tr></thead><tbody>" + rows + "</tbody></table>"
         : '<p class="small">No safeguard has been learned yet. A security failure will add one.</p>');
   } catch (err) { sgEl.innerHTML = '<div class="note bad">' + esc(err.message) + "</div>"; }
+
+  const encEl = document.getElementById("near-enclave");
+  encEl.innerHTML = loading("Loading enclave boundary…");
+  try {
+    const info = await api("GET", "/api/guard/near/enclave");
+    if (!info.enabled) {
+      encEl.innerHTML = '<div class="note sim">' + esc(info.note || "Enclave signing is disabled.") + "</div>";
+      return;
+    }
+    const ms = (info.measurements || []).map((m) =>
+      '<div class="kv small"><dt>' + esc(m.name) + "</dt><dd class='small mono'>" +
+      esc(Object.keys(m.fields || {}).map((k) => k + "=" + m.fields[k]).join(", ") || "—") +
+      "</dd></div>").join("");
+    encEl.innerHTML = '<div class="card"><div class="kv"><dt>Available</dt><dd>' +
+      (info.available ? '<span class="small ok">yes</span>' : '<span class="small bad">no</span>') +
+      "</dd><dt>Signing algorithm</dt><dd>" + esc(info.signing_algo) +
+      "</dd><dt>Approved measurements</dt><dd>" + esc(String((info.measurements || []).length)) +
+      "</dd></div>" + ms + '<div class="note ' + (info.available ? "ok" : "sim") + '">' +
+      esc(info.note) + "</div></div>";
+  } catch (err) { encEl.innerHTML = '<div class="note bad">' + esc(err.message) + "</div>"; }
 }
 
 async function runNearAttacks() {

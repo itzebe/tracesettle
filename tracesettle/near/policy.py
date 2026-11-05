@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import enum
 import json
+import urllib.parse
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -200,6 +201,9 @@ class IntentsPolicy:
     schedule: dict[str, Any] | None = None
     native: dict[str, dict[str, bool]] = field(default_factory=dict)
     policy_hash: str | None = None
+    #: When the provider read this policy revision (ISO-8601), if it supplies one.
+    #: Used to enforce a freshness bound on a live policy read.
+    as_of: str | None = None
     raw: dict[str, Any] = field(default_factory=dict)
 
     # -- state --------------------------------------------------------------
@@ -256,6 +260,7 @@ class IntentsPolicy:
             "schedule": self.schedule,
             "native": self.native,
             "policy_hash": self.policy_hash,
+            "as_of": self.as_of,
         }
 
 
@@ -483,6 +488,7 @@ def parse_policy(raw: Any) -> IntentsPolicy:
         schedule=schedule,
         native=native,
         policy_hash=(str(body["policy_hash"]) if body.get("policy_hash") else None),
+        as_of=(str(body["as_of"]) if body.get("as_of") else None),
         raw=body,
     )
 
@@ -532,19 +538,39 @@ class PolicyAdapter:
         base_url: str | None = None,
         api_key: str | None = None,
         http_client: Any = None,
+        expected_host: str | None = None,
+        expected_agent_id: str | None = None,
+        max_age_seconds: int = 0,
+        now: Any = None,
     ) -> None:
         self.base_url = (base_url or "").rstrip("/") or None
         self._api_key = api_key or None
         self._http = http_client
+        # Provider identity: the host the policy read is allowed to come from.
+        # ``None`` means "any host", which is only safe when the base URL was
+        # configured by the operator; a caller-supplied host is never trusted.
+        self.expected_host = (expected_host or "").strip().lower() or None
+        # Agent association: the read must be for the operator's agent.
+        self.expected_agent_id = (expected_agent_id or "").strip() or None
+        # Freshness: 0 disables the age check; otherwise the policy's ``as_of``
+        # (when the provider supplies one) must be no older than this.
+        self.max_age_seconds = int(max_age_seconds or 0)
+        self._now = now
 
     def read_policy(self, agent_id: str) -> PolicyRead:
-        """Read one agent's policy from the configured provider.
+        """Read one agent's policy from the configured provider, and verify it.
 
         The provider is the Agent API. It is called only when a base URL and an
         HTTP client are configured; otherwise the read is reported as
         unconfigured. Nothing about the endpoint is guessed: it is the
         documented ``GET /v1/agents/{agent_id}/policy`` path. The API key is
         sent as the ``X-API-Key`` header and is never logged.
+
+        Four things are verified before the read is reported ``AVAILABLE``:
+        the provider host (identity), the agent association, the policy
+        revision's ``as_of`` freshness (when a bound is set), and that the body
+        actually parsed. Any failure is reported as a non-available read, so a
+        caller fails closed rather than trusting an unverified policy.
         """
         if not self.base_url or self._http is None:
             return PolicyRead(
@@ -555,9 +581,34 @@ class PolicyAdapter:
                     "fixture with PolicyAdapter.from_fixture."
                 ),
             )
+        if not self._api_key:
+            return PolicyRead(
+                availability=PolicyAvailability.UNAUTHENTICATED,
+                detail=(
+                    "No Agent API key is configured. The provider requires X-API-Key; refusing "
+                    "to make an unauthenticated read that would be reported as a policy."
+                ),
+            )
+        host = urllib.parse.urlsplit(self.base_url).hostname or ""
+        if self.expected_host and host.lower() != self.expected_host:
+            return PolicyRead(
+                availability=PolicyAvailability.MALFORMED,
+                detail=(
+                    "the configured Agent API host does not match the pinned provider host; "
+                    "refusing to trust a policy read from an unexpected provider"
+                ),
+            )
+        if self.expected_agent_id and str(agent_id) != self.expected_agent_id:
+            return PolicyRead(
+                availability=PolicyAvailability.MALFORMED,
+                detail=(
+                    "the requested agent id does not match the configured agent; refusing to "
+                    "trust a policy read for a different agent"
+                ),
+            )
         endpoint = f"{self.base_url}/v1/agents/{agent_id}/policy"
         try:
-            result = self._http.get_json(endpoint)
+            result = self._http.get_json(endpoint, headers={"X-API-Key": self._api_key})
         except Exception as exc:  # noqa: BLE001 - any transport failure is "unavailable"
             return PolicyRead(
                 availability=PolicyAvailability.UNAVAILABLE,
@@ -593,12 +644,59 @@ class PolicyAdapter:
                 detail=f"the provider policy could not be interpreted: {exc}",
                 endpoint=endpoint,
             )
+        # Agent association, verified against the *body*, not just the request.
+        if self.expected_agent_id and policy.agent_id and policy.agent_id != self.expected_agent_id:
+            return PolicyRead(
+                availability=PolicyAvailability.MALFORMED,
+                detail=(
+                    "the provider returned a policy for a different agent; refusing to trust it"
+                ),
+                endpoint=endpoint,
+            )
+        freshness = self._freshness(policy)
+        if freshness is not None:
+            return PolicyRead(
+                availability=PolicyAvailability.UNAVAILABLE,
+                detail=freshness,
+                endpoint=endpoint,
+            )
         return PolicyRead(
             availability=PolicyAvailability.AVAILABLE,
             policy=policy,
-            detail="policy read from the provider",
+            detail="policy read from the provider and verified (host, agent, freshness)",
             endpoint=endpoint,
         )
+
+    def _freshness(self, policy: "IntentsPolicy") -> str | None:
+        """Return a refusal reason when the policy is too old, else ``None``."""
+        if self.max_age_seconds <= 0:
+            return None
+        as_of = getattr(policy, "as_of", None)
+        if not as_of:
+            return (
+                "the provider policy carries no 'as_of' timestamp, so its freshness cannot be "
+                "established; refusing to treat it as current"
+            )
+        try:
+            from datetime import datetime, timezone
+
+            observed = datetime.fromisoformat(str(as_of).replace("Z", "+00:00"))
+            if observed.tzinfo is None:
+                observed = observed.replace(tzinfo=timezone.utc)
+        except ValueError:
+            return f"the provider policy 'as_of' ({as_of!r}) is not a parseable timestamp"
+        now = self._now() if callable(self._now) else (self._now or datetime.now(timezone.utc))
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        age = (now - observed).total_seconds()
+        if age > self.max_age_seconds:
+            return (
+                f"the provider policy is {int(age)}s old, beyond the {self.max_age_seconds}s "
+                "freshness bound; refusing to treat it as current"
+            )
+        if age < -self.max_age_seconds:
+            return "the provider policy 'as_of' is in the future; refusing to trust it"
+        return None
 
     @staticmethod
     def from_fixture(

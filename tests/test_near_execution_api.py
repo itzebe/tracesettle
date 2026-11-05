@@ -259,3 +259,117 @@ def test_attest_unknown_prepare_id_is_not_found():
     api, _, _, _ = _tee_api()
     resp = _post(api, "/api/guard/near/execution/attest", {"prepare_id": "nope"})
     assert resp.status == 404
+
+
+# -- enclave signing route ----------------------------------------------------
+
+
+class _StandInEnclave:
+    """A deterministic enclave: real keypair, no network."""
+
+    sign_url = "http://enclave.test/sign"
+
+    def __init__(self, public: bytes):
+        self.public = public
+
+    def attestation_report(self, nonce_hex):
+        return {
+            "gateway_attestation": {
+                "intel_quote": "00" * 64,
+                "signing_algo": "ed25519",
+                "signing_address": self.public.hex(),
+            }
+        }
+
+    def sign(self, payload):
+        import hashlib
+
+        message = base64.b64decode(payload["message"])
+        return {
+            "signing_algo": "ed25519",
+            "signing_address": self.public.hex(),
+            "message_digest": hashlib.sha256(message).hexdigest(),
+            "signature": base64.b64encode(ed25519.sign(message, TEST_SEED)).decode("ascii"),
+        }
+
+
+def _enclave_boundary(public: bytes):
+    from tracesettle.near.enclave import (
+        ApprovedMeasurement,
+        EnclaveSigningBoundary,
+        MeasurementPolicy,
+    )
+    from tracesettle.near.tdx import TdxVerification
+
+    def verifier(quote, *, nonce=None, signing_address=None, **kwargs):  # noqa: A002
+        result = TdxVerification(verified=True)
+        result.nonce = (nonce or b"").hex()
+        result.measurement = {"mr_config_id": "aa" * 48}
+        result.checks = {"collateral_verified": True}
+        result.signing_address = public.hex()
+        return result
+
+    return EnclaveSigningBoundary(
+        transport=_StandInEnclave(public),
+        measurements=MeasurementPolicy(
+            [ApprovedMeasurement("test", {"mr_config_id": "aa" * 48})], require_pin=True
+        ),
+        verifier=verifier,
+    )
+
+
+def test_enclave_sign_route_signs_and_submits():
+    from near_helpers import result_for
+    from tracesettle.near.ed25519 import public_key
+
+    public = public_key(TEST_SEED)
+    guard = make_guard(near_policy())
+    rpc = FakeNearRpc(NETWORKS[NearNetwork.TESTNET])
+    boundary = NearExecutionBoundary(guard, NETWORKS[NearNetwork.TESTNET], rpc=rpc)
+    api = GuardAPI(guard, near_execution=boundary, enclave=_enclave_boundary(public))
+
+    info = api.dispatch("GET", "/api/guard/near/enclave", {}, None)
+    assert info.status == 200 and info.payload["enabled"] is True
+
+    prepared = _post(api, "/api/guard/near/execution/prepare", _prepare_body())
+    assert prepared.status == 200
+    prepare_id = prepared.payload["prepare_id"]
+
+    signed = _post(api, "/api/guard/near/execution/enclave-sign", {"prepare_id": prepare_id})
+    assert signed.status == 200, signed.payload
+    signature = signed.payload["signature"]
+
+    rpc.send_result = result_for(api.near_execution_store().peek(prepare_id, "local").transaction)
+    rpc.tx_status_result = rpc.send_result
+    submitted = _post(
+        api,
+        "/api/guard/near/execution/submit",
+        {"prepare_id": prepare_id, "signature": signature},
+    )
+    assert submitted.status == 200, submitted.payload
+    assert len(rpc.broadcasts) == 1
+    assert submitted.payload["tx_hash"] == signed.payload["tx_hash"]
+
+
+def test_enclave_sign_route_is_absent_without_an_enclave():
+    api, _rpc, _guard = _api()
+    info = api.dispatch("GET", "/api/guard/near/enclave", {}, None)
+    assert info.status == 200 and info.payload["enabled"] is False
+    prepared = _post(api, "/api/guard/near/execution/prepare", _prepare_body())
+    refused = _post(
+        api, "/api/guard/near/execution/enclave-sign", {"prepare_id": prepared.payload["prepare_id"]}
+    )
+    assert refused.status == 409
+
+
+def test_enclave_sign_route_requires_a_known_prepare_id():
+    from tracesettle.near.ed25519 import public_key
+
+    guard = make_guard(near_policy())
+    rpc = FakeNearRpc(NETWORKS[NearNetwork.TESTNET])
+    boundary = NearExecutionBoundary(guard, NETWORKS[NearNetwork.TESTNET], rpc=rpc)
+    api = GuardAPI(guard, near_execution=boundary, enclave=_enclave_boundary(public_key(TEST_SEED)))
+    refused = _post(
+        api, "/api/guard/near/execution/enclave-sign", {"prepare_id": "does-not-exist"}
+    )
+    assert refused.status == 404
