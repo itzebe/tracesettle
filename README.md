@@ -77,12 +77,16 @@ version, every control result with the policy that produced it, the findings, a
 human-readable explanation, and an audit record.
 
 An `ALLOW` decision mints an **authorization**: an HMAC-SHA256-signed statement
-bound to the exact `service_id`, `operation`, `chain`, `asset`, `amount` and
-`destination`, with an expiry (90s default) and a single-use nonce. The signer
-re-derives the binding from the transaction it was asked to sign. A genuine,
-unexpired, unused authorization minted for a *different* transaction is refused as
-`WRONG_PARAMETERS` — which is the whole point of binding it to the transaction
-rather than merely authenticating the caller.
+bound to the exact `service_id`, `operation`, `chain`, `asset`, `amount`,
+`destination` and — where the caller holds the transaction bytes — a digest of
+those exact bytes (`transaction_digest`), with an expiry (90s default) and a
+single-use nonce. The signer re-derives the binding from the transaction it was
+asked to sign. A genuine, unexpired, unused authorization minted for a *different*
+transaction is refused as `WRONG_PARAMETERS` — which is the whole point of binding
+it to the transaction rather than merely authenticating the caller. Because the
+NEAR path includes the byte digest, a transaction whose *bytes* differ from the
+evaluated parameters (a swapped action, a substituted token contract, forged call
+arguments) is refused even when every human-readable field is unchanged.
 
 Amounts are exact `Decimal`s: a limit of `0.3` admits `0.3` and refuses
 `0.30000000000000004`. Severity is compared by an explicit rank, never by the

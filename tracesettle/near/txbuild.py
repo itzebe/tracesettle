@@ -131,6 +131,12 @@ class NearTransaction:
         the destination, amount, asset, chain/network, operation or service is a
         ``WRONG_PARAMETERS`` refusal. The chain is network-scoped, so a
         cross-network replay is also a mismatch.
+
+        ``transaction_digest`` is the digest of the exact unsigned bytes that
+        will be signed. Binding it means the authorization covers the *bytes*,
+        not merely a summary of them: a swapped action, a substituted token
+        contract, or forged call arguments change the digest and are refused,
+        even when the human-readable parameters are unchanged.
         """
         from ..guard.model import canonical_fields
 
@@ -141,6 +147,7 @@ class NearTransaction:
             asset=self.guard_asset or self.asset.identifier.upper(),
             amount=self.guard_amount(),
             destination=self.destination,
+            transaction_digest=self.payload_fingerprint(),
         )
 
     def to_dict(self) -> dict[str, Any]:

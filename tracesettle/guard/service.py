@@ -392,6 +392,7 @@ class GuardService:
                 asset=request.asset,
                 amount=request.amount,
                 destination=request.destination,
+                transaction_digest=request.transaction_digest,
             )
             authorization = self.authority.issue(
                 decision_id=decision_id,
@@ -427,6 +428,7 @@ class GuardService:
                     asset=request.asset,
                     amount=request.amount,
                     destination=request.destination,
+                    transaction_digest=request.transaction_digest,
                 )
             ),
             risk_level=risk_level,
@@ -798,6 +800,7 @@ def _build_hold_decision(
                 asset=request.asset,
                 amount=request.amount,
                 destination=request.destination,
+                transaction_digest=request.transaction_digest,
             )
         ),
         risk_level=severity,

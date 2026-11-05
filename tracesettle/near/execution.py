@@ -649,6 +649,9 @@ class NearExecutionBoundary:
             amount_raw=str(amount),
             idempotency_key=idempotency_key,
             simulated=simulated,
+            # Bind the exact bytes that will be signed, so the authorization
+            # covers the transaction itself and not merely its summary.
+            transaction_digest=tx.payload_fingerprint(),
         )
         decision = self.guard.evaluate(request)
 

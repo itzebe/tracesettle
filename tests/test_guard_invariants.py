@@ -221,6 +221,31 @@ def test_near_execution_binding_invariant_notices_a_binding_that_ignores_the_amo
         ex.NearExecutionBoundary.verify_binding = original
 
 
+def test_near_execution_binding_invariant_notices_a_binding_that_ignores_the_bytes():
+    """If the byte digest did not track the bytes, a bytes-only tamper would pass.
+
+    This reproduces the defect that motivated the digest binding: a transaction
+    whose ``actions`` bytes were swapped while every human-readable parameter
+    stayed identical. Making the digest constant (so it no longer changes when
+    the bytes change) reverts the feature's *effect* end to end - mint and verify
+    both commit to the same constant - so the invariant must fail.
+    """
+    from tracesettle.guard import invariants as inv
+    from tracesettle.near.txbuild import NearTransaction
+
+    original = NearTransaction.payload_fingerprint
+
+    def constant_digest(self):  # noqa: ANN001
+        return "sha256:" + "0" * 64
+
+    NearTransaction.payload_fingerprint = constant_digest
+    try:
+        result = inv.INVARIANTS["near_execution_binding_covers_the_bytes"]()
+        assert result.holds is False, "the invariant failed to notice a byte-less binding"
+    finally:
+        NearTransaction.payload_fingerprint = original
+
+
 def test_configured_audit_log_invariant_notices_a_truthiness_guard():
     """Mutation check: restoring the ``audit or AuditLog()`` defect must make the
     checker fail. The mutation is applied to a subclass, never to production."""

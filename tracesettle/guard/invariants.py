@@ -1483,6 +1483,7 @@ def _near_execution_binding_covers_the_bytes():
     """
     from ..near.execution import ExecutionError, NearExecutionBoundary
     from ..near.networks import NETWORKS, NearNetwork
+    from ..near import borsh as _borsh
     from ..near import ed25519
     import base64 as _base64
     import dataclasses
@@ -1585,10 +1586,23 @@ def _near_execution_binding_covers_the_bytes():
     tampered = dataclasses.replace(
         prepared,
         transaction=dataclasses.replace(
-            prepared.transaction, amount_base=prepared.transaction.amount_base + 1
+            prepared.transaction,
+            # Tamper ONLY the signed bytes: swap the transfer action for one that
+            # moves a different amount, while leaving every human-readable
+            # parameter (amount_base, destination, asset, chain, operation,
+            # service) identical. Without a byte-level binding this passes, so the
+            # check genuinely proves the authorization covers the bytes.
+            actions=(
+                _borsh.action_transfer(
+                    prepared.transaction.amount_base + 1_000_000_000_000_000_000_000_000
+                ),
+            ),
         ),
     )
-    sig = _base64.b64encode(ed25519.sign(prepared.transaction.tx_hash_bytes, seed)).decode()
+    # Sign the FORGED bytes, so the signature is valid for the tampered
+    # transaction. That removes the signature check as a confound: the refusal
+    # can only come from the authorization binding.
+    sig = _base64.b64encode(ed25519.sign(tampered.transaction.tx_hash_bytes, seed)).decode()
     refused = False
     try:
         boundary.accept_signature(tampered, sig)
@@ -1598,12 +1612,12 @@ def _near_execution_binding_covers_the_bytes():
         return InvariantResult(
             "near_execution_binding_covers_the_bytes",
             False,
-            "a tampered transaction passed the authorization binding",
+            "a transaction whose signed bytes differ from the bound fields passed the binding",
         )
     return InvariantResult(
         "near_execution_binding_covers_the_bytes",
         True,
-        "the authorization is bound to the exact bytes; a tampered amount is refused",
+        "the authorization is bound to the exact bytes; a swapped action is refused",
     )
 
 

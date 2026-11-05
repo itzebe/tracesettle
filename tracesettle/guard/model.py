@@ -299,6 +299,14 @@ class TransactionRequest:
     asserted_approval_fields: tuple[str, ...] = ()
     #: Free-form extras, recorded for audit but never evaluated as policy input.
     metadata: dict[str, Any] = field(default_factory=dict)
+    #: A digest of the exact bytes the authorization must cover, when the caller
+    #: holds them. It is bound into the authorization fingerprint so that a
+    #: transaction whose *bytes* differ from the evaluated parameters - a swapped
+    #: action, a substituted token contract, forged call arguments - cannot ride
+    #: on a valid authorization. ``None`` for callers that do not construct the
+    #: bytes (e.g. the EVM path); a ``None`` digest is simply absent from the
+    #: fingerprint, so those authorizations are unchanged.
+    transaction_digest: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -343,18 +351,25 @@ def canonical_fields(
     asset: str,
     amount: Decimal,
     destination: str,
+    transaction_digest: str | None = None,
 ) -> dict[str, str]:
     """The exact parameter set that an authorization is bound to.
 
     Case is normalised only where the chain's own encoding is case-insensitive
     (EVM hex addresses, asset symbols, chain ids, operations). Addresses are
     compared exactly otherwise.
+
+    ``transaction_digest`` - when the caller holds the transaction bytes - is
+    folded into the same set, so the authorization commits to the exact bytes
+    that will be signed and not merely to a summary of them. It is omitted
+    entirely when ``None`` so existing (byte-less) authorizations keep the exact
+    same fingerprint.
     """
     chain_norm = chain.strip().lower()
     dest = destination.strip()
     if dest[:2].lower() == "0x":
         dest = "0x" + dest[2:].lower()
-    return {
+    fields = {
         "service_id": service_id.strip(),
         "operation": operation.strip().upper(),
         "chain": chain_norm,
@@ -362,6 +377,9 @@ def canonical_fields(
         "amount": canonical_amount(amount),
         "destination": dest,
     }
+    if transaction_digest is not None:
+        fields["transaction_digest"] = transaction_digest
+    return fields
 
 
 def fingerprint_of(fields: dict[str, str]) -> RequestFingerprint:
@@ -378,6 +396,7 @@ def fingerprint_request(request: TransactionRequest) -> RequestFingerprint:
             asset=request.asset,
             amount=request.amount,
             destination=request.destination,
+            transaction_digest=request.transaction_digest,
         )
     )
 

@@ -249,6 +249,54 @@ def test_an_unchanged_transaction_passes_the_binding():
     assert executed.state is SettlementState.VERIFIED
 
 
+def test_swapped_action_bytes_after_authorization_are_refused():
+    """A bytes-only change - every human-readable field identical - is refused.
+
+    The authorization is bound to the exact signed bytes (the digest of the
+    unsigned transaction), not merely to a summary of them. The forged
+    transaction is signed with a *valid* signature over its own bytes, so only
+    the byte-level binding - not the signature check - can catch it.
+    """
+    from tracesettle.near import borsh
+
+    boundary, rpc = make_boundary()
+    prepared = _prepare(boundary, amount_human="1")
+    forged = (borsh.action_transfer(prepared.transaction.amount_base + 10**24),)
+    tampered = _tamper(prepared, actions=forged)
+    # The human-readable parameters are unchanged: amount_base, destination,
+    # asset, chain, operation and service all match the authorized request.
+    assert tampered.transaction.amount_base == prepared.transaction.amount_base
+    assert tampered.transaction.destination == prepared.transaction.destination
+    assert tampered.transaction.receiver_id == prepared.transaction.receiver_id
+    # Sign the FORGED bytes, so the signature is valid for the tampered
+    # transaction and cannot be what refuses it.
+    valid_for_forgery = base64.b64encode(
+        ed25519.sign(tampered.transaction.tx_hash_bytes, TEST_SEED)
+    ).decode()
+    with pytest.raises(ExecutionError):
+        boundary.accept_signature(tampered, valid_for_forgery)
+    assert rpc.broadcasts == []
+
+
+def test_substituted_token_contract_after_authorization_is_refused():
+    """ft_transfer: swapping the contract (receiver_id) is refused.
+
+    The recipient and amount are unchanged; only the contract the call targets
+    differs. The forged transaction is signed over its own bytes, so the refusal
+    is the binding's, not the signature check's.
+    """
+    boundary, rpc = make_boundary()
+    prepared = _prepare(boundary, asset_identifier="usdc.fakes.testnet", amount_human="1")
+    tampered = _tamper(prepared, receiver_id="evil.contract.near")
+    assert tampered.transaction.destination == prepared.transaction.destination
+    valid_for_forgery = base64.b64encode(
+        ed25519.sign(tampered.transaction.tx_hash_bytes, TEST_SEED)
+    ).decode()
+    with pytest.raises(ExecutionError):
+        boundary.accept_signature(tampered, valid_for_forgery)
+    assert rpc.broadcasts == []
+
+
 def test_the_authorization_is_single_use():
     """A spent authorization cannot sign a second transaction (replay refused)."""
     boundary, rpc = make_boundary()
