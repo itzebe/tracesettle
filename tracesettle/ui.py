@@ -851,6 +851,7 @@ def _build_near_execution(guard_service: GuardService) -> Any:
     from .near.execution import NearExecutionBoundary
     from .near.networks import NetworkError, network_config
     from .near.rpc import NearRpc
+    from .near.tee_execution import ExecutionRecordStore, TeeExecutionAuthorizer
 
     try:
         net_config = network_config(config.NEAR_EXECUTION_NETWORK)
@@ -860,7 +861,41 @@ def _build_near_execution(guard_service: GuardService) -> Any:
         timeout=config.REQUEST_TIMEOUT_SECONDS,
         max_attempts=config.MAX_ATTEMPTS,
     )
-    return NearExecutionBoundary(guard_service, net_config, rpc=NearRpc(net_config, client=client))
+
+    # The TEE trust boundary. When attestation is required, the authorizer makes
+    # a verified, transaction-bound attestation a precondition of signing; the
+    # boundary refuses any transaction that lacks one. A configured record
+    # database that cannot be opened is a hard failure, never a silent fallback.
+    tee_authorizer = None
+    tee_provider = None
+    if config.NEAR_TEE_REQUIRED:
+        try:
+            store = ExecutionRecordStore(config.NEAR_EXECUTION_DB)
+        except Exception as exc:  # noqa: BLE001 - a broken store must not start
+            raise RuntimeError(f"TRACESETTLE_NEAR_EXECUTION_DB: {exc}") from exc
+        tee_authorizer = TeeExecutionAuthorizer(
+            store=store,
+            require_attestation=True,
+            expected_measurement=config.NEAR_TEE_EXPECTED_MEASUREMENT,
+            ttl_seconds=config.NEAR_EXECUTION_TTL_SECONDS,
+        )
+        from .near.attestation import TeeAttestationProvider
+
+        tee_provider = TeeAttestationProvider(
+            url=config.TEE_ATTESTATION_URL,
+            client=HttpClient(
+                timeout=config.REQUEST_TIMEOUT_SECONDS,
+                max_attempts=config.MAX_ATTEMPTS,
+            ),
+        )
+
+    return NearExecutionBoundary(
+        guard_service,
+        net_config,
+        rpc=NearRpc(net_config, client=client),
+        tee_authorizer=tee_authorizer,
+        tee_provider=tee_provider,
+    )
 
 
 def _build_tee_provider() -> Any:

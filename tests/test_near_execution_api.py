@@ -167,3 +167,95 @@ def test_a_bad_signature_is_refused_and_nothing_is_broadcast():
     )
     assert resp.status == 422
     assert rpc.broadcasts == []
+
+
+# --- the TEE gate over HTTP -----------------------------------------------
+
+
+def _tee_api(*, provider=None, expected_measurement=""):
+    from near_helpers import FakeTeeProvider
+    from tracesettle.near.tee_execution import ExecutionRecordStore, TeeExecutionAuthorizer
+
+    guard = make_guard(near_policy())
+    config = NETWORKS[NearNetwork.TESTNET]
+    rpc = FakeNearRpc(config)
+    authorizer = TeeExecutionAuthorizer(
+        store=ExecutionRecordStore(),
+        require_attestation=True,
+        expected_measurement=expected_measurement,
+        ttl_seconds=90,
+    )
+    provider = provider or FakeTeeProvider()
+    boundary = NearExecutionBoundary(
+        guard, config, rpc=rpc, tee_authorizer=authorizer, tee_provider=provider
+    )
+    return GuardAPI(guard, near_execution=boundary), rpc, authorizer, provider
+
+
+def test_the_execution_info_reports_the_tee_gate():
+    api, _, _, _ = _tee_api()
+    info = api.dispatch("GET", "/api/guard/near/execution", {}, None)
+    assert info.status == 200
+    assert info.payload["tee_gate"]["enabled"] is True
+    assert info.payload["tee_gate"]["required"] is True
+
+
+def test_attest_binds_a_verified_attestation_over_http():
+    api, rpc, authorizer, provider = _tee_api()
+    prepared = _post(api, "/api/guard/near/execution/prepare", _prepare_body())
+    execution_id = prepared.payload["execution_id"]
+    assert execution_id
+    attested = _post(api, "/api/guard/near/execution/attest", {"prepare_id": prepared.payload["prepare_id"]})
+    assert attested.status == 200, attested.payload
+    assert attested.payload["tee_verified"] is True
+    record = authorizer.get(execution_id)
+    assert record.tee_verified
+    # The record is inspectable through its own route.
+    fetched = api.dispatch("GET", f"/api/guard/near/execution/record/{execution_id}", {}, None)
+    assert fetched.status == 200
+    assert fetched.payload["record"]["tee_verified"] is True
+
+
+def test_submit_without_attestation_is_refused_over_http_and_nothing_broadcasts():
+    api, rpc, _, _ = _tee_api()
+    prepared = _post(api, "/api/guard/near/execution/prepare", _prepare_body())
+    from tracesettle.base58 import b58decode
+
+    tx_hash = prepared.payload["transaction"]["tx_hash"]
+    signature = base64.b64encode(ed25519.sign(b58decode(tx_hash), TEST_SEED)).decode()
+    resp = _post(
+        api,
+        "/api/guard/near/execution/submit",
+        {"prepare_id": prepared.payload["prepare_id"], "signature": signature},
+    )
+    assert resp.status == 422
+    assert rpc.broadcasts == []
+
+
+def test_a_failed_attestation_is_refused_over_http():
+    from near_helpers import FakeTeeProvider
+
+    api, rpc, authorizer, provider = _tee_api(provider=FakeTeeProvider(verified=False))
+    prepared = _post(api, "/api/guard/near/execution/prepare", _prepare_body())
+    resp = _post(api, "/api/guard/near/execution/attest", {"prepare_id": prepared.payload["prepare_id"]})
+    assert resp.status == 422
+    assert rpc.broadcasts == []
+
+
+def test_attest_without_a_gate_is_a_conflict():
+    api, rpc, _ = _api()  # no tee_authorizer
+    prepared = _post(api, "/api/guard/near/execution/prepare", _prepare_body())
+    resp = _post(api, "/api/guard/near/execution/attest", {"prepare_id": prepared.payload["prepare_id"]})
+    assert resp.status == 409
+
+
+def test_attest_requires_a_prepare_id():
+    api, _, _, _ = _tee_api()
+    resp = _post(api, "/api/guard/near/execution/attest", {})
+    assert resp.status == 400
+
+
+def test_attest_unknown_prepare_id_is_not_found():
+    api, _, _, _ = _tee_api()
+    resp = _post(api, "/api/guard/near/execution/attest", {"prepare_id": "nope"})
+    assert resp.status == 404

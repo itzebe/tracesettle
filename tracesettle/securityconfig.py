@@ -112,6 +112,26 @@ def validate_startup(
             "with at least one credential, or unset TRACESETTLE_REQUIRE_SERVICE_AUTH"
         )
 
+    # The TEE gate fails closed. Asking for enforced attestation without the
+    # machinery to obtain one, or without the execution boundary that would obey
+    # it, would silently drop the guarantee the operator asked for, so it is a
+    # hard error on any binding.
+    from . import config
+
+    if config.NEAR_TEE_REQUIRED:
+        if not config.TEE_ATTESTATION_ENABLED:
+            raise ConfigurationError(
+                "TRACESETTLE_NEAR_TEE_REQUIRED is set but TRACESETTLE_TEE_ATTESTATION is "
+                "not; the gate would have no attestation to enforce. Enable the attestation "
+                "provider, or unset TRACESETTLE_NEAR_TEE_REQUIRED"
+            )
+        if not config.NEAR_EXECUTION_ENABLED:
+            raise ConfigurationError(
+                "TRACESETTLE_NEAR_TEE_REQUIRED is set but TRACESETTLE_NEAR_EXECUTION is not; "
+                "there is no execution boundary to enforce the gate on. Enable the execution "
+                "boundary, or unset TRACESETTLE_NEAR_TEE_REQUIRED"
+            )
+
     if not public_binding:
         return profile
 

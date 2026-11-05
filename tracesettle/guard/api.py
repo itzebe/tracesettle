@@ -194,6 +194,9 @@ class GuardAPI:
             return self._near_tee_info()
         if path == "/api/guard/near/tee/attest":
             return self._near_tee_attest(params)
+        if path.startswith("/api/guard/near/execution/record/"):
+            execution_id = path[len("/api/guard/near/execution/record/") :].strip("/")
+            return self._near_execution_record(execution_id)
         if path == "/api/guard/near/lifecycle":
             return self._lifecycle_list(params)
         if path == "/api/guard/near/lifecycle/tokens":
@@ -437,6 +440,10 @@ class GuardAPI:
             if not self._identity_matches(body, authenticated_service_id):
                 return ApiResponse(403, {"error": "service identity does not match the credential"})
             return self._near_execution_prepare(body, authenticated_service_id)
+        if path == "/api/guard/near/execution/attest":
+            if not self._identity_matches(body, authenticated_service_id):
+                return ApiResponse(403, {"error": "service identity does not match the credential"})
+            return self._near_execution_attest(body, authenticated_service_id)
         if path == "/api/guard/near/execution/submit":
             if not self._identity_matches(body, authenticated_service_id):
                 return ApiResponse(403, {"error": "service identity does not match the credential"})
@@ -562,6 +569,7 @@ class GuardAPI:
                 },
             )
         config = self.near_execution.config
+        tee_authorizer = getattr(self.near_execution, "tee_authorizer", None)
         return ApiResponse(
             200,
             {
@@ -569,12 +577,54 @@ class GuardAPI:
                 "network": config.to_dict(),
                 "signs": False,
                 "broadcasts": True,
+                "tee_gate": {
+                    "enabled": tee_authorizer is not None,
+                    "required": bool(getattr(self.near_execution, "tee_required", False)),
+                    "measurement_pinned": bool(
+                        getattr(tee_authorizer, "expected_measurement", "")
+                    ),
+                    "note": (
+                        "When required, a verified Intel TDX attestation bound to the "
+                        "transaction digest and decision nonce must exist before the "
+                        "boundary will accept a signature. The server holds no key."
+                        if tee_authorizer is not None
+                        else "No TEE gate: enable TRACESETTLE_NEAR_TEE_REQUIRED=1 to make a "
+                        "verified attestation a precondition of signing."
+                    ),
+                },
                 "note": (
                     "TraceSettle builds the transaction and independently verifies "
                     "settlement. It never holds a private key: the wallet signs."
                 ),
             },
         )
+
+    def _near_execution_record(self, execution_id: str) -> ApiResponse:
+        """Return the durable execution record: the lifecycle and its evidence.
+
+        The record is the inspectable proof of the lifecycle - the authorization,
+        the TEE binding, and the settlement - so a caller can see exactly which
+        gate a transaction reached and what evidence backed it.
+        """
+        if self.near_execution is None:
+            return ApiResponse(200, {"enabled": False, "record": None})
+        authorizer = getattr(self.near_execution, "tee_authorizer", None)
+        if authorizer is None:
+            return ApiResponse(
+                200,
+                {
+                    "enabled": False,
+                    "record": None,
+                    "note": (
+                        "No TEE gate is enabled, so no execution records are kept. "
+                        "Enable TRACESETTLE_NEAR_TEE_REQUIRED=1."
+                    ),
+                },
+            )
+        record = authorizer.get(execution_id)
+        if record is None:
+            return ApiResponse(404, {"error": "unknown execution id"})
+        return ApiResponse(200, {"enabled": True, "record": record.to_dict()})
 
     def _near_execution_owner(self, authenticated_service_id: str | None) -> str:
         """The owner a prepared operation belongs to.
@@ -628,6 +678,60 @@ class GuardAPI:
             payload["prepare_id"] = prepare_id
             payload["expires_in_seconds"] = 90
         return ApiResponse(200, payload)
+
+    def _near_execution_attest(self, body: Any, authenticated_service_id: str | None) -> ApiResponse:
+        """Fetch a genuine TEE attestation and bind it to a prepared transaction.
+
+        This is the step that makes the TEE participate in execution: once an
+        attestation is bound, the boundary will accept a signature; without it,
+        and with the gate enabled, it refuses. The attestation is fetched from the
+        provider configured server-side - never a client-supplied one - and the
+        nonce is derived from the execution record, so an attestation obtained for
+        one transaction cannot be replayed for another.
+        """
+        refused = self._require_near_execution()
+        if refused is not None:
+            return refused
+        if not isinstance(body, dict):
+            return _bad_request("request body must be a JSON object")
+        prepare_id = str(body.get("prepare_id", "")).strip()
+        if not prepare_id:
+            return _bad_request("field 'prepare_id' is required")
+        boundary = self.near_execution
+        if boundary.tee_authorizer is None:
+            return ApiResponse(
+                409,
+                {
+                    "error": (
+                        "the TEE execution gate is not enabled on this deployment; "
+                        "no attestation can be bound"
+                    )
+                },
+            )
+        owner = self._near_execution_owner(authenticated_service_id)
+        prepared = self.near_execution_store().peek(prepare_id, owner)
+        if prepared is None:
+            return ApiResponse(404, {"error": "unknown or expired prepare_id"})
+        if not prepared.authorized:
+            return ApiResponse(422, {"error": "the operation was not authorized"})
+        from ..near.execution import ExecutionError
+
+        try:
+            record = boundary.verify_tee_attestation(prepared)
+        except ExecutionError as exc:
+            return ApiResponse(422, {"error": str(exc)})
+        except Exception as exc:  # noqa: BLE001 - a failed verification is a refusal
+            return ApiResponse(422, {"error": f"TEE attestation failed: {type(exc).__name__}"})
+        return ApiResponse(
+            200,
+            {
+                "prepare_id": prepare_id,
+                "execution_id": prepared.execution_id,
+                "tee_verified": record.tee_verified,
+                "state": record.state,
+                "tee_binding": record.tee_binding.to_dict() if record.tee_binding else None,
+            },
+        )
 
     def _near_execution_submit(self, body: Any, authenticated_service_id: str | None) -> ApiResponse:
         """Accept a wallet signature, broadcast, and verify settlement.

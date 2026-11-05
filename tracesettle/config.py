@@ -352,6 +352,35 @@ NEAR_EXECUTION_ENABLED = (
 #: against the RPC before any transaction is built.
 NEAR_EXECUTION_NETWORK = os.environ.get("TRACESETTLE_NEAR_EXECUTION_NETWORK", "testnet").strip() or "testnet"
 
+#: Whether a verified TEE attestation is **required** before the execution
+#: boundary will accept a signature. Off by default: the TEE gate is an explicit
+#: operator decision. When on, a transaction cannot reach the signer unless a
+#: genuine Intel TDX attestation is bound to its exact digest and decision nonce,
+#: so an attestation is enforced rather than merely displayed.
+NEAR_TEE_REQUIRED = (
+    os.environ.get("TRACESETTLE_NEAR_TEE_REQUIRED", "").strip().lower()
+    in {"1", "true", "yes", "on"}
+)
+
+#: The TD report measurement fingerprint (``sha256`` of the canonical measurement
+#: fields) the TEE gate requires. Empty means the measurement is recorded and
+#: reported as ``UNPINNED`` rather than claimed; a non-empty value pins it, and a
+#: quote whose measurement differs is refused.
+NEAR_TEE_EXPECTED_MEASUREMENT = (
+    os.environ.get("TRACESETTLE_NEAR_TEE_EXPECTED_MEASUREMENT", "").strip().lower()
+)
+
+#: The durable execution-record database (SQLite). Unset means execution records
+#: live in memory only, which is the loopback default; a deployment that relies
+#: on the TEE gate should set it so a record survives a restart.
+NEAR_EXECUTION_DB = os.environ.get("TRACESETTLE_NEAR_EXECUTION_DB", "").strip() or None
+
+#: The TTL, in seconds, of an execution record. It is the window in which an
+#: authorization may be signed; after it the record is EXPIRED and refuses.
+NEAR_EXECUTION_TTL_SECONDS = int(
+    os.environ.get("TRACESETTLE_NEAR_EXECUTION_TTL_SECONDS", "90") or "90"
+)
+
 #: The public NEAR AI Cloud gateway attestation endpoint. It returns a genuine,
 #: hardware-signed Intel TDX quote; TraceSettle verifies it locally. No key is
 #: required and no payment is involved.

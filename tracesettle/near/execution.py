@@ -51,6 +51,12 @@ from . import ed25519
 from .assets import AssetError, NearAsset, from_base_units, resolve_asset, to_base_units, verify_decimals
 from .networks import NetworkConfig, NetworkError, NearNetwork, parse_network, verify_network_identity
 from .rpc import NearRpc
+from .tee_execution import (
+    ExecutionState,
+    IllegalTransition,
+    TeeExecutionError,
+    can_transition,
+)
 from .txbuild import (
     DEFAULT_FT_TRANSFER_GAS,
     OP_FT_TRANSFER,
@@ -105,6 +111,12 @@ class PreparedOperation:
     authorization: Any = None
     authorization_id: str | None = None
     binding: dict[str, str] = field(default_factory=dict)
+    #: The TEE-bound execution record id, present when the TEE gate is enabled.
+    execution_id: str | None = None
+    #: The decision nonce an attestation must be bound to, once requested.
+    tee_nonce: str | None = None
+    #: The verified attestation binding, once it has been established.
+    tee_binding: Any = None
 
     @property
     def authorized(self) -> bool:
@@ -118,6 +130,9 @@ class PreparedOperation:
             "authorized": self.authorized,
             "authorization_id": self.authorization_id,
             "binding": dict(self.binding),
+            "execution_id": self.execution_id,
+            "tee_nonce": self.tee_nonce,
+            "tee_binding": self.tee_binding.to_dict() if self.tee_binding is not None else None,
         }
 
 
@@ -323,10 +338,115 @@ class NearExecutionBoundary:
         config: NetworkConfig,
         *,
         rpc: NearRpc | None = None,
+        tee_authorizer: Any = None,
+        tee_provider: Any = None,
     ) -> None:
         self.guard = guard
         self.config = config
         self.rpc = rpc or NearRpc(config)
+        # The TEE trust boundary. When present, a transaction cannot be signed
+        # unless a verified hardware attestation is bound to it. When absent the
+        # boundary behaves exactly as before; enabling it is an operator decision
+        # (``TRACESETTLE_NEAR_TEE_REQUIRED=1``).
+        self.tee_authorizer = tee_authorizer
+        self.tee_provider = tee_provider
+
+    @property
+    def tee_required(self) -> bool:
+        return bool(self.tee_authorizer is not None and self.tee_authorizer.require_attestation)
+
+    def _transaction_digest(self, transaction: Any) -> str:
+        """The exact digest a TEE binding commits to: the bytes to be signed.
+
+        ``unsigned_bytes`` is precisely what the wallet signs, so the digest
+        covers the signer, public key, nonce, receiver, block hash and every
+        action (including the encoded transfer amount). A substitution that does
+        not change the signed bytes is not a substitution at all, and one that
+        does always changes the digest.
+        """
+        return transaction.unsigned_bytes().hex()
+
+    def _new_execution_record(self, prepared: Any) -> Any:
+        """Record the authorized execution so the TEE gate has something to bind."""
+        if self.tee_authorizer is None:
+            return None
+        tx = prepared.transaction
+        authorization = prepared.authorization
+        nonce = str(getattr(authorization, "nonce", "") or "")
+        policy_version = str(getattr(authorization, "version", "") or "")
+        record = self.tee_authorizer.create(
+            service_id=tx.service_id,
+            network=self.config.network.value,
+            transaction_digest=self._transaction_digest(tx),
+            signer_id=tx.signer_id,
+            receiver_id=tx.receiver_id,
+            operation=tx.guard_operation,
+            asset=tx.guard_asset,
+            amount=str(from_base_units(tx.amount_base, tx.asset)),
+            destination=tx.destination,
+            authorization_id=prepared.authorization_id,
+            authorization_nonce=nonce,
+            policy_version=policy_version,
+        )
+        prepared.execution_id = record.execution_id
+        return record
+
+    def verify_tee_attestation(self, prepared: Any) -> Any:
+        """Fetch a genuine attestation and bind it to the prepared transaction.
+
+        This is the step that makes the TEE participate in execution: without a
+        verified, bound attestation the boundary will refuse to accept a
+        signature. It fails closed - a provider error or a failed verification
+        raises and the record is moved to ``TEE_VERIFICATION_FAILED``.
+        """
+        if self.tee_authorizer is None or self.tee_provider is None:
+            raise ExecutionError(
+                "TEE attestation is not available on this deployment; refusing to claim "
+                "a verified execution"
+            )
+        record = self.tee_authorizer.get(prepared.execution_id)
+        if record is None:
+            raise ExecutionError("no execution record to bind an attestation to")
+        from .attestation import derive_nonce
+
+        nonce = derive_nonce(
+            transaction_fingerprint=record.execution_digest,
+            policy_revision=record.policy_version,
+            operation_id=record.execution_id,
+        )
+        prepared.tee_nonce = nonce.hex()
+        self.tee_authorizer.begin_verification(record.execution_id, expected_nonce=nonce.hex())
+        attestation = self.tee_provider.attest(nonce)
+        try:
+            bound = self.tee_authorizer.bind_attestation(
+                record.execution_id,
+                attestation,
+                expected_nonce=nonce.hex(),
+                expected_transaction_digest=record.transaction_digest,
+            )
+        except TeeExecutionError as exc:
+            raise ExecutionError(str(exc)) from exc
+        prepared.tee_binding = bound.tee_binding
+        return bound
+
+    def _enforce_tee(self, prepared: Any, *, consume_record: bool = False) -> None:
+        """The TEE gate. Called immediately before a signature is accepted."""
+        if self.tee_authorizer is None:
+            return
+        execution_id = getattr(prepared, "execution_id", None)
+        if not execution_id:
+            raise ExecutionError(
+                "no execution record was created for this operation; refusing to sign"
+            )
+        try:
+            self.tee_authorizer.enforce(
+                execution_id,
+                transaction_digest=self._transaction_digest(prepared.transaction),
+            )
+            if consume_record:
+                self.tee_authorizer.begin_signing(execution_id)
+        except TeeExecutionError as exc:
+            raise ExecutionError(str(exc)) from exc
 
     # -- preconditions -----------------------------------------------------
 
@@ -474,7 +594,7 @@ class NearExecutionBoundary:
             authorization = decision.authorization
             authorization_id = getattr(authorization, "authorization_id", None)
 
-        return PreparedOperation(
+        prepared = PreparedOperation(
             network=self.config.network,
             transaction=tx,
             decision=decision,
@@ -484,6 +604,11 @@ class NearExecutionBoundary:
             # exactly the parameter set a signature will be checked against.
             binding=tx.guard_canonical_fields(),
         )
+        # When the TEE gate is on, an authorized operation gets an execution
+        # record immediately, so the attestation has an exact digest to bind to.
+        if prepared.authorized and self.tee_authorizer is not None:
+            self._new_execution_record(prepared)
+        return prepared
 
     # -- signing boundary --------------------------------------------------
 
@@ -739,6 +864,11 @@ class NearExecutionBoundary:
         transaction is not accepted, so a signature cannot be reused for a
         different payload.
         """
+        # The TEE gate runs before the authorization nonce is consumed, so a
+        # transaction without a verified, bound attestation cannot even spend the
+        # single-use authorization - let alone reach the network. Consuming the
+        # record moves TEE_VERIFIED -> SIGNING_PENDING, the only door to signing.
+        self._enforce_tee(prepared, consume_record=True)
         self.verify_binding(prepared, consume=True)
         try:
             raw = base64.b64decode(signature_b64, validate=True)
@@ -757,12 +887,22 @@ class NearExecutionBoundary:
     def broadcast(self, prepared: PreparedOperation, signature_b64: str) -> ExecutedOperation:
         """Validate the signature, submit, and independently verify settlement."""
         signed_b64, _ = self.accept_signature(prepared, signature_b64)
+        if self.tee_authorizer is not None and prepared.execution_id:
+            self.tee_authorizer.record_state(
+                prepared.execution_id, ExecutionState.SIGNED, reason="signature accepted"
+            )
         result = self.rpc.send_tx(signed_b64, wait_until="INCLUDED_FINAL")
+        if self.tee_authorizer is not None and prepared.execution_id:
+            self.tee_authorizer.record_state(
+                prepared.execution_id, ExecutionState.SUBMITTED, reason="broadcast attempted"
+            )
         verification = verify_transaction(
             transaction=prepared.transaction,
             result=result.data,
             source_status=result.status,
         )
+        if self.tee_authorizer is not None and prepared.execution_id:
+            self._record_settlement_state(prepared.execution_id, verification)
         return ExecutedOperation(
             state=verification.state,
             tx_hash=prepared.transaction.tx_hash,
@@ -772,6 +912,41 @@ class NearExecutionBoundary:
                 "explorer_url": self.config.explorer_url(prepared.transaction.tx_hash),
             },
         )
+
+    def _record_settlement_state(self, execution_id: str, verification: Any) -> None:
+        """Map a settlement verdict onto the lifecycle state, never upward."""
+        from .verify import SettlementState
+
+        record = self.tee_authorizer.get(execution_id)
+        if record is None:
+            return
+        try:
+            if verification.state is SettlementState.VERIFIED:
+                # INCLUDED is the necessary predecessor of a verified settlement.
+                if can_transition(record.state, ExecutionState.INCLUDED):
+                    self.tee_authorizer.record_state(
+                        execution_id, ExecutionState.INCLUDED, reason="included on-chain"
+                    )
+                self.tee_authorizer.record_state(
+                    execution_id,
+                    ExecutionState.SETTLEMENT_VERIFIED,
+                    reason="independent verification",
+                )
+            elif verification.state is SettlementState.FAILED:
+                self.tee_authorizer.record_state(
+                    execution_id, ExecutionState.SETTLEMENT_FAILED, reason="settlement failed"
+                )
+            else:
+                self.tee_authorizer.record_state(
+                    execution_id,
+                    ExecutionState.SETTLEMENT_UNKNOWN,
+                    reason=f"settlement not established ({verification.state.value})",
+                )
+        except IllegalTransition:
+            # A state already terminal (e.g. a retried broadcast) is left as-is;
+            # the verification result is still returned to the caller.
+            pass
+        self.tee_authorizer.record_settlement(execution_id, verification.to_dict())
 
     def wait_for_final(self, prepared: PreparedOperation, *, attempts: int = 8, delay: float = 1.0) -> SettlementVerification:
         """Poll the transaction until it is final, bounded, then verify it.

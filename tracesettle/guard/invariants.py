@@ -1684,6 +1684,265 @@ def _tee_attestation_is_bound_to_the_decision_nonce():
     )
 
 
+def _tee_execution_requires_a_bound_attestation():
+    """A transaction must not be signable without a verified, bound attestation.
+
+    The gate is exercised end to end on the real boundary: an authorized
+    transaction is prepared with the TEE gate enabled and an attempt to accept a
+    signature is made *without* an attestation. It must be refused, and the RPC
+    transport must record no broadcast. A boundary that treated the attestation
+    as advisory would accept the signature here.
+    """
+    from ..near.execution import ExecutionError, NearExecutionBoundary
+    from ..near.networks import NETWORKS, NearNetwork
+    from ..near.tee_execution import ExecutionRecordStore, TeeExecutionAuthorizer
+    from ..near import ed25519
+    import base64 as _base64
+
+    seed = bytes(range(32))
+    signer = "agent.testnet"
+    receiver = "approved.testnet"
+    config = NETWORKS[NearNetwork.TESTNET]
+    rpc = _InvariantRpc(config)
+    policy = _near_invariant_policy(receiver)
+    guard = GuardService(
+        policy=policy,
+        authority=AuthorizationAuthority(
+            key=_INVARIANT_KEY, key_id="i", ephemeral=False, replay_store=InMemoryReplayStore()
+        ),
+    )
+    authorizer = TeeExecutionAuthorizer(
+        store=ExecutionRecordStore(), require_attestation=True, ttl_seconds=90
+    )
+    boundary = NearExecutionBoundary(guard, config, rpc=rpc, tee_authorizer=authorizer)
+    pub = "ed25519:" + _b58(ed25519.public_key(seed))
+    prepared = boundary.prepare(
+        service_id="svc",
+        account_id=signer,
+        public_key=pub,
+        receiver_id=receiver,
+        asset_identifier="near:native",
+        amount_human="1",
+    )
+    if not prepared.authorized:
+        return InvariantResult(
+            "tee_execution_requires_a_bound_attestation",
+            False,
+            "the invariant's own authorized prepare did not authorize",
+        )
+    sig = _base64.b64encode(ed25519.sign(prepared.transaction.tx_hash_bytes, seed)).decode()
+    refused = False
+    try:
+        boundary.accept_signature(prepared, sig)
+    except ExecutionError:
+        refused = True
+    if not refused or rpc.broadcasts:
+        return InvariantResult(
+            "tee_execution_requires_a_bound_attestation",
+            False,
+            "a signature was accepted without a bound attestation",
+        )
+    return InvariantResult(
+        "tee_execution_requires_a_bound_attestation",
+        True,
+        "with the gate on, a transaction cannot be signed until a verified attestation is bound",
+    )
+
+
+def _tee_execution_cannot_be_skipped_by_the_state_machine():
+    """SIGNING_PENDING must be reachable only from TEE_VERIFIED.
+
+    This is a structural check on the transition table: no pre-TEE state may
+    reach signing, and no state may jump straight to a success state. A single
+    illegal edge added to the table would make this fail.
+    """
+    from ..near.tee_execution import ExecutionState, can_transition
+
+    pre_tee = (
+        ExecutionState.RECEIVED,
+        ExecutionState.AUTHORIZATION_PENDING,
+        ExecutionState.AUTHORIZED,
+        ExecutionState.TEE_VERIFICATION_PENDING,
+    )
+    for state in pre_tee:
+        if can_transition(state, ExecutionState.SIGNING_PENDING):
+            return InvariantResult(
+                "tee_execution_cannot_be_skipped_by_the_state_machine",
+                False,
+                f"{state} can reach SIGNING_PENDING without TEE verification",
+            )
+    for state in pre_tee + (
+        ExecutionState.TEE_VERIFIED,
+        ExecutionState.SIGNING_PENDING,
+        ExecutionState.SIGNED,
+    ):
+        if can_transition(state, ExecutionState.SETTLEMENT_VERIFIED):
+            return InvariantResult(
+                "tee_execution_cannot_be_skipped_by_the_state_machine",
+                False,
+                f"{state} can jump straight to SETTLEMENT_VERIFIED",
+            )
+    if not can_transition(ExecutionState.TEE_VERIFIED, ExecutionState.SIGNING_PENDING):
+        return InvariantResult(
+            "tee_execution_cannot_be_skipped_by_the_state_machine",
+            False,
+            "TEE_VERIFIED cannot reach SIGNING_PENDING, so the gate could never be passed",
+        )
+    return InvariantResult(
+        "tee_execution_cannot_be_skipped_by_the_state_machine",
+        True,
+        "SIGNING_PENDING is reachable only from TEE_VERIFIED, and no state jumps to a success state",
+    )
+
+
+def _tee_execution_record_is_transaction_bound():
+    """An attestation bound to one transaction must not authorize another.
+
+    A record is created and TEE-verified, then the transaction digest is changed
+    (a different payload). ``enforce`` must refuse. A gate that checked only that
+    *an* attestation existed would accept the substituted transaction.
+    """
+    from ..near.tee_execution import TeeExecutionAuthorizer, TeeExecutionError
+
+    authorizer = TeeExecutionAuthorizer(require_attestation=True)
+    record = authorizer.create(
+        service_id="svc",
+        network="testnet",
+        transaction_digest="ab" * 32,
+        signer_id="agent.testnet",
+        receiver_id="approved.testnet",
+        operation="WITHDRAWAL",
+        asset="NEAR:NATIVE",
+        amount="1",
+        destination="approved.testnet",
+        authorization_id="auth",
+        authorization_nonce="11" * 32,
+        policy_version="1",
+    )
+    authorizer.bind_attestation(
+        record.execution_id,
+        _InvariantAttestation(nonce=record.authorization_nonce),
+        expected_nonce=record.authorization_nonce,
+        expected_transaction_digest=record.transaction_digest,
+    )
+    refused = False
+    try:
+        authorizer.enforce(record.execution_id, transaction_digest="cd" * 32)
+    except TeeExecutionError:
+        refused = True
+    if not refused:
+        return InvariantResult(
+            "tee_execution_record_is_transaction_bound",
+            False,
+            "a TEE-verified record authorized a different transaction digest",
+        )
+    # The exact digest still passes, so the check is not vacuously refusing.
+    if not authorizer.enforce(record.execution_id, transaction_digest=record.transaction_digest):
+        return InvariantResult(
+            "tee_execution_record_is_transaction_bound",
+            False,
+            "the record refused its own transaction digest",
+        )
+    return InvariantResult(
+        "tee_execution_record_is_transaction_bound",
+        True,
+        "a TEE-verified record authorizes only the exact transaction digest it was bound to",
+    )
+
+
+class _InvariantAttestation:
+    """A minimal verified attestation for the structural invariants."""
+
+    def __init__(self, *, nonce: str, status: str = "VERIFIED") -> None:
+        self.status = _AttestationStatusValue(status)
+        self.detail = "invariant"
+        self.nonce = nonce
+        self.provider = "invariant"
+        self.verification = {"measurement": {"rt_mr0": "aa" * 48}}
+        self.fetched = True
+        self.source_status = "OK"
+
+
+class _AttestationStatusValue:
+    def __init__(self, value: str) -> None:
+        self.value = value
+
+
+class _InvariantRpc:
+    """A minimal RPC transport for the invariant checks, recording broadcasts."""
+
+    def __init__(self, config) -> None:
+        self.config = config
+        self.broadcasts: list[str] = []
+
+    def status(self):
+        from ..near.rpc import RpcResult
+        from ..model import SourceStatus
+
+        return RpcResult(
+            SourceStatus.OK,
+            {"chain_id": self.config.chain_id, "genesis_hash": self.config.genesis_hash},
+        )
+
+    def block_hash(self, *, finality="final"):
+        from ..near.rpc import RpcResult
+        from ..model import SourceStatus
+
+        return RpcResult(
+            SourceStatus.OK,
+            {"hash": "9Gq9bHtf6SKUuWLbzgPMVedA3BtYbYVwb5NVUrQyzoE9", "height": 1},
+        )
+
+    def view_access_key(self, account_id, public_key):
+        from ..near.rpc import RpcResult
+        from ..model import SourceStatus
+
+        return RpcResult(SourceStatus.OK, {"nonce": 1})
+
+    def call_function(self, account_id, method_name, args=None, *, finality="final"):
+        from ..near.rpc import RpcResult
+        from ..model import SourceStatus
+
+        return RpcResult(SourceStatus.OK, {"decimals": 24})
+
+    def send_tx(self, signed_transaction_b64, *, wait_until="INCLUDED_FINAL"):
+        self.broadcasts.append(signed_transaction_b64)
+        from ..near.rpc import RpcResult
+        from ..model import SourceStatus
+
+        return RpcResult(SourceStatus.OK, {})
+
+    def tx_status(self, tx_hash, sender_account_id):
+        from ..near.rpc import RpcResult
+        from ..model import SourceStatus
+
+        return RpcResult(SourceStatus.OK, {})
+
+
+def _near_invariant_policy(receiver: str):
+    from .policy import PolicyConfig, ServicePolicy
+
+    return PolicyConfig(
+        policy_id="near-tee-invariant",
+        name="near tee invariant",
+        version="1",
+        approved_destinations=frozenset({receiver}),
+        services={
+            "svc": ServicePolicy(
+                service_id="svc",
+                allowed_operations=frozenset({"WITHDRAWAL"}),
+                allowed_chains=frozenset({"near-testnet"}),
+                allowed_assets=frozenset({"NEAR:NATIVE"}),
+                max_amount_per_transaction=Decimal("100"),
+                approval_threshold=Decimal("1000"),
+            )
+        },
+        per_transaction_limit=Decimal("100"),
+        approval_threshold=Decimal("1000"),
+        allow_unlisted_destinations=False,
+    )
+
+
 def _b58(raw: bytes) -> str:
     alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
     n = int.from_bytes(raw, "big")
@@ -1743,6 +2002,13 @@ INVARIANTS: dict[str, Callable[[], InvariantResult]] = {
     "tee_attestation_is_bound_to_the_decision_nonce": (
         _tee_attestation_is_bound_to_the_decision_nonce
     ),
+    "tee_execution_requires_a_bound_attestation": (
+        _tee_execution_requires_a_bound_attestation
+    ),
+    "tee_execution_cannot_be_skipped_by_the_state_machine": (
+        _tee_execution_cannot_be_skipped_by_the_state_machine
+    ),
+    "tee_execution_record_is_transaction_bound": _tee_execution_record_is_transaction_bound,
 }
 
 #: Human-readable statement of each guarantee, for the console and the docs.
@@ -1780,6 +2046,9 @@ INVARIANT_DESCRIPTIONS: dict[str, str] = {
     "near_execution_binding_covers_the_bytes": "The authorization is bound to the exact bytes that would be broadcast; changing the amount after authorization is refused.",
     "tee_attestation_verification_is_genuine": "A genuine Intel TDX quote verifies against the pinned Intel SGX Root CA, and a tampered quote is refused.",
     "tee_attestation_is_bound_to_the_decision_nonce": "A TDX quote obtained for one decision nonce does not verify for another, so an attestation cannot be replayed.",
+    "tee_execution_requires_a_bound_attestation": "With the TEE gate enabled, the execution boundary refuses to accept a signature until a verified attestation is bound to the transaction.",
+    "tee_execution_cannot_be_skipped_by_the_state_machine": "The execution lifecycle reaches signing only from TEE_VERIFIED, and no state can jump straight to a success state.",
+    "tee_execution_record_is_transaction_bound": "A TEE-verified execution record authorizes only the exact transaction digest it was bound to; a substituted transaction is refused.",
 }
 
 

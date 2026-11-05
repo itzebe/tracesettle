@@ -224,8 +224,52 @@ def test_near_chain_invariant_notices_a_silently_accepted_conflict(monkeypatch):
 
 def test_tee_invariants_are_registered():
     tee = [name for name in inv.INVARIANTS if name.startswith("tee_")]
-    assert len(tee) == 2
+    assert len(tee) == 5
     assert all(name in inv.INVARIANT_DESCRIPTIONS for name in tee)
+
+
+def test_tee_execution_invariant_notices_a_gate_that_does_not_refuse(monkeypatch):
+    """Mutation: if the boundary signed without an attestation, the invariant fails.
+
+    Both layers of the gate are neutralised - ``enforce`` accepts anything and the
+    record is not required to pass through ``SIGNING_PENDING`` - so a signature is
+    accepted with no bound attestation. That is the original defect (attestation
+    verified but not enforced). The invariant must notice.
+    """
+    from tracesettle.near.tee_execution import TeeExecutionAuthorizer
+
+    monkeypatch.setattr(
+        TeeExecutionAuthorizer, "enforce", lambda self, execution_id, *, transaction_digest: self.get(execution_id)
+    )
+    monkeypatch.setattr(TeeExecutionAuthorizer, "begin_signing", lambda self, execution_id: self.get(execution_id))
+    result = inv.INVARIANTS["tee_execution_requires_a_bound_attestation"]()
+    assert result.holds is False
+
+
+def test_tee_execution_state_machine_invariant_notices_an_illegal_edge(monkeypatch):
+    """Mutation: adding a pre-TEE edge to signing must fail the structural check."""
+    from tracesettle.near import tee_execution as te
+
+    original = te.LEGAL_TRANSITIONS[te.ExecutionState.AUTHORIZED]
+    monkeypatch.setitem(
+        te.LEGAL_TRANSITIONS,
+        te.ExecutionState.AUTHORIZED,
+        original | {te.ExecutionState.SIGNING_PENDING},
+    )
+    result = inv.INVARIANTS["tee_execution_cannot_be_skipped_by_the_state_machine"]()
+    assert result.holds is False
+
+
+def test_tee_execution_record_binding_invariant_notices_an_unbound_enforce(monkeypatch):
+    """Mutation: if enforce ignored the digest, a substituted transaction would pass."""
+    from tracesettle.near.tee_execution import TeeExecutionAuthorizer
+
+    def unbound(self, execution_id, *, transaction_digest):
+        return self.get(execution_id)
+
+    monkeypatch.setattr(TeeExecutionAuthorizer, "enforce", unbound)
+    result = inv.INVARIANTS["tee_execution_record_is_transaction_bound"]()
+    assert result.holds is False
 
 
 def test_tee_genuine_invariant_notices_a_verifier_that_accepts_anything(monkeypatch):

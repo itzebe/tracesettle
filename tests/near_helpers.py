@@ -172,3 +172,63 @@ def make_boundary(guard: GuardService | None = None, *, network: NearNetwork = N
     config = NETWORKS[network]
     rpc = FakeNearRpc(config, **rpc_kwargs)
     return NearExecutionBoundary(guard or make_guard(), config, rpc=rpc), rpc
+
+
+class FakeTeeProvider:
+    """A TEE provider whose verdict the test controls.
+
+    It returns an :class:`~tracesettle.near.attestation.AttestationResult`-shaped
+    object, so the real ``TeeExecutionAuthorizer`` binding logic runs unchanged.
+    The default is a *verified* attestation whose nonce the caller supplies; a
+    test can flip ``verified`` off or return a wrong nonce to drive the refusal
+    paths. It is a transport stand-in for the gateway, not a logic mock: every
+    line of ``tee_execution.py`` and ``execution.py`` runs.
+    """
+
+    def __init__(self, *, verified: bool = True, nonce_override: str | None = None, measurement: dict | None = None):
+        from tracesettle.near.attestation import AttestationResult
+        from tracesettle.near.tee import AttestationStatus
+
+        self._verified = verified
+        self._nonce_override = nonce_override
+        self._measurement = measurement if measurement is not None else {"rt_mr0": "aa" * 48}
+        self._result_cls = AttestationResult
+        self._status = AttestationStatus
+        self.calls = 0
+
+    def attest(self, nonce: bytes):
+        self.calls += 1
+        nonce_hex = self._nonce_override if self._nonce_override is not None else nonce.hex()
+        return self._result_cls(
+            status=self._status.VERIFIED if self._verified else self._status.UNVERIFIABLE,
+            detail="test attestation",
+            nonce=nonce_hex,
+            provider="test-provider",
+            verification={"measurement": self._measurement, "verified": self._verified},
+            fetched=True,
+            source_status="OK",
+        )
+
+
+def make_tee_boundary(guard: GuardService | None = None, *, provider=None, expected_measurement: str = "", **kwargs):
+    """A boundary with the TEE gate enabled, plus its authorizer and provider."""
+    from tracesettle.near.execution import NearExecutionBoundary
+    from tracesettle.near.tee_execution import ExecutionRecordStore, TeeExecutionAuthorizer
+
+    config = NETWORKS[kwargs.pop("network", NearNetwork.TESTNET)]
+    rpc = FakeNearRpc(config, **kwargs)
+    authorizer = TeeExecutionAuthorizer(
+        store=ExecutionRecordStore(),
+        require_attestation=True,
+        expected_measurement=expected_measurement,
+        ttl_seconds=90,
+    )
+    provider = provider or FakeTeeProvider()
+    boundary = NearExecutionBoundary(
+        guard or make_guard(),
+        config,
+        rpc=rpc,
+        tee_authorizer=authorizer,
+        tee_provider=provider,
+    )
+    return boundary, rpc, authorizer, provider
