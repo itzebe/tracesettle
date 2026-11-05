@@ -538,18 +538,19 @@ refusal is provable: the executor is never called unless the outcome was `ALLOW`
 | H | Native tx wrongly assumed protected by an Intents-only policy | policy-scope rejection |
 | I | Provider reports success without independent evidence | `UNKNOWN` / `UNAVAILABLE` |
 
-Eleven NEAR-specific structural guarantees join the invariant set, each
+Twelve NEAR-specific structural guarantees join the invariant set, each
 mutation-tested: `near_policy_must_be_in_force`,
 `near_policy_selection_is_not_client_controlled`,
 `near_native_scope_gap_is_always_stated`,
 `near_function_call_key_cannot_transfer_near`,
+`near_unrecognised_access_key_never_allows`,
 `near_provider_success_is_never_verified_without_evidence`,
 `near_partial_settlement_is_never_verified`,
 `near_terminal_states_are_evidence_distinguished`,
 `near_destination_delivery_requires_the_destination_chain`,
 `near_chain_is_derived_from_the_origin_asset`,
 `near_execution_never_signs_without_authorization`, and
-`near_execution_binding_covers_the_bytes` (eleven NEAR-specific in total).
+`near_execution_binding_covers_the_bytes` (twelve NEAR-specific in total).
 
 ## Try it: do X → see Y
 
@@ -573,11 +574,11 @@ a bare interpreter.
 **1. Run the tests.**
 
 ```sh
-python -m pytest tests/ --collect-only -q   # 1192 tests collected
-python -m pytest tests/ -q                  # 1168 passed, 24 skipped
+python -m pytest tests/ --collect-only -q   # 1199 tests collected
+python -m pytest tests/ -q                  # 1175 passed, 24 skipped
 ```
-→ `1168 passed, 24 skipped`. The skips are the PostgreSQL integration
-tests; set `TRACESETTLE_TEST_PG_DSN` to a real server to run them (**1192 passed, 0 skipped**).
+→ `1175 passed, 24 skipped`. The skips are the PostgreSQL integration
+tests; set `TRACESETTLE_TEST_PG_DSN` to a real server to run them (**1199 passed, 0 skipped**).
 
 **2. Prove the enforcement boundary: a permitted request executes, a suspicious
 one cannot.**
@@ -630,9 +631,10 @@ curl -sS -X POST http://127.0.0.1:8080/api/guard/sign \
 curl -sS http://127.0.0.1:8080/api/guard/invariants \
   | python3 -c 'import sys,json;d=json.load(sys.stdin);print("all hold:",d["all_hold"]);[print(" ",i["name"]) for i in d["invariants"]]'
 ```
-→ `all hold: True` and the thirty invariant names, including the eleven NEAR
+→ `all hold: True` and the thirty-one invariant names, including the twelve NEAR
 ones (`near_policy_must_be_in_force`, `near_native_scope_gap_is_always_stated`,
 `near_function_call_key_cannot_transfer_near`,
+`near_unrecognised_access_key_never_allows`,
 `near_provider_success_is_never_verified_without_evidence`,
 `near_partial_settlement_is_never_verified`,
 `near_policy_selection_is_not_client_controlled`).
@@ -1361,7 +1363,7 @@ immutable commit SHA (not a moving tag), and cancels superseded runs.
 ## Tests
 
 ```sh
-python3 -m pytest tests/ -q          # 1168 passed, 24 skipped (1192 with a server)
+python3 -m pytest tests/ -q          # 1175 passed, 24 skipped (1199 with a server)
 python3 -m pytest tests/test_guard_authorization.py -q
 python3 -m pytest tests/test_guard_invariants.py -q
 python3 -m pytest tests/test_guard_end_to_end.py -q

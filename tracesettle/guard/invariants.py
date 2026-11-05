@@ -929,6 +929,53 @@ def _near_policy_selection_is_not_client_controlled():
     )
 
 
+def _near_unrecognised_access_key_never_allows():
+    """An unrecognised access-key permission must never produce ALLOW.
+
+    The analyser classifies an unknown permission shape as unrestricted
+    (CRITICAL risk). Treating that as "safe" and allowing the action is the
+    "unrecognised structure treated as safe" defect, so the wrapper must fail
+    closed to a review. This mirrors the function-call-key invariant: the
+    property that stops the attack is itself checked.
+    """
+    from ..near.access_keys import parse_access_key
+    from ..near.policy import PolicyScope
+
+    unknown_key = parse_access_key({"permission": {"SomethingBrandNew": {}}})
+    if unknown_key.permission.value != "UNKNOWN":
+        return InvariantResult(
+            "near_unrecognised_access_key_never_allows",
+            False,
+            "the analyser did not classify an unrecognised permission as UNKNOWN",
+        )
+    wrapper = _near_wrapper(
+        policy_read=_near_policy_fixture("policy_native_transfer.json"), access_key=unknown_key
+    )
+    tx = _near_legit_tx(
+        operation="TRANSFER",
+        chain="near",
+        asset="NEAR",
+        amount="5",
+        destination="0x1111111111111111111111111111111111111111",
+        scope=PolicyScope.NATIVE_NEAR,
+        policy_action="transfer",
+        transfers_near=True,
+        metadata={"native_method": "transfer"},
+    )
+    decision = wrapper.evaluate(tx)
+    if decision.outcome.value == "ALLOW" or decision.permits_signing:
+        return InvariantResult(
+            "near_unrecognised_access_key_never_allows",
+            False,
+            "an unrecognised access-key permission produced ALLOW",
+        )
+    return InvariantResult(
+        "near_unrecognised_access_key_never_allows",
+        True,
+        f"an unrecognised access-key permission yields {decision.outcome.value}, never ALLOW",
+    )
+
+
 def _near_native_scope_gap_is_always_stated():
     """A native request must never be described as covered by the Intents money rules."""
     from ..near.policy import PolicyScope
@@ -1599,6 +1646,7 @@ INVARIANTS: dict[str, Callable[[], InvariantResult]] = {
     ),
     "near_native_scope_gap_is_always_stated": _near_native_scope_gap_is_always_stated,
     "near_function_call_key_cannot_transfer_near": _near_function_call_key_cannot_transfer_near,
+    "near_unrecognised_access_key_never_allows": _near_unrecognised_access_key_never_allows,
     "near_provider_success_is_never_verified_without_evidence": (
         _near_provider_success_is_never_verified_without_evidence
     ),
@@ -1641,6 +1689,7 @@ INVARIANT_DESCRIPTIONS: dict[str, str] = {
     "near_policy_selection_is_not_client_controlled": "A request cannot choose the NEAR Intents policy it is evaluated against; the operator's configuration governs.",
     "near_native_scope_gap_is_always_stated": "A native NEAR/EVM/Solana request is never described as protected by the Intents destinations, budget, timelock, schedule or owner approval.",
     "near_function_call_key_cannot_transfer_near": "A NEAR function-call key is never treated as able to transfer NEAR or attach NEAR tokens to a call.",
+    "near_unrecognised_access_key_never_allows": "An access key whose permission shape is neither FullAccess nor FunctionCall is never treated as safe; the request requires review rather than ALLOW.",
     "near_provider_success_is_never_verified_without_evidence": "A provider success status never yields an independently-verified settlement level without decisive on-chain evidence.",
     "near_partial_settlement_is_never_verified": "A destination that received less than the quote's expected output is classified PARTIAL and is never independently verified.",
     "near_terminal_states_are_evidence_distinguished": "A reported failure or refund never reads as a definitive FAILED/REFUNDED state, and a confirmed refund is REFUNDED rather than a verified settlement.",

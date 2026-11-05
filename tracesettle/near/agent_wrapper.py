@@ -671,6 +671,24 @@ class AgentAuthorizationWrapper:
         if analysis is None:
             return WrapperOutcome.ALLOW, findings
 
+        if analysis.permission is AccessKeyPermission.UNKNOWN:
+            # An unrecognised permission shape cannot be shown to fence anything.
+            # Treating it as unrestricted and allowing the action would be the
+            # "unrecognised structure treated as safe" defect, so it fails closed
+            # to a review even on the Intents path, where a full-access key only
+            # warns. It is at least as dangerous as full access.
+            findings.append(
+                _finding(
+                    "ACCESS_KEY_PERMISSION_UNKNOWN",
+                    WrapperSeverity.CRITICAL,
+                    "Agent's access-key permission is not recognised",
+                    "The key's permission shape is not FullAccess or FunctionCall, so its scope "
+                    "cannot be established. It is treated as unrestricted, which is at least as "
+                    "dangerous as a full-access key, and the action requires review.",
+                )
+            )
+            return WrapperOutcome.REQUIRE_APPROVAL, findings
+
         if analysis.permission is AccessKeyPermission.FULL_ACCESS:
             findings.append(
                 _finding(

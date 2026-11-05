@@ -283,6 +283,43 @@ def test_a_full_access_key_forces_review():
     assert "ACCESS_KEY_FULL_ACCESS" in {f.code for f in decision.findings}
 
 
+def test_an_unrecognised_access_key_permission_forces_review():
+    """An unrecognised permission shape is never treated as safe.
+
+    It is classified CRITICAL risk and treated as unrestricted, so it must fail
+    closed to a review on every path, exactly like a full-access key (and
+    stricter, since the shape is unknown rather than known-dangerous).
+    """
+    unknown = parse_access_key({"permission": {"SomethingBrandNew": {}}})
+    service, wrapper, executor = make_world(access_key=unknown)
+    decision = wrapper.evaluate(legit())
+    assert decision.outcome is WrapperOutcome.REQUIRE_APPROVAL
+    assert decision.permits_signing is False
+    assert "ACCESS_KEY_PERMISSION_UNKNOWN" in {f.code for f in decision.findings}
+
+
+def test_an_unrecognised_access_key_permission_does_not_allow_a_native_transfer():
+    """The native path must not turn an unknown key into ALLOW either."""
+    unknown = parse_access_key({"permission": {"SomethingBrandNew": {}}})
+    service, wrapper, executor = make_world(
+        policy_read=in_force_policy(), access_key=unknown
+    )
+    tx = legit(
+        operation="TRANSFER",
+        chain="near",
+        asset="NEAR",
+        amount="5",
+        destination=APPROVED_DESTINATION,
+        scope=PolicyScope.NATIVE_NEAR,
+        policy_action="transfer",
+        transfers_near=True,
+        request_id="key-unknown-native",
+    )
+    decision = wrapper.evaluate(tx)
+    assert decision.outcome is not WrapperOutcome.ALLOW
+    assert decision.permits_signing is False
+
+
 def test_a_function_call_key_cannot_sign_a_native_near_transfer():
     """Scenario G: the key's scope refuses the transfer."""
     service, wrapper, executor = make_world(policy_read=in_force_policy(), access_key=scoped_key())

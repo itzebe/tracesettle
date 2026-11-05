@@ -16,7 +16,7 @@ FIXTURE_DIR = pathlib.Path(__file__).resolve().parent.parent / "tracesettle" / "
 
 def test_near_invariants_are_registered():
     near = [name for name in inv.INVARIANTS if name.startswith("near_")]
-    assert len(near) == 11
+    assert len(near) == 12
     assert all(name in inv.INVARIANT_DESCRIPTIONS for name in near)
 
 
@@ -44,6 +44,32 @@ def test_near_key_invariant_notices_a_permissive_key(monkeypatch):
 
     monkeypatch.setattr(keys_mod, "key_supports_operation", lambda *a, **k: (True, "mutated"))
     result = inv.INVARIANTS["near_function_call_key_cannot_transfer_near"]()
+    assert result.holds is False
+
+
+def test_near_unrecognised_key_invariant_notices_an_allow(monkeypatch):
+    """Mutation: if an unrecognised key were allowed, the invariant must fail.
+
+    Reverting the wrapper's UNKNOWN branch (treating an unrecognised permission
+    as safe) reproduces the original defect: a CRITICAL-risk key producing ALLOW.
+    The invariant must notice.
+    """
+    from tracesettle.near import agent_wrapper as wrapper_mod
+
+    original = wrapper_mod.AgentAuthorizationWrapper._evaluate_access_key
+
+    def permissive(self, transaction, analysis):
+        # The mutation: drop the UNKNOWN fail-closed branch.
+        from tracesettle.near.agent_wrapper import WrapperOutcome
+
+        if analysis is not None and analysis.permission.value == "UNKNOWN":
+            return WrapperOutcome.ALLOW, []
+        return original(self, transaction, analysis)
+
+    monkeypatch.setattr(
+        wrapper_mod.AgentAuthorizationWrapper, "_evaluate_access_key", permissive
+    )
+    result = inv.INVARIANTS["near_unrecognised_access_key_never_allows"]()
     assert result.holds is False
 
 
