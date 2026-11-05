@@ -1548,3 +1548,67 @@ engine and every authorization rule are untouched.
   PostgreSQL). New `tests/test_near_tdx.py` (11) and
   `tests/test_near_attestation.py` (9), 6 API tests and 2 mutation tests.
   pyflakes clean; compileall OK; offline demo byte-identical (md5 `4864f13c…`).
+
+## TEE-bound execution — attestation is now *enforced* (2026-11-05)
+
+The previous section verified a real Intel TDX quote but explicitly did not gate
+execution on it ("verification of a real hardware quote, not a TEE-integrated
+execution path"). That gap — **verified but not enforced** — is now closed for the
+signing boundary, honestly scoped.
+
+- **New module `tracesettle/near/tee_execution.py`.**
+  - `ExecutionState` (wire labels `RECEIVED`, `AUTHORIZATION_PENDING`,
+    `AUTHORIZED`, `TEE_VERIFICATION_PENDING`, `TEE_VERIFIED`, `SIGNING_PENDING`,
+    `SIGNED`, `BROADCAST`, `SETTLEMENT_*`, `EXPIRED`, `FAILED`) and a
+    `LEGAL_TRANSITIONS` table; `can_transition` enforces it. The **only** edge into
+    `SIGNING_PENDING` is from `TEE_VERIFIED`, and no state jumps straight to a
+    success state. `IllegalTransition` is raised, never swallowed.
+  - `ExecutionRecord` (durable; `to_dict`/`from_dict`) carries the transaction
+    digest, `authorization_id`, `authorization_nonce`, `tee_expected_nonce`,
+    `service_id`, `policy_version`, amount/asset/destination and `tee_verified`.
+  - `TeeExecutionAuthorizer.create/enforce/bind_attestation/begin_verification/
+    begin_signing`. `enforce(execution_id, transaction_digest=...)` is the single
+    fail-closed gate: it requires `require_attestation` to be satisfied by a
+    `VERIFIED` attestation whose recorded nonce matches `tee_expected_nonce` and
+    whose transaction digest matches the *current* digest.
+  - `ExecutionRecordStore` (in-memory or SQLite at `TRACESETTLE_NEAR_EXECUTION_DB`).
+- **Digest binds the exact signed bytes.** `NearExecutionBoundary._transaction_digest`
+  hashes `transaction.unsigned_bytes()` — what the wallet signs — not the
+  transaction *hash*. The hash is `SHA256d(unsigned_bytes)`, so a substitution that
+  changes the amount (the borsh-encoded action) changes the digest and is refused;
+  a change to a field outside the signed bytes is caught by the separate
+  authorization binding. Test: `test_substituting_the_signed_amount_after_attestation_is_refused`
+  (mutating only `amount_base` metadata, which does **not** enter the bytes, is not
+  a real substitution — that is why the earlier test was rewritten).
+- **Wired into `execution.py`.** `NearExecutionBoundary(..., tee_authorizer=,
+  tee_provider=)`. `prepare()` creates the record; `verify_tee_attestation(prepared)`
+  fetches+verifies+binds; `accept_signature()` runs `_enforce_tee` **before**
+  consuming the authorization nonce, then moves the record to `SIGNING_PENDING`;
+  `broadcast()` records lifecycle/settlement. Authorizer errors surface as
+  `ExecutionError` at the boundary seam.
+- **Fail closed at start-up (`securityconfig.py`).** `TRACESETTLE_NEAR_TEE_REQUIRED=1`
+  without `TRACESETTLE_TEE_ATTESTATION` or without `TRACESETTLE_NEAR_EXECUTION` is a
+  hard `ConfigurationError` on **any** binding (loopback included). A configured
+  record DB that cannot be opened is a hard failure, never a silent fallback.
+  Config: `NEAR_TEE_REQUIRED`, `NEAR_TEE_EXPECTED_MEASUREMENT`, `NEAR_EXECUTION_DB`,
+  `NEAR_EXECUTION_TTL_SECONDS`.
+- **Routes (`guard/api.py`).** `POST /api/guard/near/execution/attest` binds a
+  genuine attestation to a `prepare_id`; `GET /api/guard/near/execution/record/<id>`
+  exposes the lifecycle; `GET /api/guard/near/execution` reports `tee_gate`.
+- **Invariants:** 33 → **36 total**. New: `tee_execution_requires_a_bound_attestation`
+  (end-to-end: with the gate on, a signature without a bound attestation is refused
+  and nothing is broadcast), `tee_execution_cannot_be_skipped_by_the_state_machine`
+  (structural: no pre-TEE state reaches `SIGNING_PENDING`), and
+  `tee_execution_record_is_transaction_bound` (a changed digest is refused). Each is
+  mutation-tested in `tests/test_near_invariants.py`; the first needed a *two-layer*
+  mutation (`enforce` **and** `begin_signing`) to fail, which is itself evidence the
+  state machine is an independent second gate.
+- **Honest scope (unchanged where it matters).** This gates the *signing boundary*.
+  The reference executor still simulates execution and broadcasts nothing, so it is
+  not a claim that a real transaction was broadcast under attestation. Certificate
+  revocation and TCB freshness are still not checked.
+- **Tests:** 1207 → **1248 passed, 24 skipped** (filesystem-only);
+  **1272 passed, 0 skipped** with a real PostgreSQL 16 server. New
+  `tests/test_near_tee_execution.py` (25), 7 TEE API tests, 3 fail-closed start-up
+  tests, 3 mutation tests. pyflakes clean; compileall OK; offline demo
+  byte-identical (md5 `4864f13c…`).

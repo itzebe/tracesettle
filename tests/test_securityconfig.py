@@ -183,3 +183,42 @@ def test_loopback_binding_with_client_policy_selection_starts(monkeypatch):
     monkeypatch.setattr(config, "NEAR_ALLOW_CLIENT_POLICY_SELECTION", True)
     profile = _validate("127.0.0.1")
     assert profile.public_binding is False
+
+
+# --- the TEE gate fails closed ---------------------------------------------
+
+
+def test_tee_gate_without_the_attestation_provider_is_refused(monkeypatch):
+    """Requiring attestation without a way to obtain one must refuse to start.
+
+    Otherwise the operator asks for enforced attestation and silently gets none.
+    """
+    from tracesettle import config
+
+    monkeypatch.setattr(config, "NEAR_TEE_REQUIRED", True)
+    monkeypatch.setattr(config, "TEE_ATTESTATION_ENABLED", False)
+    monkeypatch.setattr(config, "NEAR_EXECUTION_ENABLED", True)
+    with pytest.raises(ConfigurationError) as excinfo:
+        _validate("127.0.0.1")
+    assert "TRACESETTLE_TEE_ATTESTATION" in str(excinfo.value)
+
+
+def test_tee_gate_without_the_execution_boundary_is_refused(monkeypatch):
+    from tracesettle import config
+
+    monkeypatch.setattr(config, "NEAR_TEE_REQUIRED", True)
+    monkeypatch.setattr(config, "TEE_ATTESTATION_ENABLED", True)
+    monkeypatch.setattr(config, "NEAR_EXECUTION_ENABLED", False)
+    with pytest.raises(ConfigurationError) as excinfo:
+        _validate("0.0.0.0")
+    assert "TRACESETTLE_NEAR_EXECUTION" in str(excinfo.value)
+
+
+def test_tee_gate_with_both_dependencies_starts(monkeypatch):
+    from tracesettle import config
+
+    monkeypatch.setattr(config, "NEAR_TEE_REQUIRED", True)
+    monkeypatch.setattr(config, "TEE_ATTESTATION_ENABLED", True)
+    monkeypatch.setattr(config, "NEAR_EXECUTION_ENABLED", True)
+    profile = _validate("127.0.0.1")
+    assert profile.public_binding is False

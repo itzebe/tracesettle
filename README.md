@@ -136,18 +136,29 @@ Where each capability stands:
   read-only against the public provider endpoints. Live provider-*policy*
   integration is **not** claimed: it is unverified unless an operator configures
   `TRACESETTLE_NEAR_AGENT_API_URL` and the read succeeds.
-- **TEE:** the confidential-execution path is **not** integrated and no TEE
-  protection is claimed for execution (see
-  [`docs/TEE_RESEARCH.md`](docs/TEE_RESEARCH.md)). One narrow, honest capability is
-  provided and is **Locally verified**: `GET /api/guard/near/tee/attest` fetches
-  the NEAR AI Cloud gateway's **real** Intel TDX quote and verifies it locally
-  against the pinned Intel SGX Root CA — the quote signature, the PCK certificate
-  chain, the attestation key bound to the Quoting Enclave report, the nonce and
-  signing-address binding, and the event log replayed to the RTMRs. This is
-  verification of a genuine hardware quote, not a TEE-integrated execution path:
-  the guard's decisions do not depend on it, and certificate revocation and TCB
-  freshness (which need Intel PCS collateral) are **not** checked, so they are not
-  claimed. Off by default (`TRACESETTLE_TEE_ATTESTATION=1`).
+- **TEE:** no TEE *confidentiality* protection is claimed for execution, and the
+  default path does not require one (see
+  [`docs/TEE_RESEARCH.md`](docs/TEE_RESEARCH.md)). Two honest capabilities are
+  provided, both **Locally verified**:
+  1. `GET /api/guard/near/tee/attest` fetches the NEAR AI Cloud gateway's **real**
+     Intel TDX quote and verifies it locally against the pinned Intel SGX Root CA
+     — the quote signature, the PCK certificate chain, the attestation key bound
+     to the Quoting Enclave report, the nonce and signing-address binding, and the
+     event log replayed to the RTMRs. This is verification of a genuine hardware
+     quote; certificate revocation and TCB freshness (which need Intel PCS
+     collateral) are **not** checked, so they are not claimed.
+  2. The verified quote can be **enforced** at the signing boundary. With
+     `TRACESETTLE_NEAR_TEE_REQUIRED=1` the boundary refuses to accept a signature
+     unless a verified attestation is bound to the exact transaction: the digest
+     commits to the exact bytes to be signed, the lifecycle reaches signing only
+     from `TEE_VERIFIED`, and a substituted transaction is refused. This gates the
+     *signing boundary*; the reference executor still simulates execution and
+     broadcasts nothing, so it is not a claim that a real transaction was
+     broadcast under attestation. Off by default; enabling it without the
+     attestation provider and the execution boundary is a fail-closed start-up
+     error on any binding.
+  The attestation *reporting* routes are separately off by default
+  (`TRACESETTLE_TEE_ATTESTATION=1`).
 - **Live NEAR execution boundary:** Testnet verified — the opt-in boundary
   (`TRACESETTLE_NEAR_EXECUTION=1`) built, signed, broadcast and independently
   verified a real NEAR testnet transfer (tx
@@ -419,6 +430,26 @@ tests substitute only the RPC transport (a network boundary), so every line of
 `near_execution_never_signs_without_authorization` and
 `near_execution_binding_covers_the_bytes`.
 
+### TEE-bound signing (optional, off by default)
+
+The same boundary can additionally require a verified Intel TDX attestation
+before it will accept a signature. With `TRACESETTLE_NEAR_TEE_REQUIRED=1`:
+
+1. `prepare` creates an `ExecutionRecord` carrying the transaction digest, the
+   authorization nonce, the service identity and the policy version.
+2. `POST /api/guard/near/execution/attest` fetches the gateway's real TDX quote,
+   verifies it locally, and binds it to that record — the binding commits to the
+   **exact bytes to be signed** (`unsigned_bytes()`), so it covers the amount.
+3. The lifecycle state machine (`RECEIVED → … → TEE_VERIFIED → SIGNING_PENDING →
+   SIGNED`) reaches signing **only** from `TEE_VERIFIED`; `accept_signature`
+   refuses unless a verified attestation is bound to the same digest.
+
+A transaction whose signed bytes are substituted after attestation is refused
+(`does not match the authorized execution`). Enabling the gate without the
+attestation provider and the execution boundary is a fail-closed start-up error
+on any binding. This gates the *signing boundary*; the default executor still
+simulates execution and broadcasts nothing.
+
 ### Wallet-mediated flow (the wallet signs and sends)
 
 The server-side boundary above is for an operator who wants TRACESETTLE to build
@@ -584,11 +615,11 @@ a bare interpreter.
 **1. Run the tests.**
 
 ```sh
-python -m pytest tests/ --collect-only -q   # 1231 tests collected
-python -m pytest tests/ -q                  # 1207 passed, 24 skipped
+python -m pytest tests/ --collect-only -q   # 1272 tests collected
+python -m pytest tests/ -q                  # 1248 passed, 24 skipped
 ```
-→ `1207 passed, 24 skipped`. The skips are the PostgreSQL integration
-tests; set `TRACESETTLE_TEST_PG_DSN` to a real server to run them (**1231 passed, 0 skipped**).
+→ `1248 passed, 24 skipped`. The skips are the PostgreSQL integration
+tests; set `TRACESETTLE_TEST_PG_DSN` to a real server to run them (**1272 passed, 0 skipped**).
 
 **2. Prove the enforcement boundary: a permitted request executes, a suspicious
 one cannot.**
@@ -976,7 +1007,7 @@ transaction request ──▶ │ guard/rules.py      7 controls, all run  │
                         │                     validate, then execute │
                         │ guard/audit.py      hash-chained records  │
                         │ guard/monitor.py    counters + incidents  │
-                        │ guard/invariants.py 33 checked guarantees │
+                        │ guard/invariants.py 36 checked guarantees │
                         └────────────────────┬─────────────────────┘
                                              │ ALLOW + authorization
                                              ▼
@@ -1373,7 +1404,7 @@ immutable commit SHA (not a moving tag), and cancels superseded runs.
 ## Tests
 
 ```sh
-python3 -m pytest tests/ -q          # 1207 passed, 24 skipped (1231 with a server)
+python3 -m pytest tests/ -q          # 1248 passed, 24 skipped (1272 with a server)
 python3 -m pytest tests/test_guard_authorization.py -q
 python3 -m pytest tests/test_guard_invariants.py -q
 python3 -m pytest tests/test_guard_end_to_end.py -q
