@@ -1412,8 +1412,43 @@ key and signs.
   browser-extension wallet; it signs **testnet** transactions only. The
   provider/wallet success is never treated as proof — settlement is verified
   field by field against the authorized intent.
-- **Counts:** 1170 passed, 24 skipped without PostgreSQL (1194 with a PostgreSQL
+- **Counts:** 1171 passed, 24 skipped without PostgreSQL (1195 with a PostgreSQL
   server, verified locally against `postgres:16-alpine`); pyflakes clean;
   compileall OK; offline demo byte-identical (md5 `4864f13c…`).
 - **Deployment note:** production stays on the previously restored master
   deployment; this branch is not deployed. No merge, no production change.
+
+## Real third-party extension journey + console CSP defect (2026-11-05)
+
+A genuine third-party browser-extension wallet (Nightly v1.51.49) was installed,
+onboarded with a 12-word seed, and connected to the console through the *real*
+bundled `@hot-labs/near-connect` connector on testnet. This exercised the
+production connector path, not the demo emulator.
+
+- **Defect found and fixed: the console CSP blocked the wallet's NEAR RPC.**
+  `/console`'s `Content-Security-Policy` `connect-src` listed only the manifest
+  origins (`cdn.jsdelivr.net`, `raw.githubusercontent.com`). The browser therefore
+  blocked the connector's own NEAR JSON-RPC calls (`final` block hash, access-key
+  nonce, `broadcast_tx_commit`). The failure was **silent**: the guard returned
+  `ALLOW`, the page showed "Waiting for the wallet to sign and send…", and no
+  signing request ever reached the wallet. The policy now names the public NEAR
+  RPC hosts explicitly (never a wildcard). Regression test
+  `test_console_csp_allows_the_near_rpc_the_wallet_connector_must_reach` asserts
+  the hosts are present and `*` is absent.
+- **`rpc.near.nightly.app` must stay out of the policy.** It served a stale chain
+  head (height ~223M vs ~276M on the live RPCs); with it allowed, the extension
+  built a transaction against the stale block and the broadcast failed
+  (`{"type":"Expired"}`). Removing it lets the connector fall back to a fresh node.
+- **Live proof the fix is necessary and sufficient to reach signing.** After the
+  fix, the real extension opened its native *Approve the transaction* sheet
+  ("-0.10 NEAR", the exact recipient). Before the fix, no sheet ever appeared.
+- **Remaining limitation (extension-side, not TraceSettle).** Nightly's NEAR
+  executor only exposes a **mainnet** `nodeUrl`; it broadcast the testnet
+  transaction to mainnet providers (`INVALID_TRANSACTION`), so no testnet
+  settlement landed on-chain. TraceSettle's guard, authorization binding, and
+  verification are unchanged and correct; the settlement step is limited by that
+  extension's testnet support.
+- **Counts:** 1171 passed, 24 skipped (filesystem-only). PR #10 head
+  `dd2490a`; all five CI checks green (`Tests and static analysis`, `Docker build
+  and runtime`, `PostgreSQL shared-state integration`, `Vercel`, `Vercel
+  container image`).
