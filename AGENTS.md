@@ -1847,8 +1847,47 @@ untouched; runtime stays standard-library only.
   (`39` -> `43`) and the test counts; `docs/NEAR_INTEGRATION.md` §9 rewritten (stale "no
   testnet transaction was executed" and "TEE is researched, not integrated" removed) and
   a new §10 records the testnet/provider/TEE evidence and the blocker.
-- Tests: **1380 passed, 4 skipped** with PostgreSQL 16 (filesystem-only 1356 passed,
+- Tests: **1383 passed, 4 skipped** with PostgreSQL 16 (filesystem-only 1359 passed,
   28 skipped). 43/43 invariants hold; 9/9 attack scenarios pass; packaging 10 pass;
   pyflakes clean; compileall OK; offline demo byte-identical (md5 `4864f13c…`).
 - The 4 skips are opt-in live tests (live testnet key; live Agent API credentials ×2;
   enclave harness). They are reported as skipped, never as passed.
+
+## Mission 7 — independent adversarial verification; byte-level binding defect (2026-11-05)
+
+Reviewed the authorization -> execution path adversarially and found one real defect
+(latent, not externally reachable in the HTTP flow, but a false invariant).
+
+- **Defect: the NEAR authorization did not cover the exact signed bytes.**
+  `NearTransaction.guard_canonical_fields()` returned only the human-readable
+  parameters, so the binding committed to a *summary* of the transaction, not the
+  bytes. A transaction whose `actions` differed while those parameters were
+  identical — a swapped transfer action, a substituted token contract, forged
+  `ft_transfer` args — passed `accept_signature`. The invariant
+  `near_execution_binding_covers_the_bytes` claimed the opposite but only tampered
+  the amount (which changes both the parameters and the bytes), so it could never
+  fail for a bytes-only substitution.
+- **Fix.** An optional `transaction_digest` is folded into `canonical_fields` and
+  `TransactionRequest`. The NEAR path supplies the digest of the exact unsigned
+  bytes at mint time (`prepare`) and re-derives it at signing (`verify_binding`),
+  so a bytes-only substitution is `WRONG_PARAMETERS`. The parameter is **omitted
+  when None**, so the EVM/general path keeps byte-identical fingerprints and no
+  existing authorization changes. The invariant now tampers only the action bytes
+  and signs the forged bytes, removing the signature check as a confound.
+- **Reachability.** In the HTTP flow the prepared operation is server-held behind an
+  opaque, owner-scoped, single-use id, so this was not externally exploitable; the
+  in-process boundary API is public and the TEE path already bound bytes, so the
+  authorization path was the inconsistent one. Fixed structurally regardless.
+- **Wallet path unchanged (correctly).** `PreparedWalletOperation` binds the
+  *intent*, not bytes — the connected wallet builds and holds the bytes — and
+  `verify_wallet_submission` checks the on-chain record against that intent. Do not
+  add a byte digest there; the server never sees those bytes.
+- **Tests:** 1359 filesystem / **1383 with PostgreSQL**, 28 / 4 skipped. New:
+  `test_swapped_action_bytes_after_authorization_are_refused`,
+  `test_substituted_token_contract_after_authorization_is_refused` (both fail under
+  a neutralised digest), and
+  `test_near_execution_binding_invariant_notices_a_binding_that_ignores_the_bytes`.
+- **Secret audit (publication gate):** all 732 unique blobs across every ref scanned
+  with `detect-secrets` plus a known-prefix sweep (`ghp_`, `github_pat_`, `sk-`,
+  `AKIA`, `xox*-`, `AIza`, PEM private keys). No real credential; all matches are
+  test placeholders, public token addresses, or public TDX attestation keys.
