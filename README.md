@@ -178,13 +178,21 @@ Where each capability stands:
      separately by the live hardware harness (`tracesettle/near/enclave_harness.py`)
      and the `tee_attestation_verification_is_genuine` invariant. Enabling enclave
      signing without a sign endpoint, or TEE-required without an attestation
-     provider, is a fail-closed start-up error on any binding.
+     provider, is a fail-closed start-up error on any binding. **No free, publicly
+     reachable TDX enclave that signs an arbitrary caller-supplied payload is
+     available**, so enclave signing stays fail-closed by default: the attested
+     NEAR AI Cloud gateway exposes real TDX quotes and a completion-signing
+     endpoint, but no endpoint that signs an arbitrary NEAR transaction. The
+     blocker and the integration path are documented in
+     [`docs/NEAR_INTEGRATION.md`](docs/NEAR_INTEGRATION.md) §10.
 - **Live NEAR execution boundary:** Testnet verified — the opt-in boundary
   (`TRACESETTLE_NEAR_EXECUTION=1`) built, signed, broadcast and independently
-  verified a real NEAR testnet transfer (tx
-  `Gjs4YNbEPBQKWB3M6MpV2zAwhvJySk7U6Q8NZnKVWCKH`). The default **simulated
-  executor** never signs or broadcasts anything — that is by design, and no
-  Testnet or Mainnet evidence is claimed for it.
+  verified a real NEAR testnet transfer of 0.01 NEAR (tx
+  `3wQ7UDmQzCTtqyxnBMaQ35SfxioQJUp3rnLyEPX6nuQd`, signer
+  `ts-m6-probe-13285.testnet` → `ts-m6-recv-13153.testnet`, `FINAL`,
+  `SuccessValue`). The default **simulated executor** never signs or broadcasts
+  anything — that is by design, and no Testnet or Mainnet evidence is claimed
+  for it.
 - **Wallet-mediated flow:** Testnet verified — the authorize → prepare → verify
   path was exercised against real NEAR testnet: a funded `*.testnet` account
   signed the exact wallet request the server returned, the harness broadcast it,
@@ -467,12 +475,18 @@ Two further structural invariants guard it:
 `near_execution_requires_access_key_permission` and
 `near_submission_is_durable_and_recovery_never_resubmits`.
 
-**Locally verified (testnet):** the full pipeline was exercised live on NEAR
-testnet — a funded `*.testnet` account built, signed, broadcast and independently
-verified a real transfer, reaching submission state `SETTLED` and settlement state
-`VERIFIED`. The live run moved real testnet value (the receiver's balance rose by
-the transferred amount). The tests substitute only the RPC transport (a network
-boundary), so every line of `execution.py` and `pipeline.py` runs.
+**Locally verified + Testnet verified:** the full pipeline was exercised live on
+NEAR testnet — a funded `*.testnet` account (`ts-m6-probe-13285.testnet`) built,
+TEE-attestation-gated, signed, broadcast and independently verified a real 0.01
+NEAR transfer (tx `3wQ7UDmQzCTtqyxnBMaQ35SfxioQJUp3rnLyEPX6nuQd`) to
+`ts-m6-recv-13153.testnet`, reaching submission state `SETTLED` and settlement
+state `VERIFIED` with all seven verification checks ok. The live run moved real
+testnet value (the receiver's balance rose by exactly the transferred amount).
+The transaction hash, signer, receiver, amount and `FINAL` status were
+re-read from two independent public testnet RPCs
+(`rpc.testnet.near.org`, `rpc.testnet.fastnear.com`). The tests substitute only
+the RPC transport (a network boundary), so every line of `execution.py` and
+`pipeline.py` runs.
 
 ### TEE-bound signing (optional, off by default)
 
@@ -1068,7 +1082,7 @@ transaction request ──▶ │ guard/rules.py      7 controls, all run  │
                         │                     validate, then execute │
                         │ guard/audit.py      hash-chained records  │
                         │ guard/monitor.py    counters + incidents  │
-                        │ guard/invariants.py 39 checked guarantees │
+                        │ guard/invariants.py 43 checked guarantees │
                         └────────────────────┬─────────────────────┘
                                              │ ALLOW + authorization
                                              ▼
@@ -1151,7 +1165,7 @@ identical decisions.
 | `demo/demonstrate.py` | Read-only walkthrough (live, or `--offline` replay of captures). |
 | `demo/replay_opener.py` | Offline transport that replays `evidence/raw/` through the real code. |
 | `tracesettle/static/near-connect.js` | Vendored `@hot-labs/near-connect` (MIT) wallet connector, served same-origin at `/assets/near-connect.js`. |
-| `tests/` | 1381 tests (24 PostgreSQL tests skip without `TRACESETTLE_TEST_PG_DSN`; 1 further test skips without a live enclave/TEE endpoint). `evidence/raw/` fixtures are real captures; `tests/fixtures/synthetic/` are clearly labelled synthetic. |
+| `tests/` | 1384 tests (24 PostgreSQL tests skip without `TRACESETTLE_TEST_PG_DSN`; 4 further tests are opt-in live tests that skip without a live testnet key, live Agent API credentials, or `TRACESETTLE_ENCLAVE_HARNESS=1`). `evidence/raw/` fixtures are real captures; `tests/fixtures/synthetic/` are clearly labelled synthetic. |
 | `PHASE1_FEASIBILITY.md` | Phase 1 feasibility and API verification. |
 | `submission/` | Hackathon artifacts: API payload shape, technical summary, demo post draft, publication checklist. |
 | `docs/official/` | NEAR documentation captured during Phase 1. |
@@ -1466,7 +1480,7 @@ immutable commit SHA (not a moving tag), and cancels superseded runs.
 ## Tests
 
 ```sh
-python3 -m pytest tests/ -q          # 1308 passed, 25 skipped (1332 with a server)
+python3 -m pytest tests/ -q          # 1356 passed, 28 skipped (1380 passed, 4 skipped with PostgreSQL)
 python3 -m pytest tests/test_guard_authorization.py -q
 python3 -m pytest tests/test_guard_invariants.py -q
 python3 -m pytest tests/test_guard_end_to_end.py -q
@@ -1526,7 +1540,7 @@ Intents), a function-call key that cannot transfer NEAR, a full-access key that
 forces review, the five outcomes, determinism, an invalid amount failing safe to
 `UNKNOWN`, a client-supplied approval flag never honoured, and the settlement
 assurance rule that a provider success claim is never independently verified
-without decisive evidence. Each of the eleven NEAR invariants is mutation-tested.
+without decisive evidence. Each of the fourteen NEAR-specific invariants is mutation-tested.
 
 ## Read-only guarantee
 

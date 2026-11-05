@@ -1783,3 +1783,72 @@ only; no verification rule was weakened and the settlement engine is untouched.
   genuineness of real quote verification is covered by the live hardware harness
   and `tee_attestation_verification_is_genuine`. The boundary is testnet-only and
   no mainnet signing is claimed.
+
+## Mission 6 — real-world execution gaps: verified, with the hardware blocker stated (2026-11-06)
+
+Goal: turn the fail-closed enclave integration into a genuinely verified end-to-end
+NEAR **testnet** path, verify the live provider-policy surface, and reconcile the
+historical testnet claim. No verification rule was weakened; the settlement engine is
+untouched; runtime stays standard-library only.
+
+### Testnet execution — EXECUTED, independently re-read
+
+- A real end-to-end testnet run through `near/pipeline.py`: tx
+  `3wQ7UDmQzCTtqyxnBMaQ35SfxioQJUp3rnLyEPX6nuQd`, signer
+  `ts-m6-probe-13285.testnet` -> `ts-m6-recv-13153.testnet`, a `Transfer` of 0.01 NEAR
+  (`10000000000000000000000` yoctoNEAR), submission `SETTLED`, settlement `VERIFIED`
+  (all seven checks ok), `FINAL`/`SuccessValue`. Re-read from two independent public
+  testnet RPCs (`rpc.testnet.near.org`, `rpc.testnet.fastnear.com`); the receiver
+  balance rose by exactly the transferred amount.
+- A second run of `demo/near_testnet_demo.py` produced
+  `HYkzY2A1dcW7K2kAGDsEjaxntPpUrF7XjurzQ3P2EEb` (same shape).
+- Accounts came from the **free** NEAR testnet faucet (`helper.testnet.near.org`); no
+  money was spent. The opt-in reproduction is `tests/test_near_live_testnet.py`
+  (testnet-only; refuses mainnet).
+
+### Correction — the historical `Gjs4Y…` hash was mislabeled
+
+- README and AGENTS cited `Gjs4YNbEPBQKWB3M6MpV2zAwhvJySk7U6Q8NZnKVWCKH` as the
+  execution-boundary transfer. On-chain re-read shows it is a **0.02 NEAR** transfer
+  signed by `ts-demo-8f3a1c.testnet` -> `ts-recv-8f3a1c.testnet` — the **browser-wallet
+  demo** (its default amount is 0.02), not the execution boundary.
+- The claim was corrected to the verified 0.01 NEAR tx above, in README and
+  `docs/NEAR_INTEGRATION.md` §10. The historical AGENTS entry above is left as the
+  record of what was written; this note supersedes it.
+
+### Live provider policy — endpoint REAL, live read needs a key
+
+- The Agent API endpoint `GET https://api.agentsonintents.com/v1/agents/{agent_id}/policy`
+  is in the provider's published OpenAPI (`securitySchemes: {ApiKey: X-API-Key}`). It is
+  **not invented**. A live probe with no key returns `401 {"code":"invalid_api_key"}` —
+  the exact auth boundary `near/policy.py` models.
+- A *successful* authenticated read needs a live key, which is out of the zero-budget
+  scope; the adapter reports `UNCONFIGURED` and the guard's own policy governs.
+- New opt-in test `tests/test_near_live_provider.py` exercises the real endpoint when
+  `TRACESETTLE_TEST_AGENT_API_URL`/`_KEY` are supplied; skipped otherwise.
+
+### Hardware (TDX) — genuine quote verified; enclave signing BLOCKED, fail-closed
+
+- Live harness (`near/enclave_harness.py`, `TRACESETTLE_ENCLAVE_HARNESS=1`) fetched a
+  **genuine** Intel TDX quote from `cloud-api.near.ai` and verified it locally: all 16
+  checks pass incl. Intel PCS collateral (TCB `UpToDate`, PCK not revoked, QE identity
+  match); a wrong measurement pin and a wrong nonce are both refused. `genuine: true`,
+  `signing_available: false`.
+- **Exact blocker:** the gateway exposes a TDX-attested enclave with a `signed_address`
+  and a *completion*-signing endpoint (`GET /v1/signature/{chat_id}`), but **no endpoint
+  that signs an arbitrary caller-supplied payload**. A NEAR transaction is an arbitrary
+  payload, so no free, publicly reachable enclave can sign one here. Enclave signing
+  therefore stays fail-closed; software signing is never substituted for TEE signing.
+- New opt-in test `tests/test_near_live_enclave.py` asserts the honest result.
+
+### Docs / tests
+
+- README: corrected the execution tx, the enclave-hardware blocker, the invariant count
+  (`39` -> `43`) and the test counts; `docs/NEAR_INTEGRATION.md` §9 rewritten (stale "no
+  testnet transaction was executed" and "TEE is researched, not integrated" removed) and
+  a new §10 records the testnet/provider/TEE evidence and the blocker.
+- Tests: **1380 passed, 4 skipped** with PostgreSQL 16 (filesystem-only 1356 passed,
+  28 skipped). 43/43 invariants hold; 9/9 attack scenarios pass; packaging 10 pass;
+  pyflakes clean; compileall OK; offline demo byte-identical (md5 `4864f13c…`).
+- The 4 skips are opt-in live tests (live testnet key; live Agent API credentials ×2;
+  enclave harness). They are reported as skipped, never as passed.

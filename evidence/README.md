@@ -84,3 +84,29 @@ curl -s "https://mempool.space/api/tx/9a80de61146553e809f2e57a7b789ae5e64de7aa67
 | File | Source |
 | --- | --- |
 | `prior_art_intent-triager_SKILL.md` | [`shreyaspadmakiran-defuse/intent-triager`](https://github.com/shreyaspadmakiran-defuse/intent-triager) — closest existing public tool; independent corroboration of the endpoint choices above. |
+
+## Mission 6 — live testnet execution + live provider probe (2026-11-06)
+
+| File | What it is | Repro |
+| --- | --- | --- |
+| `raw/near_testnet_tx_m6.json` | A real NEAR **testnet** transaction read back from `rpc.testnet.near.org`: `3wQ7UDmQzCTtqyxnBMaQ35SfxioQJUp3rnLyEPX6nuQd`, signer `ts-m6-probe-13285.testnet` -> `ts-m6-recv-13153.testnet`, `Transfer` 0.01 NEAR, `SuccessValue`. | see below |
+| `raw/agent_api_policy_unauthorized.json` | The live NEAR Intents Agent API policy endpoint answering `401 invalid_api_key` with no key — the exact auth boundary the adapter models. | see below |
+
+```sh
+# 1) The testnet execution, read back from the public testnet RPC
+curl -s -X POST https://rpc.testnet.near.org -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tx","params":{"tx_hash":"3wQ7UDmQzCTtqyxnBMaQ35SfxioQJUp3rnLyEPX6nuQd","sender_account_id":"ts-m6-probe-13285.testnet","wait_until":"FINAL"}}'
+
+# 2) The same transaction from a second, independent RPC
+curl -s -X POST https://rpc.testnet.fastnear.com -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tx","params":{"tx_hash":"3wQ7UDmQzCTtqyxnBMaQ35SfxioQJUp3rnLyEPX6nuQd","sender_account_id":"ts-m6-probe-13285.testnet","wait_until":"FINAL"}}'
+
+# 3) The documented provider policy endpoint, no key (expects 401)
+curl -s "https://api.agentsonintents.com/v1/agents/$(printf 'a%.0s' {1..64})/policy"
+
+# 4) The provider's published OpenAPI (proves the endpoint is real, not invented)
+curl -s https://api.agentsonintents.com/openapi.json
+```
+
+The testnet accounts were funded by the **free** NEAR testnet faucet; no money was spent.
+`raw/near_testnet_tx_m6.json` is a real capture; it is not a synthetic fixture.

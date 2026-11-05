@@ -256,14 +256,92 @@ The runtime stays standard-library only. The NEAR package adds no dependency.
 ## 9. Known limitations
 
 * **No live provider policy read is verified end to end.** The adapter is built
-  to the documented shape and exercised against fixtures; a live read requires an
-  Agent API base URL and key, which are not configured here (zero-budget, no
-  account). The `UNCONFIGURED` path is what runs by default.
+  to the documented shape and exercised against fixtures. The live endpoint
+  `GET https://api.agentsonintents.com/v1/agents/{agent_id}/policy` is real and
+  documented (verified: it answers `401 invalid_api_key` without a live key — see
+  §10), and the adapter's host-pinning, agent-association, freshness, `401`,
+  `404` and transport-failure branches are covered by tests. A *successful*
+  authenticated read requires a provider account and live API key, which are not
+  configured here (zero-budget). The `UNCONFIGURED` path is what runs by default.
+  An opt-in test (`tests/test_near_live_provider.py`) exercises the real endpoint
+  when `TRACESETTLE_TEST_AGENT_API_URL`/`_KEY` are supplied.
 * **The policy scope analysis is a reading of the documentation.** It encodes the
   documented enforcement split. If the provider changes which layer enforces
   which control, this reading must be updated.
 * **The attack scenarios are simulations.** They prove the boundary refuses; they
   do not prove anything about a live agent or a real account.
-* **No testnet or mainnet transaction was executed.** Nothing here was verified
-  against a chain.
-* **TEE is researched, not integrated.** See `docs/TEE_RESEARCH.md`.
+* **Enclave-resident signing of an arbitrary payload is not enabled.** No free,
+  publicly reachable TDX enclave endpoint signs a caller-supplied NEAR
+  transaction. The attested NEAR AI Cloud gateway exposes real TDX quotes and a
+  *completion*-signing endpoint only. The boundary therefore stays fail-closed by
+  default and never claims hardware protection without a configured, verified
+  endpoint. See §10.
+* **TEE quote verification is integrated; TEE *confidentiality* of execution is
+  not.** The guard fetches and verifies a genuine TDX quote (and its Intel PCS
+  collateral) and can enforce it at the signing boundary, but the reference
+  executor still simulates execution and broadcasts nothing.
+
+## 10. Real-world execution evidence and the hardware blocker
+
+This section records what was actually executed, and what remains blocked by
+unavailable infrastructure. Nothing here is simulated unless it says so.
+
+### Testnet execution — executed
+
+A real, end-to-end NEAR **testnet** execution ran through the production pipeline
+(`tracesettle/near/pipeline.py`):
+
+| Fact | Value |
+| --- | --- |
+| Transaction | `3wQ7UDmQzCTtqyxnBMaQ35SfxioQJUp3rnLyEPX6nuQd` |
+| Signer → receiver | `ts-m6-probe-13285.testnet` → `ts-m6-recv-13153.testnet` |
+| Action | `Transfer` 0.01 NEAR (`10000000000000000000000` yoctoNEAR) |
+| Submission state | `SETTLED` |
+| Settlement state | `VERIFIED` (all seven checks ok) |
+| Finality | `FINAL`, `SuccessValue` |
+| Independent re-read | two public testnet RPCs (`rpc.testnet.near.org`, `rpc.testnet.fastnear.com`) |
+
+A second, independent run of the demo boundary produced
+`HYkzY2A1dcW7K2kAGDsEjaxntPpUrF7XjurzQ3P2EEb` (same amount, same shape). Both were
+re-read from the chain directly; the receiver balance rose by exactly the
+transferred amount. The testnet accounts were created with the free NEAR testnet
+faucet (`helper.testnet.near.org`); no money was spent.
+
+The opt-in reproduction test is `tests/test_near_live_testnet.py`, skipped unless
+`TRACESETTLE_TEST_TESTNET_KEY`/`_ACCOUNT`/`_RECEIVER` are supplied. It is
+testnet-only and refuses mainnet.
+
+**Correction.** Earlier prose (README and `AGENTS.md`) cited
+`Gjs4YNbEPBQKWB3M6MpV2zAwhvJySk7U6Q8NZnKVWCKH` as the execution-boundary
+transfer. On-chain re-read shows that transaction is a **0.02 NEAR** transfer
+signed by `ts-demo-8f3a1c.testnet` → `ts-recv-8f3a1c.testnet` — the
+browser-wallet demo, not the execution boundary. The execution-boundary claim is
+corrected above to the verified 0.01 NEAR transaction.
+
+### Provider policy — endpoint verified, live read needs a key
+
+The Agent API is real: `GET https://api.agentsonintents.com/v1/agents/{agent_id}/policy`
+is in the provider's published OpenAPI (`https://api.agentsonintents.com/openapi.json`,
+`securitySchemes: {ApiKey: X-API-Key}`). A live probe without a key returns
+`401 {"code":"invalid_api_key"}` — the exact authentication boundary the adapter
+models. A *successful* read needs a live key, which is out of the zero-budget
+scope; the read is reported `UNCONFIGURED` and the guard's own policy governs.
+
+### Hardware (TDX) — quote verified, enclave signing blocked
+
+The live harness (`tracesettle/near/enclave_harness.py`,
+`TRACESETTLE_ENCLAVE_HARNESS=1`) fetched a **genuine** Intel TDX quote from the
+NEAR AI Cloud gateway and verified it locally — all 16 checks pass, including
+Intel PCS collateral (TCB `UpToDate`, PCK not revoked, QE identity match) — and
+rejected a wrong measurement pin and a wrong nonce. Result: `genuine: true`,
+`signing_available: false`.
+
+The blocker is precise: the gateway exposes a TDX-attested enclave with a
+`signed_address` and a **completion**-signing endpoint (`GET /v1/signature/{chat_id}`),
+but **no endpoint that signs an arbitrary caller-supplied payload**. A NEAR
+transaction is an arbitrary payload, so no free, publicly reachable enclave can
+sign one here. The integration is complete and fail-closed: supply a genuine
+endpoint via `TRACESETTLE_ENCLAVE_SIGN_URL` and a pinned measurement via
+`TRACESETTLE_ENCLAVE_APPROVED_MEASUREMENT` and the same boundary provisions a key
+against a verified, measurement-pinned, transaction-bound attestation and signs.
+Until then it refuses — it never substitutes software signing for TEE signing.
