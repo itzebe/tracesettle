@@ -224,8 +224,28 @@ def test_near_chain_invariant_notices_a_silently_accepted_conflict(monkeypatch):
 
 def test_tee_invariants_are_registered():
     tee = [name for name in inv.INVARIANTS if name.startswith("tee_")]
-    assert len(tee) == 5
+    assert len(tee) == 6
     assert all(name in inv.INVARIANT_DESCRIPTIONS for name in tee)
+
+
+def test_tee_collateral_invariant_notices_a_verifier_that_ignores_the_signature(monkeypatch):
+    """Mutation: if collateral signature verification were skipped, the invariant fails.
+
+    Neutralizing ``verify_signed_document`` to accept any document reproduces the
+    original gap (collateral fetched but not authenticated against the pinned Intel
+    root). The invariant must notice the tampered TCB document then being accepted.
+    """
+    from tracesettle.near import collateral as collateral_mod
+
+    def _accept_anything(raw, *, key, signature_hex, issuer_chain_header, expected_root_fingerprint):
+        import json as _json
+
+        document = _json.loads(raw) if raw.lstrip()[:1] == b"{" else {}
+        return document.get(key, {}), ()
+
+    monkeypatch.setattr(collateral_mod, "verify_signed_document", _accept_anything)
+    result = inv.INVARIANTS["tee_collateral_verifies_against_the_pinned_root"]()
+    assert result.holds is False
 
 
 def test_tee_execution_invariant_notices_a_gate_that_does_not_refuse(monkeypatch):

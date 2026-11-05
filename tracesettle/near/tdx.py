@@ -365,6 +365,7 @@ class TdxVerification:
     nonce: str = ""
     signing_address: str = ""
     tls_cert_fingerprint: str = ""
+    collateral: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -380,6 +381,7 @@ class TdxVerification:
             "nonce": self.nonce,
             "signing_address": self.signing_address,
             "tls_cert_fingerprint": self.tls_cert_fingerprint,
+            "collateral": dict(self.collateral),
         }
 
 
@@ -392,6 +394,7 @@ def verify_tdx_quote(
     event_log: Sequence[dict[str, Any]] | None = None,
     expected_root_fingerprint: str = INTEL_SGX_ROOT_CA_SHA256,
     now: int | None = None,
+    collateral_client: Any = None,
 ) -> TdxVerification:
     """Verify a TDX quote and its bindings.
 
@@ -510,6 +513,27 @@ def verify_tdx_quote(
         checks["pck_leaf_within_validity"] = window_ok
         if not window_ok:
             failures.append("PCK leaf certificate is outside its validity window")
+
+    # 8. Intel PCS collateral: TCB level + freshness, PCK revocation, QE identity.
+    # This requires a network fetch, so it runs only when a collateral client is
+    # supplied. Without one, the limitation is recorded explicitly and never
+    # claimed as checked.
+    if collateral_client is not None and pck_leaf is not None:
+        from . import collateral as _collateral
+
+        bundle = _collateral.validate_collateral(
+            collateral_client, pck_leaf=pck_leaf, qe_report=quote.qe_report
+        )
+        result.collateral = bundle.to_dict()
+        checks["collateral_available"] = bundle.available
+        checks["tcb_status_acceptable"] = bundle.tcb_acceptable
+        checks["pck_not_revoked"] = not bundle.pck_revoked
+        checks["qe_identity_matches"] = bundle.qe_identity_ok
+        checks["collateral_verified"] = bundle.verified
+        if not bundle.available:
+            failures.append("Intel PCS collateral is unavailable; cannot confirm TCB/revocation")
+        elif not bundle.verified:
+            failures.extend(f"collateral: {failure}" for failure in bundle.failures)
 
     result.verified = not failures
     return result

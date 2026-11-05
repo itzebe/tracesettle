@@ -40,6 +40,26 @@ def test_near_attack_fixtures_live_inside_the_package():
     assert attacks.FIXTURE_DIR.is_dir()
     assert attacks.FIXTURE_DIR == PACKAGE_ROOT / "near" / "fixtures"
     assert (attacks.FIXTURE_DIR / "policy_in_force.json").is_file()
+    # The Intel PCS collateral capture backs the collateral invariant, so it must
+    # ship too; an invariant that reads a test-only file would be vacuous in prod.
+    assert (attacks.FIXTURE_DIR / "intel_pcs_collateral.json").is_file()
+    assert (attacks.FIXTURE_DIR / "attestation_nearai_cloud.json").is_file()
+
+
+def test_collateral_invariant_runs_from_a_package_only_copy(tmp_path):
+    root = _package_only_copy(tmp_path)
+    script = (
+        "import sys, json;"
+        f"sys.path.insert(0, {str(root)!r});"
+        "from tracesettle.guard.invariants import INVARIANTS;"
+        "r = INVARIANTS['tee_collateral_verifies_against_the_pinned_root']();"
+        "print(json.dumps({'holds': r.holds}))"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, timeout=120
+    )
+    assert out.returncode == 0, out.stderr
+    assert json.loads(out.stdout.strip().splitlines()[-1])["holds"] is True
 
 
 def test_all_scenarios_run_from_a_package_only_copy(tmp_path):

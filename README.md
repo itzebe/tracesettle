@@ -144,9 +144,13 @@ Where each capability stands:
      Intel TDX quote and verifies it locally against the pinned Intel SGX Root CA
      — the quote signature, the PCK certificate chain, the attestation key bound
      to the Quoting Enclave report, the nonce and signing-address binding, and the
-     event log replayed to the RTMRs. This is verification of a genuine hardware
-     quote; certificate revocation and TCB freshness (which need Intel PCS
-     collateral) are **not** checked, so they are not claimed.
+     event log replayed to the RTMRs. It additionally fetches and verifies
+     **Intel PCS collateral** (`tracesettle/near/collateral.py`): the signed TCB
+     Info for the platform's FMSPC (with TCB-level matching and freshness), the
+     signed PCK CRL (revocation), and the signed QE Identity (MRSIGNER/ISVPRODID
+     and ISVSVN), each checked against the pinned Intel root. This is verification
+     of a genuine hardware quote *and* its current Intel-published trust state.
+     Live-verified: TCB `UpToDate`, PCK not revoked, QE identity match.
   2. The verified quote can be **enforced** at the signing boundary. With
      `TRACESETTLE_NEAR_TEE_REQUIRED=1` the boundary refuses to accept a signature
      unless a verified attestation is bound to the exact transaction: the digest
@@ -696,7 +700,7 @@ curl -sS -X POST http://127.0.0.1:8080/api/guard/sign \
 curl -sS http://127.0.0.1:8080/api/guard/invariants \
   | python3 -c 'import sys,json;d=json.load(sys.stdin);print("all hold:",d["all_hold"]);[print(" ",i["name"]) for i in d["invariants"]]'
 ```
-→ `all hold: True` and the thirty-one invariant names, including the twelve NEAR
+→ `all hold: True` and the thirty-nine invariant names, including the twelve NEAR
 ones (`near_policy_must_be_in_force`, `near_native_scope_gap_is_always_stated`,
 `near_function_call_key_cannot_transfer_near`,
 `near_unrecognised_access_key_never_allows`,
@@ -1031,7 +1035,7 @@ transaction request ──▶ │ guard/rules.py      7 controls, all run  │
                         │                     validate, then execute │
                         │ guard/audit.py      hash-chained records  │
                         │ guard/monitor.py    counters + incidents  │
-                        │ guard/invariants.py 38 checked guarantees │
+                        │ guard/invariants.py 39 checked guarantees │
                         └────────────────────┬─────────────────────┘
                                              │ ALLOW + authorization
                                              ▼
@@ -1104,7 +1108,7 @@ identical decisions.
 | `tracesettle/guard/safeguards.py` | Durable security safeguards: the learning loop's store (SQLite). |
 | `tracesettle/guard/learning.py` | The learning loop: derive a lesson, apply safeguards (only ever tightening). |
 | `tracesettle/guard/state_pg.py` | Optional PostgreSQL backend: shared nonces, counters, revocations, idempotency. |
-| `tracesettle/guard/invariants.py` | The thirty-three structural guarantees, checked by execution. |
+| `tracesettle/guard/invariants.py` | The thirty-nine structural guarantees, checked by execution. |
 | `tracesettle/guard/api.py` | Guard HTTP routing and JSON serialization. |
 | `tracesettle/guard/console.py` | The security operations console page. |
 | `docs/TRANSACTION_SECURITY.md` | The security layer in full, including what it does not do. |
@@ -1206,7 +1210,7 @@ variable and all documented in `docs/TRANSACTION_SECURITY.md`:
   replay-nonce store all have explicit caps, so a flood cannot exhaust memory.
   When durable state is configured, spent nonces and the limit counters live in
   SQLite instead, so they survive a restart (see **Durable state** below).
-- **Structural invariants, checked by execution.** Thirty guarantees at
+- **Structural invariants, checked by execution.** Thirty-nine guarantees at
   `GET /api/guard/invariants`, each mutation-tested so a checker that cannot fail
   is treated as a defect.
 - **Honest audit claim.** In-place modification of an audit record is detectable;
@@ -1428,7 +1432,7 @@ immutable commit SHA (not a moving tag), and cancels superseded runs.
 ## Tests
 
 ```sh
-python3 -m pytest tests/ -q          # 1283 passed, 24 skipped (1307 with a server)
+python3 -m pytest tests/ -q          # 1308 passed, 25 skipped (1332 with a server)
 python3 -m pytest tests/test_guard_authorization.py -q
 python3 -m pytest tests/test_guard_invariants.py -q
 python3 -m pytest tests/test_guard_end_to_end.py -q

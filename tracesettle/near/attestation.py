@@ -114,10 +114,12 @@ class TeeAttestationProvider:
         client: HttpClient | None = None,
         now: int | None = None,
         timeout: float | None = None,
+        collateral_client: Any = None,
     ) -> None:
         self.url = url
         self._client = client if client is not None else HttpClient(timeout=timeout)
         self._now = now
+        self._collateral_client = collateral_client
 
     def attest(self, nonce: bytes) -> AttestationResult:
         """Fetch an attestation for ``nonce`` and verify it locally."""
@@ -182,6 +184,7 @@ class TeeAttestationProvider:
             tls_cert_fingerprint=tls_fingerprint,
             event_log=event_log,
             now=self._now,
+            collateral_client=self._collateral_client,
         )
 
         # The documentation requires the echoed report_data/request_nonce to match the values read

@@ -99,8 +99,10 @@ nonce, the signing address and the TLS fingerprint are all cross-checked against
 the gateway's echoed fields, so a quote that does not match the claimed session
 is refused.
 
-**Evidence.** A real quote was fetched live and verified (`status: VERIFIED`, all
-eleven checks pass); a quote with a single flipped bit in `report_data` is
+**Evidence.** A real quote was fetched live and verified; with Intel PCS
+collateral validation enabled all sixteen checks pass (`status: VERIFIED`,
+`collateral_verified: true`, TCB `UpToDate`, PCK not revoked, QE identity match);
+a quote with a single flipped bit in `report_data` is
 refused, and a quote for a different nonce is refused. The capture is kept at
 `evidence/raw/nearai_cloud_gateway_attestation.json`, and a copy lives inside the
 package (`tracesettle/near/fixtures/attestation_nearai_cloud.json`) so the
@@ -108,7 +110,15 @@ structural invariants are checkable from a package-only copy.
 
 **What is still not claimed.** This is *verification of a real hardware quote*,
 not a TEE-integrated execution path. The guard's decisions do not depend on it;
-the executor still simulates execution and broadcasts nothing. Certificate
-revocation and TCB freshness require Intel PCS collateral and are **not** checked.
-The two structural invariants `tee_attestation_verification_is_genuine` and
+the executor still simulates execution and broadcasts nothing.
+
+Intel PCS collateral **is** now verified (`tracesettle/near/collateral.py`): the
+signed TCB Info (TCB-level matching and freshness), the signed PCK CRL
+(revocation) and the signed QE Identity, each walked to the pinned Intel root.
+Live-verified against Intel's TDX certification service: TCB `UpToDate`, the PCK
+certificate is not revoked, and the QE identity matches. This closes the earlier
+gap where revocation and TCB freshness were unchecked; what remains out of scope
+is a TEE-integrated *signing* path (the executor is still a simulator) and live
+provider-policy integration. The two structural invariants
+`tee_attestation_verification_is_genuine` and
 `tee_attestation_is_bound_to_the_decision_nonce` hold this boundary.

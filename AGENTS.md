@@ -1668,3 +1668,69 @@ execution path. Additive: the settlement engine, the guard controls, and the
   TDX attestation is *bound to the exact bytes* before signing, but the module does
   not claim the signature was produced inside an enclave. Testnet only — the
   in-memory signer refuses mainnet.
+
+## Intel PCS collateral validation (2026-11-03, branch `feat/near-security-integration`)
+
+The TDX quote verifier proved a genuine Intel-signed quote, but not that the
+platform's TCB was current or that its PCK certificate was still trusted. Both
+facts live in Intel's Provisioning Certification Service collateral, and both are
+now fetched, signature-verified and evaluated.
+
+- **New module `tracesettle/near/collateral.py`** (stdlib only). `PcsCollateralClient`
+  fetches three documented Intel documents and `validate_collateral` returns a
+  `CollateralBundle` whose `verified` is true only when every document verified,
+  the TCB status is acceptable, the PCK certificate is not revoked, and the QE
+  identity matches.
+- **TDX uses the `tdx` certification service, not `sgx`.** A TDX quote's QE report
+  is a *TDX* QE (`TD_QE`), so its MRSIGNER (`DC9E2A7C…`) is published only by
+  `…/tdx/certification/v4/qe/identity`. The `sgx` service publishes the *SGX* QE
+  (`8C4F5775…`), which will never match a TDX quote — using it produces a false
+  "MRSIGNER mismatch". The TCB Info is also per-service (`tdx/…/tcb`). The **PCK
+  CRL** is shared and served only under `sgx` (`tdx/…/pckcrl` → 404). The client
+  therefore takes `base_url` (tdx) and `crl_base_url` (sgx) separately.
+- **Signed bytes are located, never re-serialised.** Intel signs the literal JSON
+  substring of the document value (`tcbInfo`/`enclaveIdentity`), so
+  `_locate_signed_document` finds that byte range in the raw response and verifies
+  the signature over it. Re-serialising the parsed object would change the bytes
+  and invalidate the signature.
+- **Issuer chain is walked to the pinned root.** The document's issuer chain
+  arrives in a response header (`TCB-Info-Issuer-Chain`,
+  `SGX-Enclave-Identity-Issuer-Chain`, `SGX-PCK-CRL-Issuer-Chain`, percent-encoded
+  PEM). Every link is verified, the root must be self-signed, and the root
+  fingerprint must equal `INTEL_SGX_ROOT_CA_SHA256`.
+- **TCB level matching is Intel's rule.** Walk `tcbLevels` and pick the first whose
+  every component SVN is `<=` the platform's and whose PCESVN is `<=` the
+  platform's; no match means the platform is newer than any known level →
+  `OutOfDate`/unacceptable, never silently accepted. `Revoked` / `OutOfDate` /
+  `ConfigurationNeeded` are unacceptable; `UpToDate` / `SWHardeningNeeded` are not.
+- **FMSPC is at OID `…1.13.1.4`**, TCB components at `…1.13.1.2`, sgxType at
+  `…1.13.1.5` (an ENUMERATED, kept raw). The extension wrapper is
+  `Extensions ::= SEQUENCE OF Extension`, so it needs the extra SEQUENCE unwrap.
+  The earlier "FMSPC 404" was reading the PPID (`.1.1`) instead of the FMSPC.
+- **SGX report field offsets.** In the QE report, MRSIGNER is `[128:160]` and
+  ISVPRODID/ISVSVN are **little-endian** uint16 at `[256:258]`/`[258:260]`. (The TD
+  report uses different offsets; the QE report inside a TDX quote is an SGX report.)
+- **Freshness is enforced.** A cached document is reused only within
+  `cache_ttl_seconds` *and* while still before its own `nextUpdate`; past either
+  bound it is refetched, and a failed refetch is `UNAVAILABLE`, never stale reuse.
+  `validate_collateral(..., now=...)` makes the freshness check testable.
+- **Fails closed.** No collateral service → `available=False`, `verified=False`,
+  and the quote verification appends a failure; a caller that requires TEE must
+  refuse. `verify_tdx_quote(..., collateral_client=...)` runs the collateral step
+  only when a client is supplied, so the offline invariant path is unchanged and
+  the limitation is explicit when it is not.
+- **New invariant (39 total):** `tee_collateral_verifies_against_the_pinned_root`
+  verifies the real capture and refuses a tampered TCB signature, offline, from the
+  package fixture `tracesettle/near/fixtures/intel_pcs_collateral.json`.
+  Mutation-tested in `tests/test_near_invariants.py`.
+- **Live-verified (2026-11-03):** against Intel's TDX certification service the
+  gateway quote resolves TCB `UpToDate`, PCK not revoked, QE identity match;
+  `collateral_verified: true` and all 16 quote-verification checks pass.
+- **Tests:** 1307 → **1331 passed, 1 skipped** (with PostgreSQL 16). New
+  `tests/test_near_collateral.py` (22) plus the collateral invariant and packaging
+  assertions. pyflakes clean; compileall OK; offline demo byte-identical
+  (md5 `4864f13c…`).
+- **Honest scope, unchanged.** This is verification of a genuine quote *and* its
+  Intel-published trust state. The executor still simulates execution and
+  broadcasts nothing; the guard's decisions do not depend on the TEE, and the
+  signing key is software-held. No TEE *confidentiality* protection is claimed.

@@ -1684,6 +1684,93 @@ def _tee_attestation_is_bound_to_the_decision_nonce():
     )
 
 
+def _tee_collateral_verifies_against_the_pinned_root():
+    """A real Intel PCS collateral set must verify; a tampered one must not.
+
+    Runs entirely offline from the captured Intel TDX certification-service
+    responses shipped in the package. The check confirms the TCB Info, the PCK CRL
+    and the QE Identity each verify against the pinned Intel root and that the TCB
+    status is acceptable, then tampers with the TCB signature and requires the
+    refusal. A verifier that accepted a tampered document, or that ignored the
+    pinned root, would fail here.
+    """
+    import base64
+    import json
+    import pathlib
+
+    from ..near import collateral, tdx
+
+    base = pathlib.Path(__file__).resolve().parents[1] / "near" / "fixtures"
+    capture = json.loads((base / "intel_pcs_collateral.json").read_text(encoding="utf-8"))
+    quote_fixture = json.loads((base / "attestation_nearai_cloud.json").read_text(encoding="utf-8"))
+    quote = tdx.parse_quote(bytes.fromhex(quote_fixture["intel_quote"]))
+
+    def make_transport(mutate=None):
+        def transport(url):
+            if "/tcb" in url:
+                label = "tcb"
+            elif "/qe/identity" in url:
+                label = "qe_identity"
+            elif "/pckcrl" in url:
+                label = "pckcrl"
+            else:  # pragma: no cover - the invariant only requests known paths
+                raise AssertionError(f"unexpected collateral URL {url}")
+            entry = capture[label]
+            body = (
+                base64.b64decode(entry["body_der_b64"])
+                if label == "pckcrl"
+                else entry["body"].encode()
+            )
+            header_name = {
+                "tcb": "TCB-Info-Issuer-Chain",
+                "qe_identity": "SGX-Enclave-Identity-Issuer-Chain",
+                "pckcrl": "SGX-PCK-CRL-Issuer-Chain",
+            }[label]
+            headers = {"content-type": "application/json", header_name: entry["issuer_chain_header"]}
+            if mutate is not None:
+                body, headers = mutate(label, body, headers)
+            return body, headers
+
+        return transport
+
+    good = collateral.validate_collateral(
+        collateral.PcsCollateralClient(transport=make_transport()),
+        pck_leaf=quote.pck_chain[0],
+        qe_report=quote.qe_report,
+    )
+    if not good.verified:
+        return InvariantResult(
+            "tee_collateral_verifies_against_the_pinned_root",
+            False,
+            "the captured genuine Intel collateral did not verify: " + "; ".join(good.failures),
+        )
+
+    def tamper(label, body, headers):
+        if label != "tcb":
+            return body, headers
+        document = json.loads(body)
+        signature = document["signature"]
+        document["signature"] = ("1" if signature[0] == "0" else "0") + signature[1:]
+        return json.dumps(document).encode(), headers
+
+    bad = collateral.validate_collateral(
+        collateral.PcsCollateralClient(transport=make_transport(tamper)),
+        pck_leaf=quote.pck_chain[0],
+        qe_report=quote.qe_report,
+    )
+    if bad.tcb.verified:
+        return InvariantResult(
+            "tee_collateral_verifies_against_the_pinned_root",
+            False,
+            "a tampered TCB document verified; the collateral signature check is not effective",
+        )
+    return InvariantResult(
+        "tee_collateral_verifies_against_the_pinned_root",
+        True,
+        "the genuine Intel TCB/CRL/QE-identity collateral verifies against the pinned root and a tampered document is refused",
+    )
+
+
 def _tee_execution_requires_a_bound_attestation():
     """A transaction must not be signable without a verified, bound attestation.
 
@@ -2244,6 +2331,9 @@ INVARIANTS: dict[str, Callable[[], InvariantResult]] = {
     "tee_attestation_is_bound_to_the_decision_nonce": (
         _tee_attestation_is_bound_to_the_decision_nonce
     ),
+    "tee_collateral_verifies_against_the_pinned_root": (
+        _tee_collateral_verifies_against_the_pinned_root
+    ),
     "tee_execution_requires_a_bound_attestation": (
         _tee_execution_requires_a_bound_attestation
     ),
@@ -2294,6 +2384,7 @@ INVARIANT_DESCRIPTIONS: dict[str, str] = {
     "near_execution_binding_covers_the_bytes": "The authorization is bound to the exact bytes that would be broadcast; changing the amount after authorization is refused.",
     "tee_attestation_verification_is_genuine": "A genuine Intel TDX quote verifies against the pinned Intel SGX Root CA, and a tampered quote is refused.",
     "tee_attestation_is_bound_to_the_decision_nonce": "A TDX quote obtained for one decision nonce does not verify for another, so an attestation cannot be replayed.",
+    "tee_collateral_verifies_against_the_pinned_root": "Intel PCS collateral (signed TCB Info, PCK CRL and QE Identity) verifies against the pinned Intel root and a tampered document is refused, so revocation and TCB freshness are checked rather than assumed.",
     "tee_execution_requires_a_bound_attestation": "With the TEE gate enabled, the execution boundary refuses to accept a signature until a verified attestation is bound to the transaction.",
     "tee_execution_cannot_be_skipped_by_the_state_machine": "The execution lifecycle reaches signing only from TEE_VERIFIED, and no state can jump straight to a success state.",
     "tee_execution_record_is_transaction_bound": "A TEE-verified execution record authorizes only the exact transaction digest it was bound to; a substituted transaction is refused.",
