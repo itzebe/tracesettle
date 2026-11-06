@@ -179,7 +179,6 @@ class GuardAPI:
         if path == "/api/guard/near/scenarios":
             from ..near.attacks import SIMULATION_NOTE as NEAR_NOTE
             from ..near.attacks import run_all
-
             results = run_all()
             return ApiResponse(
                 200,
@@ -189,6 +188,8 @@ class GuardAPI:
                     "all_passed": all(r.passed for r in results),
                 },
             )
+        if path == "/api/guard/near/agent-demo":
+            return self._near_agent_demo()
         if path == "/api/guard/near/execution":
             return self._near_execution_info()
         if path == "/api/guard/near/prompt-injection":
@@ -355,6 +356,21 @@ class GuardAPI:
                 for scope in PolicyScope
             },
         }
+
+    def _near_agent_demo(self) -> ApiResponse:
+        """Run the offline end-to-end agent-payment demonstration.
+
+        One story, two scenarios, through the real authorization boundary, the
+        real signer, and the real settlement verifier. The only substitution is
+        the network transport: no key is held and nothing reaches a chain. The
+        response is labelled a simulation and carries the signer-invocation count
+        and the broadcast state, so "the signer was never reached" is provable
+        rather than asserted.
+        """
+        from ..near.agent_demo import run_agent_payment_demo
+
+        result = run_agent_payment_demo()
+        return ApiResponse(200, result.to_dict())
 
     def _near_settlement_demo(self) -> dict[str, Any]:
         """The post-settlement assurance view: a provider claim is never proof.

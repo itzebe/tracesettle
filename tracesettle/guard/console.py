@@ -267,6 +267,21 @@ CONSOLE_HTML = """<!DOCTYPE html>
       Intents policy scope, and the access-key scope. It returns one of ALLOW, REQUIRE_APPROVAL,
       BLOCK, HOLD or UNKNOWN. Nothing here signs or broadcasts a transaction.</p>
 
+    <div class="panel" id="agent-demo-panel">
+      <h2>End-to-end demonstration: block, authorize, settle, verify</h2>
+      <p class="small">One story, two scenarios, through the <strong>real</strong> authorization
+        boundary, signer, pipeline and settlement verifier. An agent is manipulated into
+        redirecting a payment to an attacker: the boundary <strong>BLOCK</strong>s it and the signer
+        is <strong>never invoked</strong> (a zero call count, not a claim). A legitimate payment is
+        then authorized, signed, broadcast over a deterministic offline transport, and
+        independently <strong>verified</strong> against the resulting record. The only substitution
+        is the network; nothing is signed for real and nothing reaches a chain.</p>
+      <div class="actions" style="margin-bottom:12px">
+        <button class="act primary" type="button" id="agent-demo-run">Run the demonstration</button>
+      </div>
+      <div id="agent-demo-output" aria-live="polite"></div>
+    </div>
+
     <div class="panel">
       <h2>Connect a NEAR wallet</h2>
       <p class="small">Connect a NEAR wallet, then authorize and send one transfer. TraceSettle
@@ -838,6 +853,8 @@ async function loadNear() {
 
   const runBtn = document.getElementById("near-run");
   runBtn.onclick = runNearAttacks;
+  const agentDemoBtn = document.getElementById("agent-demo-run");
+  if (agentDemoBtn) agentDemoBtn.onclick = runAgentDemo;
   const injBtn = document.getElementById("near-injection-run");
   if (injBtn) injBtn.onclick = runNearInjection;
   loadNearBehaviours();
@@ -909,6 +926,43 @@ async function runNearAttacks() {
       '<div class="note ' + (data.all_passed ? "ok" : "bad") + '">' +
       esc((data.all_passed ? "All scenarios matched expectation" : "A scenario did not match")) +
       "</div>";
+  } catch (err) { el.innerHTML = '<div class="note bad">' + esc(err.message) + "</div>"; }
+}
+
+async function runAgentDemo() {
+  const el = document.getElementById("agent-demo-output");
+  el.innerHTML = loading("Running the end-to-end demonstration…");
+  try {
+    const data = await api("GET", "/api/guard/near/agent-demo");
+    const card = (label, r) => {
+      const ver = r.verification || {};
+      return '<div class="card"><h3>' + esc(label) + " — " + status(r.decision) + "</h3>" +
+        '<div class="kv small"><dt>Proposed receiver</dt><dd class="mono small">' +
+        esc(r.proposed_receiver) + "</dd>" +
+        "<dt>Amount</dt><dd class='small'>" + esc(r.proposed_amount) + " NEAR</dd>" +
+        "<dt>Signer invocations</dt><dd class='small'>" + esc(String(r.signer_calls)) + "</dd>" +
+        "<dt>Signed</dt><dd class='small'>" + esc(String(r.signed)) + "</dd>" +
+        "<dt>Broadcast</dt><dd class='small'>" + esc(String(r.broadcast_occurred)) + "</dd>" +
+        "<dt>Settlement</dt><dd>" + status(r.settlement_state) + "</dd>" +
+        "<dt>Verification</dt><dd class='small'>" + esc(ver.state || "—") + "</dd></div>" +
+        (r.reasons && r.reasons.length
+          ? '<ul class="small">' + r.reasons.map((x) => "<li>" + esc(x) + "</li>").join("") + "</ul>"
+          : "") +
+        '<div class="kv small"><dt>Bound to exact bytes</dt><dd class="mono small">' +
+        esc((r.authorization_binding || {}).transaction_digest || "—") +
+        "</dd><dt>Signed-bytes digest</dt><dd class='mono small'>" +
+        esc(r.signed_bytes_digest || "—") + "</dd></div></div>";
+    };
+    const ok = data.reproduced;
+    el.innerHTML = '<div class="note sim">' + esc(data.note) + "</div>" +
+      '<div class="note ' + (ok ? "ok" : "bad") + '">' +
+      esc(ok
+        ? "Reproduced: the injected redirect was blocked before signing and the approved " +
+          "payment was verified after settling."
+        : "The run did not reproduce the expected outcome.") + "</div>" +
+      '<div class="grid two">' +
+      card("Injected redirect (attacker)", data.malicious) +
+      card("Approved payment", data.legitimate) + "</div>";
   } catch (err) { el.innerHTML = '<div class="note bad">' + esc(err.message) + "</div>"; }
 }
 

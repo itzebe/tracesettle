@@ -500,6 +500,16 @@ def test_unknown_guard_route_is_404():
         assert _request("POST", base + "/api/guard/does-not-exist", {})[0] == 404
 
 
+def test_console_near_tab_has_an_end_to_end_demo_panel():
+    """The NEAR tab must expose the flagship end-to-end demonstration."""
+    with running_server() as base:
+        _, body, _ = _request("GET", base + "/console")
+    html = _html(body)
+    assert "End-to-end demonstration" in html
+    assert 'id="agent-demo-run"' in html
+    assert "/api/guard/near/agent-demo" in html
+
+
 def test_console_near_tab_states_the_scope_gap_and_the_simulation_label():
     with running_server() as base:
         _, body, _ = _request("GET", base + "/console")
