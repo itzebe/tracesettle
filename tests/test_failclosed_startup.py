@@ -161,3 +161,22 @@ def test_malformed_credential_store_refuses_to_start(tmp_path):
     assert not running, "server started with a malformed credential store"
     assert code == 2
     assert "refusing to start" in output
+
+
+def test_public_demo_does_not_relax_the_credential_check():
+    """Enabling the keyless demonstration must never permit an unauthenticated
+    public start.
+
+    The demonstration opens a read-only allowlist *within* an authenticated
+    deployment; it is not a way to run an open public server. A public bind with
+    ``TRACESETTLE_PUBLIC_DEMO=1`` and no credentials must still refuse, so the
+    fail-closed property cannot be traded away for a public demo.
+    """
+    port = _free_port()
+    env = _clean_env(_HOST="0.0.0.0", TRACESETTLE_PUBLIC_DEMO="1")
+    code, output, running, listening = _run_serve(env, port)
+    assert not running, "PUBLIC_DEMO allowed a public start without credentials"
+    assert not listening
+    assert code == 2
+    assert "refusing to start" in output
+    assert "TRACESETTLE_API_KEY" in output

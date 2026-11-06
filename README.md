@@ -789,12 +789,12 @@ a bare interpreter.
 **1. Run the tests.**
 
 ```sh
-python -m pytest tests/ --collect-only -q   # 1485 tests collected
-python -m pytest tests/ -q                  # 1458 passed, 27 skipped
+python -m pytest tests/ --collect-only -q   # 1525 tests collected
+python -m pytest tests/ -q                  # 1497 passed, 28 skipped
 ```
-→ `1458 passed, 27 skipped`. The skips are the PostgreSQL integration
+→ `1497 passed, 28 skipped`. The skips are the PostgreSQL integration
 tests; set `TRACESETTLE_TEST_PG_DSN` to a real server to run them
-(**1482 passed, 3 skipped** — the remaining 3 are opt-in *live-infrastructure*
+(**1521 passed, 4 skipped** — the remaining 4 are opt-in *live-infrastructure*
 tests that need real provider credentials, a testnet key, or a TDX enclave
 harness, none of which a zero-budget local run has).
 
@@ -818,6 +818,22 @@ authorization's `transaction_digest` equal to the recomputed `signed_bytes_diges
 The response carries `"simulated": true`. The same run is the console's **NEAR
 Agent Security → End-to-end demonstration** panel, and
 `python3 demo/near_agent_demo.py` prints it as a narrative.
+
+**2b. Let a first-time visitor run it (opt-in).**
+
+```sh
+TRACESETTLE_PUBLIC_DEMO=1 python3 -m tracesettle serve --port 8080 &
+```
+
+`http://127.0.0.1:8080/demo` now runs the real six-scene demonstration **without an
+API key**: the injected redirect is `BLOCK`ed before the signer, the approved
+payment is authorized and signed, and Scene 6 reads a real, already-final NEAR
+**testnet** transaction from a public RPC and verifies it field by field. The flag
+opens a strict, exact allowlist of read-only guard GET routes and is **off by
+default**; every write route, the live policy document, metrics, incidents, audit,
+the wallet/execution routes and `/api/investigate` keep the API-key requirement,
+and the demonstration routes stay per-IP rate-limited. It does not relax the
+fail-closed start-up check: a public bind still requires credentials.
 
 **3. Prove the enforcement boundary: a permitted request executes, a suspicious
 one cannot.**
@@ -1244,7 +1260,7 @@ transaction request ──▶ │ guard/rules.py      7 controls, all run  │
                         │                     validate, then execute │
                         │ guard/audit.py      hash-chained records  │
                         │ guard/monitor.py    counters + incidents  │
-                        │ guard/invariants.py 47 checked guarantees │
+                        │ guard/invariants.py 48 checked guarantees │
                         └────────────────────┬─────────────────────┘
                                              │ ALLOW + authorization
                                              ▼
@@ -1317,7 +1333,7 @@ identical decisions.
 | `tracesettle/guard/safeguards.py` | Durable security safeguards: the learning loop's store (SQLite). |
 | `tracesettle/guard/learning.py` | The learning loop: derive a lesson, apply safeguards (only ever tightening). |
 | `tracesettle/guard/state_pg.py` | Optional PostgreSQL backend: shared nonces, counters, revocations, idempotency. |
-| `tracesettle/guard/invariants.py` | The forty-seven structural guarantees, checked by execution. |
+| `tracesettle/guard/invariants.py` | The forty-eight structural guarantees, checked by execution. |
 | `tracesettle/guard/api.py` | Guard HTTP routing and JSON serialization. |
 | `tracesettle/guard/console.py` | The security operations console page. |
 | `docs/TRANSACTION_SECURITY.md` | The security layer in full, including what it does not do. |
@@ -1380,6 +1396,16 @@ limit configurable by environment variable:
 - **API-key authentication.** Set `TRACESETTLE_API_KEY` to require an `X-API-Key`
   header on `POST /api/investigate` (constant-time comparison; the key is never
   logged or echoed). Unset, the endpoint is open — the default for loopback use.
+- **Opt-in public demonstration.** `TRACESETTLE_PUBLIC_DEMO=1` opens a strict,
+  read-only allowlist of guard GET routes *without* the API key — the agent-payment
+  demonstration, the deterministic attack scenarios, the policy-scope analysis and a
+  live read-only NEAR testnet settlement check — plus the `/demo` page that presents
+  them, so a first-time visitor can run the real boundary instead of meeting an
+  authentication error. The allowlist is an exact set: `/api/guard/evaluate`,
+  `/api/guard/sign`, the wallet and execution routes, the Intents lifecycle,
+  incidents, audit, metrics, the live policy document and `/api/investigate` all
+  keep the API-key requirement. It is **off by default**, so an unset deployment is
+  unchanged; the demonstration routes are still per-IP rate-limited.
 - **Per-IP rate limiting.** `TRACESETTLE_RATE_LIMIT_PER_MINUTE` /
   `_BURST` bound each client IP (keyed on the socket peer, so a spoofed
   `X-Forwarded-For` cannot bypass it); over-budget requests get `429` with
@@ -1422,7 +1448,7 @@ variable and all documented in `docs/TRANSACTION_SECURITY.md`:
   replay-nonce store all have explicit caps, so a flood cannot exhaust memory.
   When durable state is configured, spent nonces and the limit counters live in
   SQLite instead, so they survive a restart (see **Durable state** below).
-- **Structural invariants, checked by execution.** Forty-seven guarantees at
+- **Structural invariants, checked by execution.** Forty-eight guarantees at
   `GET /api/guard/invariants`, each mutation-tested so a checker that cannot fail
   is treated as a defect.
 - **Honest audit claim.** In-place modification of an audit record is detectable;
@@ -1647,7 +1673,7 @@ immutable commit SHA (not a moving tag), and cancels superseded runs.
 ## Tests
 
 ```sh
-python3 -m pytest tests/ -q          # 1458 passed, 27 skipped (1482 passed, 3 skipped with PostgreSQL)
+python3 -m pytest tests/ -q          # 1497 passed, 28 skipped (1521 passed, 4 skipped with PostgreSQL)
 python3 -m pytest tests/test_guard_authorization.py -q
 python3 -m pytest tests/test_guard_invariants.py -q
 python3 -m pytest tests/test_guard_end_to_end.py -q

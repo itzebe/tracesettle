@@ -93,6 +93,28 @@ USER_AGENT = "TraceSettle/0.2 (read-only settlement investigator)"
 #: exposing the server on a shared host.
 API_KEY = os.environ.get("TRACESETTLE_API_KEY") or None
 
+#: Whether the read-only public demonstration is served **without** the API key.
+#:
+#: Off by default: when unset, every guard route and the investigation endpoint
+#: keep the API-key requirement exactly as before, so nothing about the existing
+#: security posture changes. When enabled it opens a **strict allowlist** of
+#: self-contained, read-only GET routes — the agent-payment demonstration, the
+#: deterministic attack scenarios, the policy-scope analysis and a *live,
+#: read-only* NEAR testnet settlement check — plus the ``/demo`` page that
+#: presents them.
+#:
+#: It never exposes anything that evaluates, signs, broadcasts, or mutates state:
+#: ``/api/guard/evaluate``, ``/api/guard/sign``, the wallet and execution routes,
+#: the Intents lifecycle, incidents, audit, metrics, the policy document and
+#: ``/api/investigate`` all stay key-gated. The demonstration routes are
+#: self-contained simulations (the only substitution is the network transport)
+#: and the testnet check is a public RPC read of an already-final transaction, so
+#: no key, no funds, and no write are involved.
+PUBLIC_DEMO_ENABLED = (
+    os.environ.get("TRACESETTLE_PUBLIC_DEMO", "").strip().lower()
+    in {"1", "true", "yes", "on"}
+)
+
 #: Per-connection socket timeout. Bounds how long a slow or idle client can hold
 #: a worker thread (slowloris defence).
 CLIENT_SOCKET_TIMEOUT_SECONDS = float(os.environ.get("TRACESETTLE_CLIENT_TIMEOUT", "10"))
