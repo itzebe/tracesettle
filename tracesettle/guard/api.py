@@ -25,6 +25,34 @@ from ..near.outlayer import OutLayerError
 
 MAX_LIMIT = 200
 
+#: The POST routes that carry, or act on, a service identity and therefore
+#: require per-service authentication when a credential registry is configured.
+#:
+#: This is the single source of truth for that set. The transport
+#: (:mod:`tracesettle.ui`) gates exactly these routes, and the invariant
+#: ``service_facing_routes_require_a_credential`` fails if a route that consults
+#: the authenticated identity is missing from it. Omitting a route here is the
+#: exact defect the invariant exists to catch: an ungated route reaches the API
+#: with ``authenticated_service_id=None`` and honours whatever identity the body
+#: declares, letting one caller act as another.
+SERVICE_FACING_POST_PATHS = frozenset(
+    {
+        "/api/guard/evaluate",
+        "/api/guard/sign",
+        "/api/guard/near/agent-evaluate",
+        "/api/guard/near/lifecycle",
+        "/api/guard/near/lifecycle/list",
+        "/api/guard/near/execution/prepare",
+        "/api/guard/near/execution/attest",
+        "/api/guard/near/execution/enclave-sign",
+        "/api/guard/near/execution/submit",
+        "/api/guard/near/wallet/prepare",
+        "/api/guard/near/wallet/verify",
+        "/api/guard/near/custody/prepare",
+        "/api/guard/near/custody/execute",
+    }
+)
+
 
 @dataclass(frozen=True)
 class ApiResponse:
@@ -157,6 +185,25 @@ class GuardAPI:
         declared = cls._declared_service_id(body)
         if declared is None:
             return False
+        return declared == authenticated_service_id
+
+    @classmethod
+    def _identity_ok(cls, body: Any, authenticated_service_id: str | None) -> bool:
+        """Identity check for a route that acts on a prepared operation.
+
+        These routes carry a ``prepare_id``, not a declared service identity: the
+        binding that matters is that the operation belongs to the authenticated
+        caller, which the owner-scoped store enforces (a foreign ``prepare_id``
+        misses and 404s). A body that *does* declare a ``service_id`` must still
+        match the credential, so a mismatched declaration is refused here as
+        well; an absent declaration is not a failure, because there is nothing to
+        compare and the owner check is the real gate.
+        """
+        if authenticated_service_id is None:
+            return True
+        declared = cls._declared_service_id(body)
+        if declared is None:
+            return True
         return declared == authenticated_service_id
 
     # -- GET ----------------------------------------------------------------
@@ -571,15 +618,15 @@ class GuardAPI:
                 return ApiResponse(403, {"error": "service identity does not match the credential"})
             return self._near_execution_prepare(body, authenticated_service_id)
         if path == "/api/guard/near/execution/attest":
-            if not self._identity_matches(body, authenticated_service_id):
+            if not self._identity_ok(body, authenticated_service_id):
                 return ApiResponse(403, {"error": "service identity does not match the credential"})
             return self._near_execution_attest(body, authenticated_service_id)
         if path == "/api/guard/near/execution/enclave-sign":
-            if not self._identity_matches(body, authenticated_service_id):
+            if not self._identity_ok(body, authenticated_service_id):
                 return ApiResponse(403, {"error": "service identity does not match the credential"})
             return self._near_execution_enclave_sign(body, authenticated_service_id)
         if path == "/api/guard/near/execution/submit":
-            if not self._identity_matches(body, authenticated_service_id):
+            if not self._identity_ok(body, authenticated_service_id):
                 return ApiResponse(403, {"error": "service identity does not match the credential"})
             return self._near_execution_submit(body, authenticated_service_id)
         if path == "/api/guard/near/wallet/prepare":
@@ -587,7 +634,7 @@ class GuardAPI:
                 return ApiResponse(403, {"error": "service identity does not match the credential"})
             return self._near_wallet_prepare(body, authenticated_service_id)
         if path == "/api/guard/near/wallet/verify":
-            if not self._identity_matches(body, authenticated_service_id):
+            if not self._identity_ok(body, authenticated_service_id):
                 return ApiResponse(403, {"error": "service identity does not match the credential"})
             return self._near_wallet_verify(body, authenticated_service_id)
         if path == "/api/guard/near/custody/prepare":
@@ -595,7 +642,7 @@ class GuardAPI:
                 return ApiResponse(403, {"error": "service identity does not match the credential"})
             return self._near_custody_prepare(body, authenticated_service_id)
         if path == "/api/guard/near/custody/execute":
-            if not self._identity_matches(body, authenticated_service_id):
+            if not self._identity_ok(body, authenticated_service_id):
                 return ApiResponse(403, {"error": "service identity does not match the credential"})
             return self._near_custody_execute(body, authenticated_service_id)
         if path == "/api/guard/near/lifecycle":

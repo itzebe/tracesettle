@@ -32,7 +32,7 @@ from urllib.parse import parse_qs, urlparse
 
 from . import DISCLAIMER, __version__, config
 from .cache import TtlCache
-from .guard.api import GuardAPI
+from .guard.api import SERVICE_FACING_POST_PATHS, GuardAPI
 from .guard.service import GuardService
 from .guard.console import CONSOLE_HTML
 from .httpclient import HttpClient
@@ -91,15 +91,13 @@ _AUTH_REFUSED = object()
 
 #: The guard POST routes that carry a service identity and therefore require
 #: per-service authentication when a credential registry is configured.
-_SERVICE_OPERATION_PATHS = frozenset(
-    {
-        "/api/guard/evaluate",
-        "/api/guard/sign",
-        "/api/guard/near/agent-evaluate",
-        "/api/guard/near/lifecycle",
-        "/api/guard/near/lifecycle/list",
-    }
-)
+#:
+#: The set lives in :mod:`tracesettle.guard.api` as
+#: :data:`~tracesettle.guard.api.SERVICE_FACING_POST_PATHS`, next to the routing
+#: that consumes the authenticated identity, so the gate and the routes cannot
+#: drift apart. The lifecycle sub-routes (``/lifecycle/<id>``) are matched by
+#: prefix below.
+_SERVICE_OPERATION_PATHS = SERVICE_FACING_POST_PATHS
 
 #: Distinguishes "no registry argument was supplied" (load from configuration)
 #: from an explicit ``None`` (service authentication deliberately disabled).

@@ -505,3 +505,41 @@ def test_custody_tee_signing_invariant_notices_an_accepting_attestation_verifier
         assert result.holds is False
     finally:
         catt.verify_custody_attestation = original
+
+
+def test_service_facing_route_invariant_notices_an_ungated_route():
+    """Mutation check: dropping a route from the gate set must fail the invariant.
+
+    The mutation removes ``/api/guard/near/custody/prepare`` from
+    ``SERVICE_FACING_POST_PATHS`` while the dispatch still consults the
+    authenticated identity - exactly the omission that let a caller adopt another
+    service's identity. The invariant derives the consulted set from the API
+    source, so it must notice the route is no longer gated.
+    """
+    from tracesettle.guard import api as gap
+
+    original = gap.SERVICE_FACING_POST_PATHS
+    # The mutation: a service-facing route is no longer gated.
+    gap.SERVICE_FACING_POST_PATHS = frozenset(
+        p for p in original if p != "/api/guard/near/custody/prepare"
+    )
+    try:
+        result = INVARIANTS["service_facing_routes_require_a_credential"]()
+        assert result.holds is False
+    finally:
+        gap.SERVICE_FACING_POST_PATHS = original
+
+
+def test_service_facing_route_invariant_notices_a_removed_transport_gate():
+    """Mutation check: if the transport stopped authenticating these routes, the
+    socket probe must fail even when the gate set is unchanged."""
+    from tracesettle import ui as ui_mod
+
+    original = ui_mod._SERVICE_OPERATION_PATHS
+    # The mutation: the transport no longer treats any route as service-facing.
+    ui_mod._SERVICE_OPERATION_PATHS = frozenset()
+    try:
+        result = INVARIANTS["service_facing_routes_require_a_credential"]()
+        assert result.holds is False
+    finally:
+        ui_mod._SERVICE_OPERATION_PATHS = original

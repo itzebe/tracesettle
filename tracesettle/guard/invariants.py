@@ -3288,6 +3288,119 @@ def _custody_tee_signing_requires_bound_attestation_and_settlement():
     )
 
 
+def _service_facing_routes_require_a_credential() -> InvariantResult:
+    """Every route that consults the authenticated identity is gated by it.
+
+    A route that reads ``authenticated_service_id`` and can refuse on a mismatch
+    is a service-facing route; if the transport does not authenticate it, it
+    arrives with ``None`` and honours whatever identity the body declares, so a
+    caller can act as another service. The checker drives a real socket for each
+    such route with a configured registry and no credential: a route that answers
+    anything other than ``401`` is ungated.
+
+    The set of service-facing routes is derived from the API source, not a second
+    hand-maintained list, so a newly added route that consults the authenticated
+    identity but is omitted from the gate is caught here.
+    """
+    import ast
+    import inspect
+    import pathlib
+    import urllib.error
+    import urllib.request
+
+    from .api import SERVICE_FACING_POST_PATHS, GuardAPI
+
+    name = "service_facing_routes_require_a_credential"
+    source = pathlib.Path(inspect.getsourcefile(GuardAPI)).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+
+    # Every POST path whose dispatch consults ``authenticated_service_id``. The
+    # dispatch is a chain of ``if path == "<route>":`` blocks, so a route is
+    # service-facing when its block body references the authenticated identity.
+    # Prefix routes (``path.startswith(...)``) are matched by the transport's
+    # prefix rule and are excluded here, which is why the test must be an exact
+    # equality comparison against a string constant.
+    consulted: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.If):
+            continue
+        route = None
+        test = node.test
+        if (
+            isinstance(test, ast.Compare)
+            and len(test.ops) == 1
+            and isinstance(test.ops[0], ast.Eq)
+            and isinstance(test.left, ast.Name)
+            and test.left.id == "path"
+            and len(test.comparators) == 1
+            and isinstance(test.comparators[0], ast.Constant)
+            and isinstance(test.comparators[0].value, str)
+            and test.comparators[0].value.startswith("/api/guard/")
+        ):
+            route = test.comparators[0].value
+        if route is None:
+            continue
+        body_dump = ast.dump(ast.Module(body=node.body, type_ignores=[]))
+        if "authenticated_service_id" in body_dump:
+            consulted.add(route)
+
+    ungated = sorted(consulted - SERVICE_FACING_POST_PATHS)
+    if ungated:
+        return InvariantResult(
+            name,
+            False,
+            f"route(s) consult the authenticated identity but are not gated: {ungated}",
+        )
+
+    # Exercise each gated route over a real socket: with a registry configured
+    # and no credential it must refuse with 401 before any work is done.
+    import threading
+
+    from ..serviceauth import ServiceRegistry
+    from ..ui import InvestigationServer
+
+    registry = ServiceRegistry()
+    registry.mint("treasury-agent")
+    server = InvestigationServer(
+        ("127.0.0.1", 0),
+        timeout_seconds=2.0,
+        max_attempts=1,
+        guard_service=_fresh()[0],
+        service_registry=registry,
+    )
+    host, port = server.server_address[:2]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        for path in sorted(SERVICE_FACING_POST_PATHS):
+            request = urllib.request.Request(
+                f"http://{host}:{port}{path}",
+                data=b'{"service_id": "treasury-agent"}',
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=5) as response:
+                    status = response.status
+            except urllib.error.HTTPError as exc:
+                status = exc.code
+            if status != 401:
+                return InvariantResult(
+                    name,
+                    False,
+                    f"{path} answered {status} with a registry configured and no credential",
+                )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+    return InvariantResult(
+        name,
+        True,
+        f"all {len(SERVICE_FACING_POST_PATHS)} service-facing routes refuse a request with no credential (401)",
+    )
+
+
 INVARIANTS: dict[str, Callable[[], InvariantResult]] = {
     "non_allow_never_authorizes": _non_allow_never_authorizes,
     "refusal_never_reaches_the_executor": _refusal_never_reaches_the_executor,
@@ -3382,6 +3495,9 @@ INVARIANTS: dict[str, Callable[[], InvariantResult]] = {
     "custody_tee_signing_requires_bound_attestation_and_settlement": (
         _custody_tee_signing_requires_bound_attestation_and_settlement
     ),
+    "service_facing_routes_require_a_credential": (
+        _service_facing_routes_require_a_credential
+    ),
 }
 
 #: Human-readable statement of each guarantee, for the console and the docs.
@@ -3437,6 +3553,7 @@ INVARIANT_DESCRIPTIONS: dict[str, str] = {
     "custody_provider_success_is_never_verified_without_chain_evidence": "A custody provider's success status never yields an independently-verified settlement without decisive on-chain evidence from the NEAR RPC.",
     "custody_authorization_is_bound_to_the_sent_operation": "A custody authorization is bound to the exact operation sent; substituting the recipient, amount, asset, network or service after authorization is refused before the provider is reached.",
     "custody_tee_signing_requires_bound_attestation_and_settlement": "TEE signing is claimed only when a genuine TDX attestation is cryptographically bound to the exact authorized operation and signing key and independent NEAR RPC settlement verification also holds; a provider success or an unbound quote never reaches TEE_SIGNING_VERIFIED.",
+    "service_facing_routes_require_a_credential": "Every guard route that consults the authenticated service identity is gated by the credential registry: with a registry configured, a request with no credential is refused (401) before any work, so a caller cannot adopt another service's identity by editing a field.",
 }
 
 
