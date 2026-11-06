@@ -102,6 +102,7 @@ try:
         "/api/guard/near/agent-demo",
         "/api/guard/near/prompt-injection",
         "/api/guard/near/behaviours",
+        "/api/guard/near/custody",
         "/api/guard/invariants",
     ):
         try:
@@ -129,6 +130,7 @@ finally:
         "/api/guard/near/agent-demo": 200,
         "/api/guard/near/prompt-injection": 200,
         "/api/guard/near/behaviours": 200,
+        "/api/guard/near/custody": 200,
         "/api/guard/invariants": 200,
     }, results
 

@@ -19,6 +19,10 @@ from .model import IncidentStatus, TransactionRequest
 from .service import GuardService, RequestValidationError, request_from_payload
 from .signer import SignRequest
 
+#: A provider/config error on the custody path. Imported at module scope so the
+#: handler can classify it without a deferred import on the hot path.
+from ..near.outlayer import OutLayerError
+
 MAX_LIMIT = 200
 
 
@@ -57,6 +61,7 @@ class GuardAPI:
         near_execution: Any = None,
         tee_provider: Any = None,
         enclave: Any = None,
+        custody: Any = None,
     ) -> None:
         self.service = service
         #: The optional durable settlement-investigation store. When set, a
@@ -84,6 +89,11 @@ class GuardAPI:
         #: so hardware execution stays disabled rather than falling back to a
         #: software key.
         self.enclave = enclave
+        #: The optional OutLayer custody boundary: the one path that sends an
+        #: authorized operation to a TEE-held signing wallet. Off by default; when
+        #: set, an operation reaches the provider only after the guard returned
+        #: ALLOW, and settlement is verified independently against the NEAR RPC.
+        self.custody = custody
 
     def dispatch(
         self,
@@ -208,6 +218,10 @@ class GuardAPI:
             return self._near_tee_info()
         if path == "/api/guard/near/enclave":
             return self._near_enclave_info()
+        if path == "/api/guard/near/custody":
+            return self._near_custody_info()
+        if path == "/api/guard/near/custody/status":
+            return self._near_custody_status()
         if path == "/api/guard/near/tee/attest":
             return self._near_tee_attest(params)
         if path.startswith("/api/guard/near/execution/record/"):
@@ -576,6 +590,14 @@ class GuardAPI:
             if not self._identity_matches(body, authenticated_service_id):
                 return ApiResponse(403, {"error": "service identity does not match the credential"})
             return self._near_wallet_verify(body, authenticated_service_id)
+        if path == "/api/guard/near/custody/prepare":
+            if not self._identity_matches(body, authenticated_service_id):
+                return ApiResponse(403, {"error": "service identity does not match the credential"})
+            return self._near_custody_prepare(body, authenticated_service_id)
+        if path == "/api/guard/near/custody/execute":
+            if not self._identity_matches(body, authenticated_service_id):
+                return ApiResponse(403, {"error": "service identity does not match the credential"})
+            return self._near_custody_execute(body, authenticated_service_id)
         if path == "/api/guard/near/lifecycle":
             return self._lifecycle_create(body, authenticated_service_id)
         if path == "/api/guard/near/lifecycle/list":
@@ -1039,6 +1061,158 @@ class GuardAPI:
 
             store = PreparedOperationStore()
             self._near_execution_store = store
+        return store
+
+    # -- NEAR OutLayer custody flow (a TEE-held wallet signs) ---------------
+
+    def _require_custody(self) -> ApiResponse | None:
+        if self.custody is None:
+            return ApiResponse(
+                404,
+                {
+                    "error": "the OutLayer custody boundary is not enabled",
+                    "hint": (
+                        "set TRACESETTLE_OUTLAYER_ENABLED=1, TRACESETTLE_OUTLAYER_API_KEY and "
+                        "TRACESETTLE_NEAR_EXECUTION=1"
+                    ),
+                },
+            )
+        return None
+
+    def _near_custody_info(self) -> ApiResponse:
+        """Describe the custody boundary. Off unless the operator enabled it.
+
+        No provider call is made here, so a status page never implies a live
+        connection it has not opened; ``/custody/status`` is the explicit probe.
+        """
+        if self.custody is None:
+            return ApiResponse(
+                200,
+                {
+                    "enabled": False,
+                    "mode": "outlayer-custody",
+                    "note": (
+                        "The OutLayer custody boundary is disabled. Enable it with "
+                        "TRACESETTLE_OUTLAYER_ENABLED=1 and a provider API key. It is the "
+                        "only path that sends an authorized operation to a TEE-held signing "
+                        "wallet."
+                    ),
+                },
+            )
+        return ApiResponse(200, {"enabled": True, **self.custody.info()})
+
+    def _near_custody_status(self) -> ApiResponse:
+        """Probe the provider: reachability, wallet identity, balance, policy.
+
+        Every field is real evidence or an explicit error; nothing is asserted
+        that was not observed. The provider's own policy and the register
+        contract's approved measurements are reported as *evidence*, never as
+        TraceSettle's authorization.
+        """
+        refused = self._require_custody()
+        if refused is not None:
+            return refused
+        return ApiResponse(200, self.custody.provider_status())
+
+    def _near_custody_prepare(self, body: Any, authenticated_service_id: str | None) -> ApiResponse:
+        """Build and evaluate a custody transfer. Never sends anything."""
+        refused = self._require_custody()
+        if refused is not None:
+            return refused
+        if not isinstance(body, dict):
+            return _bad_request("request body must be a JSON object")
+        destination = str(body.get("destination", "")).strip()
+        amount = str(body.get("amount", "")).strip()
+        service_id = str(body.get("service_id", "")).strip()
+        if not destination or not amount or not service_id:
+            return _bad_request("fields 'service_id', 'destination' and 'amount' are required")
+        from ..near.outlayer_execution import CustodyError
+
+        try:
+            prepared = self.custody.prepare(
+                service_id=service_id,
+                destination=destination,
+                amount_human=amount,
+                request_id=str(body.get("request_id", "")).strip() or None,
+                idempotency_key=str(body.get("idempotency_key", "")).strip() or None,
+            )
+        except CustodyError as exc:
+            return ApiResponse(422, {"error": str(exc)})
+        except OutLayerError as exc:  # provider/config error, never worked around
+            return ApiResponse(503, {"error": str(exc)})
+        owner = self._near_execution_owner(authenticated_service_id)
+        prepare_id = self.near_custody_store().store(prepared, owner)
+        return ApiResponse(
+            200,
+            {
+                "prepare_id": prepare_id,
+                "operation": "custody-transfer",
+                "prepared": prepared.to_dict(),
+                "note": (
+                    "the operation was evaluated; it reaches the provider only through "
+                    "/custody/execute and only when the decision is ALLOW"
+                ),
+            },
+        )
+
+    def _near_custody_execute(self, body: Any, authenticated_service_id: str | None) -> ApiResponse:
+        """Send the authorized operation to the custody provider and verify it.
+
+        The prepared operation is looked up from the server-side store, never
+        rebuilt from the request, so the bytes sent are provably the bytes that
+        were authorized. The authorization binding is re-validated against the
+        operation and the single-use nonce is consumed before the send.
+        """
+        refused = self._require_custody()
+        if refused is not None:
+            return refused
+        if not isinstance(body, dict):
+            return _bad_request("request body must be a JSON object")
+        prepare_id = str(body.get("prepare_id", "")).strip()
+        if not prepare_id:
+            return _bad_request("field 'prepare_id' is required")
+        owner = self._near_execution_owner(authenticated_service_id)
+        prepared = self.near_custody_store().take(prepare_id, owner)
+        if prepared is None:
+            return ApiResponse(404, {"error": "unknown or expired prepare_id"})
+        from ..near.outlayer_execution import CustodyError
+
+        try:
+            execution = self.custody.execute(prepared)
+        except CustodyError as exc:
+            return ApiResponse(422, {"error": str(exc)})
+        except OutLayerError as exc:
+            return ApiResponse(503, {"error": str(exc)})
+        # Record the independent settlement outcome on the hash-chained audit log
+        # so the evidence survives the request. The stored fields are public
+        # on-chain identifiers and the derived state only - never a secret.
+        self.service.audit.append(
+            event_type="CUSTODY_EXECUTION",
+            actor=owner,
+            outcome=execution.verification.state.value,
+            detail=execution.verification.note,
+            service_id=prepared.service_id,
+            authorization_id=execution.authorization_id,
+            extra={
+                "tx_hash": execution.tx_hash,
+                "provider_state": execution.provider.state.value,
+                "provider_claimed_success": execution.provider_claimed_success,
+                "settlement_verified": execution.settlement_verified,
+                "network": prepared.network.value,
+                "amount_near": str(prepared.amount_human),
+                "destination": prepared.destination,
+                "checks": [{"name": c.name, "ok": c.ok} for c in execution.verification.checks],
+            },
+        )
+        return ApiResponse(200, execution.to_dict())
+
+    def near_custody_store(self) -> Any:
+        store = getattr(self, "_near_custody_store", None)
+        if store is None:
+            from ..near.execution import PreparedOperationStore
+
+            store = PreparedOperationStore()
+            self._near_custody_store = store
         return store
 
     # -- NEAR wallet-mediated flow (the connected wallet signs and sends) ---

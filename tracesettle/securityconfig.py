@@ -157,6 +157,29 @@ def validate_startup(
                 "execution boundary, or unset TRACESETTLE_ENCLAVE_REQUIRED"
             )
 
+    # The OutLayer custody boundary fails closed. Enabling a TEE-held signing
+    # wallet without a key, with an unknown network, or without the execution
+    # boundary that would authorize it would silently drop the guarantee the
+    # operator asked for, so it is a hard error on any binding.
+    if config.OUTLAYER_ENABLED:
+        if not config.OUTLAYER_API_KEY:
+            raise ConfigurationError(
+                "TRACESETTLE_OUTLAYER_ENABLED is set but TRACESETTLE_OUTLAYER_API_KEY is not; "
+                "there is no provider credential, so nothing could be signed. Set the key, "
+                "or unset TRACESETTLE_OUTLAYER_ENABLED"
+            )
+        if config.OUTLAYER_NETWORK not in {"testnet", "mainnet"}:
+            raise ConfigurationError(
+                "TRACESETTLE_OUTLAYER_NETWORK must be 'testnet' or 'mainnet'; got an "
+                "unsupported network name"
+            )
+        if not config.NEAR_EXECUTION_ENABLED:
+            raise ConfigurationError(
+                "TRACESETTLE_OUTLAYER_ENABLED is set but TRACESETTLE_NEAR_EXECUTION is not; "
+                "there is no execution boundary to authorize an operation before it is "
+                "signed. Enable the execution boundary, or unset TRACESETTLE_OUTLAYER_ENABLED"
+            )
+
     if not public_binding:
         return profile
 

@@ -347,3 +347,118 @@ def test_request_payload_generates_a_reference_when_absent():
     payload = {k: v for k, v in LEGIT.items() if k != "request_id"}
     request = request_from_payload(payload)
     assert request.request_id.startswith("req_")
+
+
+# --- OutLayer custody routes ------------------------------------------------
+
+
+class _FakeCustody:
+    """A stand-in for the custody boundary at the API boundary.
+
+    The API layer only routes and serializes; the boundary's own behaviour is
+    tested in ``test_near_outlayer.py``. This records whether the provider-facing
+    ``execute`` was reached, so the routing tests can assert the gate.
+    """
+
+    def __init__(self) -> None:
+        self.executed = 0
+        self._service = make_service()
+
+    def info(self):
+        return {"mode": "outlayer-custody", "network": "testnet", "wallet_id": "w"}
+
+    def provider_status(self):
+        return {"reachable": True, "balance_near": "1.5"}
+
+    def prepare(self, *, service_id, destination, amount_human, request_id=None, idempotency_key=None):
+        from decimal import Decimal
+
+        from tracesettle.near.networks import NearNetwork
+        from tracesettle.near.outlayer_execution import PreparedCustodyTransfer
+
+        decision = self._service.evaluate_payload(
+            {
+                "service_id": service_id,
+                "operation": "WITHDRAWAL",
+                "chain": "eth",
+                "asset": "USDC",
+                "amount": "1",
+                "destination": APPROVED_DESTINATION,
+                "request_id": request_id or "custody-api-1",
+            }
+        )
+        amount = Decimal(str(amount_human))
+        return PreparedCustodyTransfer(
+            network=NearNetwork.TESTNET,
+            wallet_account="9575a853fa0f62ed12334306cd5d1a18f6821ef9036601c99822f17d9bb13c38",
+            wallet_public_key="ed25519:B4RodGLvA3a8wyPQydgJwAUtm6ULkfdia17WP9hPYBGs",
+            destination=destination,
+            amount_human=amount,
+            amount_yocto=int(amount * Decimal(10**24)),
+            service_id=service_id,
+            decision=decision,
+            authorization=decision.authorization,
+            authorization_id="auth-1",
+            transaction_digest="digest",
+            idempotency_key=idempotency_key or "",
+        )
+
+    def execute(self, prepared):
+        self.executed += 1
+        raise AssertionError("execute must be driven through the store, not called here")
+
+
+def test_custody_info_reports_disabled_when_unconfigured(api):
+    response = api.dispatch("GET", "/api/guard/near/custody", {}, None)
+    assert response.status == 200
+    assert response.payload["enabled"] is False
+
+
+def test_custody_routes_are_absent_when_disabled(api):
+    response = api.dispatch("POST", "/api/guard/near/custody/prepare", {}, {"service_id": "s"})
+    assert response.status == 404
+
+
+def test_custody_prepare_requires_the_core_fields():
+    api = GuardAPI(make_service(), custody=_FakeCustody())
+    response = api.dispatch("POST", "/api/guard/near/custody/prepare", {}, {"service_id": "s"})
+    assert response.status == 400
+
+
+def test_custody_prepare_returns_a_prepare_id():
+    api = GuardAPI(make_service(), custody=_FakeCustody())
+    response = api.dispatch(
+        "POST",
+        "/api/guard/near/custody/prepare",
+        {},
+        {"service_id": "treasury-agent", "destination": "tsfund52f8405ad4.testnet", "amount": "0.5"},
+    )
+    assert response.status == 200
+    assert response.payload["prepare_id"].startswith("prep_")
+
+
+def test_custody_execute_rejects_an_unknown_prepare_id():
+    api = GuardAPI(make_service(), custody=_FakeCustody())
+    response = api.dispatch("POST", "/api/guard/near/custody/execute", {}, {"prepare_id": "prep_nope"})
+    assert response.status == 404
+
+
+def test_custody_execute_refuses_another_owners_prepare_id():
+    custody = _FakeCustody()
+    api = GuardAPI(make_service(), custody=custody)
+    prepared = api.dispatch(
+        "POST",
+        "/api/guard/near/custody/prepare",
+        {},
+        {"service_id": "treasury-agent", "destination": "tsfund52f8405ad4.testnet", "amount": "0.5"},
+    )
+    prepare_id = prepared.payload["prepare_id"]
+    # A different authenticated service cannot take another service's operation.
+    response = api.dispatch(
+        "POST",
+        "/api/guard/near/custody/execute",
+        {},
+        {"prepare_id": prepare_id, "service_id": "someone-else"},
+        authenticated_service_id="someone-else",
+    )
+    assert response.status == 404

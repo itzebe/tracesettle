@@ -3005,6 +3005,230 @@ def _provider_policy_reads_fail_closed_and_verify_identity():
     )
 
 
+# --- OutLayer custody execution (the TEE-held signing wallet) -------------
+
+
+class _FakeCustodyProvider:
+    """A custody provider whose ``transfer`` records whether it was ever called.
+
+    It returns a provider success so a caller that skipped the guard would look
+    successful; the checker asserts the provider was never reached, so a
+    regression that removed the authorization gate is caught by execution.
+    """
+
+    def __init__(self, *, account: str, public_key: str, tx_hash: str) -> None:
+        from ..near.outlayer import OutLayerConfig
+
+        self.config = OutLayerConfig(api_key="wk_invariant_only_0000000000000000000000000000000000", network="testnet")
+        self.transfers: list[tuple[str, int]] = []
+        self._account = account
+        self._public_key = public_key
+        self._tx_hash = tx_hash
+
+    def address(self, chain: str = "near"):  # noqa: ANN001
+        from ..near.outlayer import WalletIdentity
+
+        return WalletIdentity(wallet_id="w", network="testnet", account_id=self._account, public_key=self._public_key)
+
+    def transfer(self, *, to, amount_yocto, idempotency_key=None):  # noqa: ANN001
+        from ..near.outlayer import ProviderOutcome, ProviderState
+
+        self.transfers.append((to, amount_yocto))
+        return ProviderOutcome(
+            state=ProviderState.SUCCESS, request_id="r1", tx_hash=self._tx_hash, raw_status="success"
+        )
+
+    def request_status(self, request_id):  # noqa: ANN001
+        raise AssertionError("not expected")
+
+
+class _FakeRpc:
+    """A NEAR RPC that returns a record which verifies the wallet's key binding."""
+
+    def __init__(self, *, verified: bool) -> None:
+        self.verified = verified
+
+    def tx_status(self, tx_hash, sender_account_id):  # noqa: ANN001
+        from ..model import SourceStatus
+        from ..near.rpc import RpcResult
+
+        if not self.verified:
+            return RpcResult(SourceStatus.TIMEOUT, None)
+        return RpcResult(SourceStatus.OK, _custody_rpc_record())
+
+
+#: A real NEAR implicit account and the public key whose bytes it is.
+_CUSTODY_ACCOUNT = "9575a853fa0f62ed12334306cd5d1a18f6821ef9036601c99822f17d9bb13c38"
+_CUSTODY_PUBLIC_KEY = "ed25519:B4RodGLvA3a8wyPQydgJwAUtm6ULkfdia17WP9hPYBGs"
+_CUSTODY_TX = "76mYB4gsgj3ogYCgsqzd5P4ESsLRw2rTecasQZ6kcnmh"
+_CUSTODY_DEST = "tsfund52f8405ad4.testnet"
+
+
+def _custody_rpc_record(*, receiver: str = _CUSTODY_DEST, deposit: str = "500000000000000000000000"):
+    return {
+        "final_execution_status": "FINAL",
+        "status": {"SuccessValue": ""},
+        "transaction": {
+            "hash": _CUSTODY_TX,
+            "signer_id": _CUSTODY_ACCOUNT,
+            "receiver_id": receiver,
+            "public_key": _CUSTODY_PUBLIC_KEY,
+            "actions": [{"Transfer": {"deposit": deposit}}],
+        },
+    }
+
+
+def _custody_boundary(*, approved: str = _CUSTODY_DEST, verified: bool = True):
+    from ..near.networks import network_config
+    from ..near.outlayer_execution import OutLayerCustodyBoundary
+
+    authority = AuthorizationAuthority(
+        key=_INVARIANT_KEY, key_id="invariant-custody", ephemeral=False, replay_store=InMemoryReplayStore()
+    )
+    service = GuardService(policy=_custody_policy(approved), authority=authority)
+    provider = _FakeCustodyProvider(
+        account=_CUSTODY_ACCOUNT, public_key=_CUSTODY_PUBLIC_KEY, tx_hash=_CUSTODY_TX
+    )
+    nc = network_config("testnet")
+    boundary = OutLayerCustodyBoundary(
+        service, provider, network=nc.network, rpc=_FakeRpc(verified=verified), sleep=lambda _: None
+    )
+    return boundary, provider
+
+
+def _custody_policy(approved: str):
+    """A policy for the custody invariant: native NEAR on testnet, one recipient.
+
+    Built inline (not imported from the demo policy, which is scoped to the
+    Intents scenarios) so the invariant exercises the exact operation the custody
+    boundary sends.
+    """
+    from .policy import PolicyConfig, ServicePolicy
+
+    return PolicyConfig(
+        policy_id="custody-invariant",
+        name="OutLayer custody invariant policy",
+        version="1",
+        approved_destinations=frozenset({approved}),
+        services={
+            "treasury-agent": ServicePolicy(
+                service_id="treasury-agent",
+                allowed_operations=frozenset({"WITHDRAWAL"}),
+                allowed_chains=frozenset({"near-testnet"}),
+                allowed_assets=frozenset({"NEAR:NATIVE"}),
+                max_amount_per_transaction=Decimal("1000"),
+                max_amount_per_window=Decimal("5000"),
+                approval_threshold=Decimal("10000"),
+            )
+        },
+        per_transaction_limit=Decimal("1000"),
+        window_seconds=3600,
+        max_requests_per_window=30,
+        max_blocked_per_window=5,
+        approval_threshold=Decimal("10000"),
+        min_approvals=1,
+        max_rejected_authorizations=3,
+        authorization_ttl_seconds=90,
+    )
+
+
+def _custody_execution_requires_an_authorization():
+    from ..near.outlayer_execution import CustodyError
+
+    boundary, provider = _custody_boundary(approved="someone-else.testnet")
+    prepared = boundary.prepare(
+        service_id="treasury-agent", destination=_CUSTODY_DEST, amount_human="0.5"
+    )
+    if prepared.authorized:
+        return InvariantResult(
+            "custody_execution_requires_an_authorization",
+            False,
+            "an unapproved destination was authorized",
+        )
+    try:
+        boundary.execute(prepared)
+    except CustodyError:
+        pass
+    if provider.transfers:
+        return InvariantResult(
+            "custody_execution_requires_an_authorization",
+            False,
+            "the provider was reached for an operation that was not authorized",
+        )
+    return InvariantResult(
+        "custody_execution_requires_an_authorization",
+        True,
+        "a non-ALLOW custody decision never reached the provider",
+    )
+
+
+def _custody_provider_success_is_never_verified_without_chain_evidence():
+    boundary, _ = _custody_boundary(verified=False)
+    prepared = boundary.prepare(
+        service_id="treasury-agent", destination=_CUSTODY_DEST, amount_human="0.5"
+    )
+    if not prepared.authorized:
+        return InvariantResult(
+            "custody_provider_success_is_never_verified_without_chain_evidence",
+            False,
+            "the approved operation was not authorized",
+        )
+    execution = boundary.execute(prepared)
+    if not execution.provider_claimed_success:
+        return InvariantResult(
+            "custody_provider_success_is_never_verified_without_chain_evidence",
+            False,
+            "the provider claim was not recorded",
+        )
+    if execution.settlement_verified:
+        return InvariantResult(
+            "custody_provider_success_is_never_verified_without_chain_evidence",
+            False,
+            "a provider success with no chain evidence was reported verified",
+        )
+    return InvariantResult(
+        "custody_provider_success_is_never_verified_without_chain_evidence",
+        True,
+        "a provider success with no chain evidence stays unverified",
+    )
+
+
+def _custody_authorization_is_bound_to_the_sent_operation():
+    from ..near.outlayer_execution import CustodyError
+
+    boundary, provider = _custody_boundary(verified=True)
+    prepared = boundary.prepare(
+        service_id="treasury-agent", destination=_CUSTODY_DEST, amount_human="0.5"
+    )
+    if not prepared.authorized:
+        return InvariantResult(
+            "custody_authorization_is_bound_to_the_sent_operation",
+            False,
+            "the approved operation was not authorized",
+        )
+    # Substitute the recipient after authorization: the binding must refuse.
+    prepared.destination = "attacker.testnet"
+    try:
+        boundary.execute(prepared)
+    except CustodyError:
+        if provider.transfers:
+            return InvariantResult(
+                "custody_authorization_is_bound_to_the_sent_operation",
+                False,
+                "a substituted operation reached the provider",
+            )
+        return InvariantResult(
+            "custody_authorization_is_bound_to_the_sent_operation",
+            True,
+            "a substituted operation is refused before the provider is reached",
+        )
+    return InvariantResult(
+        "custody_authorization_is_bound_to_the_sent_operation",
+        False,
+        "a substituted operation was executed",
+    )
+
+
 INVARIANTS: dict[str, Callable[[], InvariantResult]] = {
     "non_allow_never_authorizes": _non_allow_never_authorizes,
     "refusal_never_reaches_the_executor": _refusal_never_reaches_the_executor,
@@ -3087,6 +3311,15 @@ INVARIANTS: dict[str, Callable[[], InvariantResult]] = {
         _counterparty_intelligence_only_adds_restriction
     ),
     "human_approval_cannot_override_a_block": _human_approval_cannot_override_a_block,
+    "custody_execution_requires_an_authorization": (
+        _custody_execution_requires_an_authorization
+    ),
+    "custody_provider_success_is_never_verified_without_chain_evidence": (
+        _custody_provider_success_is_never_verified_without_chain_evidence
+    ),
+    "custody_authorization_is_bound_to_the_sent_operation": (
+        _custody_authorization_is_bound_to_the_sent_operation
+    ),
 }
 
 #: Human-readable statement of each guarantee, for the console and the docs.
@@ -3138,6 +3371,9 @@ INVARIANT_DESCRIPTIONS: dict[str, str] = {
     "provider_policy_reads_fail_closed_and_verify_identity": "A live provider policy read is refused unless it is authenticated, comes from the pinned provider host and is for the configured agent; a caller can never point the read at its own provider.",
     "counterparty_intelligence_only_adds_restriction": "Counterparty risk intelligence can only ever add restriction: a CLEAR read never softens a control, a REVIEW raises the outcome, and an unreadable signal fails safe.",
     "human_approval_cannot_override_a_block": "A human approval is honoured only for a REQUIRE_APPROVAL decision and only when bound to the exact transaction payload; it can never override a BLOCK, and an approval for a different payload is refused.",
+    "custody_execution_requires_an_authorization": "An OutLayer custody operation reaches the TEE-held signing wallet only when the guard returned ALLOW; a BLOCK, HOLD or REQUIRE_APPROVAL decision never reaches the provider.",
+    "custody_provider_success_is_never_verified_without_chain_evidence": "A custody provider's success status never yields an independently-verified settlement without decisive on-chain evidence from the NEAR RPC.",
+    "custody_authorization_is_bound_to_the_sent_operation": "A custody authorization is bound to the exact operation sent; substituting the recipient, amount, asset, network or service after authorization is refused before the provider is reached.",
 }
 
 

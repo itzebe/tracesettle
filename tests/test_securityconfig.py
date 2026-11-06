@@ -303,3 +303,58 @@ def test_approved_measurement_rejects_a_malformed_entry():
         parse_approved_measurement("mr_config_id")
     with pytest.raises(ValueError):
         parse_approved_measurement("=aabb")
+
+
+# --- OutLayer custody gate --------------------------------------------------
+
+
+def test_outlayer_enabled_without_a_key_is_refused(monkeypatch):
+    """Enabling the custody wallet without a provider key must refuse to start."""
+    _with_config(
+        monkeypatch,
+        OUTLAYER_ENABLED=True,
+        OUTLAYER_API_KEY=None,
+        OUTLAYER_NETWORK="testnet",
+        NEAR_EXECUTION_ENABLED=True,
+    )
+    with pytest.raises(ConfigurationError) as exc:
+        _validate("127.0.0.1")
+    assert "TRACESETTLE_OUTLAYER_API_KEY" in str(exc.value)
+
+
+def test_outlayer_enabled_without_the_execution_boundary_is_refused(monkeypatch):
+    _with_config(
+        monkeypatch,
+        OUTLAYER_ENABLED=True,
+        OUTLAYER_API_KEY="wk_test_000000000000000000000000000000000000",
+        OUTLAYER_NETWORK="testnet",
+        NEAR_EXECUTION_ENABLED=False,
+    )
+    with pytest.raises(ConfigurationError) as exc:
+        _validate("127.0.0.1")
+    assert "TRACESETTLE_NEAR_EXECUTION" in str(exc.value)
+
+
+def test_outlayer_enabled_with_an_unknown_network_is_refused(monkeypatch):
+    _with_config(
+        monkeypatch,
+        OUTLAYER_ENABLED=True,
+        OUTLAYER_API_KEY="wk_test_000000000000000000000000000000000000",
+        OUTLAYER_NETWORK="devnet",
+        NEAR_EXECUTION_ENABLED=True,
+    )
+    with pytest.raises(ConfigurationError) as exc:
+        _validate("127.0.0.1")
+    assert "TRACESETTLE_OUTLAYER_NETWORK" in str(exc.value)
+
+
+def test_outlayer_enabled_with_full_configuration_starts(monkeypatch):
+    _with_config(
+        monkeypatch,
+        OUTLAYER_ENABLED=True,
+        OUTLAYER_API_KEY="wk_test_000000000000000000000000000000000000",
+        OUTLAYER_NETWORK="testnet",
+        NEAR_EXECUTION_ENABLED=True,
+    )
+    profile = _validate("127.0.0.1")
+    assert profile.public_binding is False

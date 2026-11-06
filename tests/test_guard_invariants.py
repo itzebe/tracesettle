@@ -386,3 +386,70 @@ def test_approval_invariant_notices_an_unbound_approval():
     finally:
         ap.ApprovalAuthority.validate = original
 
+
+
+def test_custody_authorization_invariant_notices_a_bypassed_gate():
+    """Mutation check: if ``execute`` ran without checking authorization, a
+    non-ALLOW custody operation would reach the provider and the checker must fail."""
+    from tracesettle.guard import invariants as inv
+    from tracesettle.near import outlayer_execution as ox
+    from tracesettle.near.verify import SettlementState, SettlementVerification
+
+    original = ox.OutLayerCustodyBoundary.execute
+
+    def permissive(self, prepared):  # noqa: ANN001
+        # The mutation: send to the provider regardless of the decision.
+        outcome = self.provider.transfer(to=prepared.destination, amount_yocto=prepared.amount_yocto)
+        return ox.CustodyExecution(
+            provider=outcome,
+            tx_hash=outcome.tx_hash,
+            verification=SettlementVerification(state=SettlementState.INSUFFICIENT_EVIDENCE),
+        )
+
+    ox.OutLayerCustodyBoundary.execute = permissive
+    try:
+        result = inv.INVARIANTS["custody_execution_requires_an_authorization"]()
+        assert result.holds is False
+    finally:
+        ox.OutLayerCustodyBoundary.execute = original
+
+
+def test_custody_verification_invariant_notices_a_provider_trusting_verifier():
+    """Mutation check: if a provider success were taken as verified without chain
+    evidence, the checker must fail."""
+    from tracesettle.guard import invariants as inv
+    from tracesettle.near import outlayer_execution as ox
+    from tracesettle.near.verify import SettlementState, SettlementVerification
+
+    original = ox.verify_custody_transaction
+
+    def trusting(**kwargs):  # noqa: ANN003
+        # The mutation: trust the provider claim, never read the chain.
+        return SettlementVerification(state=SettlementState.VERIFIED, source_status="OK")
+
+    ox.verify_custody_transaction = trusting
+    try:
+        result = inv.INVARIANTS["custody_provider_success_is_never_verified_without_chain_evidence"]()
+        assert result.holds is False
+    finally:
+        ox.verify_custody_transaction = original
+
+
+def test_custody_binding_invariant_notices_an_unbound_authorization():
+    """Mutation check: if the binding were not re-validated before the send, a
+    substituted operation would reach the provider and the checker must fail."""
+    from tracesettle.guard import invariants as inv
+    from tracesettle.near import outlayer_execution as ox
+
+    original = ox.OutLayerCustodyBoundary.verify_binding
+
+    def unbound(self, prepared, *, consume=False):  # noqa: ANN001
+        # The mutation: never recompute or compare the digest.
+        return None
+
+    ox.OutLayerCustodyBoundary.verify_binding = unbound
+    try:
+        result = inv.INVARIANTS["custody_authorization_is_bound_to_the_sent_operation"]()
+        assert result.holds is False
+    finally:
+        ox.OutLayerCustodyBoundary.verify_binding = original

@@ -522,6 +522,35 @@ TEE_ATTESTATION_URL = os.environ.get(
     "https://cloud-api.near.ai/v1/attestation/report",
 )
 
+#: --- OutLayer Agent Custody (TEE-held signing wallet) --------------------
+#: OutLayer holds a wallet's signing key inside an Intel TDX enclave and signs on
+#: request. Enabling it makes TraceSettle able to *send* an authorized operation
+#: to that provider, so it is an explicit operator decision and never a public
+#: bind default. The API key is server-side only: it is read here, sent only as a
+#: bearer header, and never returned, logged, or echoed in an error.
+OUTLAYER_ENABLED = (
+    os.environ.get("TRACESETTLE_OUTLAYER_ENABLED", "").strip().lower()
+    in {"1", "true", "yes", "on"}
+)
+
+#: The OutLayer API key (``wk_...``). Required when OutLayer is enabled; an empty
+#: key with the provider enabled is a hard start-up failure, never a fallback.
+OUTLAYER_API_KEY = os.environ.get("TRACESETTLE_OUTLAYER_API_KEY", "").strip()
+
+#: The OutLayer network. ``testnet`` (the default) or ``mainnet``. The host is the
+#: network selector, so a testnet key can never be used against mainnet.
+OUTLAYER_NETWORK = os.environ.get("TRACESETTLE_OUTLAYER_NETWORK", "testnet").strip() or "testnet"
+
+#: The OutLayer wallet id the operator configured, if any. When set, a wallet the
+#: API key resolves to that does not match it is refused, so a key swap cannot
+#: silently sign for a different wallet.
+OUTLAYER_WALLET_ID = os.environ.get("TRACESETTLE_OUTLAYER_WALLET_ID", "").strip()
+
+#: The per-request timeout, in seconds, for OutLayer calls.
+OUTLAYER_TIMEOUT_SECONDS = float(
+    os.environ.get("TRACESETTLE_OUTLAYER_TIMEOUT_SECONDS", "30") or "30"
+)
+
 #: Whether the TEE attestation route is enabled. Off by default: it makes an
 #: outbound request to the attestation endpoint, so enabling it is an explicit
 #: operator decision rather than something a public bind turns on silently.
