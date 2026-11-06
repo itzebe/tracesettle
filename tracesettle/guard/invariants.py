@@ -3229,6 +3229,65 @@ def _custody_authorization_is_bound_to_the_sent_operation():
     )
 
 
+def _custody_tee_signing_requires_bound_attestation_and_settlement():
+    """``TEE_SIGNING_VERIFIED`` is never reached without bound hardware evidence.
+
+    Two probes: (a) a provider claim plus verified settlement but *no* attestation
+    must not be TEE_SIGNING_VERIFIED; (b) an attestation that verifies but is not
+    bound to this operation must be refused and must not lift the state.
+    """
+    from ..near.custody_attestation import (
+        CustodyEvidenceState,
+        combine_evidence,
+        verify_custody_attestation,
+    )
+
+    name = "custody_tee_signing_requires_bound_attestation_and_settlement"
+
+    # (a) settlement + provider claim, no attestation.
+    boundary, _ = _custody_boundary(verified=True)
+    prepared = boundary.prepare(
+        service_id="treasury-agent", destination=_CUSTODY_DEST, amount_human="0.5"
+    )
+    if not prepared.authorized:
+        return InvariantResult(name, False, "the approved operation was not authorized")
+    execution = boundary.execute(prepared)
+    if execution.evidence_state is CustodyEvidenceState.TEE_SIGNING_VERIFIED:
+        return InvariantResult(
+            name, False, "TEE signing was claimed with no per-operation attestation"
+        )
+    if not execution.settlement_verified:
+        return InvariantResult(name, False, "the settlement verification did not run")
+
+    # (b) a quote that does not commit to this operation must be refused.
+    evidence = verify_custody_attestation(
+        {"quote": "ab" * 2000},
+        custody_digest="0" * 64,
+        wallet_public_key=prepared.wallet_public_key,
+        wallet_account=prepared.wallet_account,
+        network=prepared.network.value,
+    )
+    if evidence.tee_attested:
+        return InvariantResult(
+            name, False, "an unbound attestation was accepted as TEE evidence"
+        )
+    state = combine_evidence(
+        provider_claimed_success=True,
+        custody_bound=True,
+        settlement_verified=True,
+        attestation=evidence,
+    )
+    if state is CustodyEvidenceState.TEE_SIGNING_VERIFIED:
+        return InvariantResult(
+            name, False, "an unbound attestation lifted the state to TEE signing"
+        )
+    return InvariantResult(
+        name,
+        True,
+        "TEE signing is never claimed without an attestation bound to the operation",
+    )
+
+
 INVARIANTS: dict[str, Callable[[], InvariantResult]] = {
     "non_allow_never_authorizes": _non_allow_never_authorizes,
     "refusal_never_reaches_the_executor": _refusal_never_reaches_the_executor,
@@ -3320,6 +3379,9 @@ INVARIANTS: dict[str, Callable[[], InvariantResult]] = {
     "custody_authorization_is_bound_to_the_sent_operation": (
         _custody_authorization_is_bound_to_the_sent_operation
     ),
+    "custody_tee_signing_requires_bound_attestation_and_settlement": (
+        _custody_tee_signing_requires_bound_attestation_and_settlement
+    ),
 }
 
 #: Human-readable statement of each guarantee, for the console and the docs.
@@ -3374,6 +3436,7 @@ INVARIANT_DESCRIPTIONS: dict[str, str] = {
     "custody_execution_requires_an_authorization": "An OutLayer custody operation reaches the TEE-held signing wallet only when the guard returned ALLOW; a BLOCK, HOLD or REQUIRE_APPROVAL decision never reaches the provider.",
     "custody_provider_success_is_never_verified_without_chain_evidence": "A custody provider's success status never yields an independently-verified settlement without decisive on-chain evidence from the NEAR RPC.",
     "custody_authorization_is_bound_to_the_sent_operation": "A custody authorization is bound to the exact operation sent; substituting the recipient, amount, asset, network or service after authorization is refused before the provider is reached.",
+    "custody_tee_signing_requires_bound_attestation_and_settlement": "TEE signing is claimed only when a genuine TDX attestation is cryptographically bound to the exact authorized operation and signing key and independent NEAR RPC settlement verification also holds; a provider success or an unbound quote never reaches TEE_SIGNING_VERIFIED.",
 }
 
 

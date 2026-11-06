@@ -758,3 +758,22 @@ def test_console_near_tab_exposes_real_tee_attestation_verification():
     # The panel states what is not checked, so it cannot over-claim.
     assert "not</strong> checked" in html or "not checked" in html
     assert "not a TEE-integrated execution path" in html
+
+
+def test_console_states_the_custody_evidence_ladder_honestly():
+    """The custody panel must present the evidence ladder and never imply a TEE
+    claim from a provider success."""
+    with running_server() as base:
+        _, body, _ = _request("GET", base + "/console")
+    html = _html(body)
+    assert "OutLayer custody evidence" in html
+    assert "PER_OPERATION_TEE_ATTESTATION_UNAVAILABLE" not in html  # never a fabricated state
+    for state in (
+        "PROVIDER_CLAIMED",
+        "CUSTODY_BOUND",
+        "SETTLEMENT_VERIFIED",
+        "ATTESTATION_VERIFIED",
+        "TEE_SIGNING_VERIFIED",
+    ):
+        assert state in html, state
+    assert "a claim, not proof" in html

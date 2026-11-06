@@ -1198,6 +1198,10 @@ class GuardAPI:
                 "provider_state": execution.provider.state.value,
                 "provider_claimed_success": execution.provider_claimed_success,
                 "settlement_verified": execution.settlement_verified,
+                "evidence_state": execution.evidence_state.value,
+                "tee_attested": bool(
+                    execution.attestation is not None and execution.attestation.tee_attested
+                ),
                 "network": prepared.network.value,
                 "amount_near": str(prepared.amount_human),
                 "destination": prepared.destination,

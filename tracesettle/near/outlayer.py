@@ -211,6 +211,10 @@ class ProviderOutcome:
     detail: str = ""
     #: The provider's own ``request_hash`` (present on ``pending_approval``).
     request_hash: str | None = None
+    #: A per-operation attestation, when the provider supplies one. OutLayer's
+    #: Agent Custody signing API does not, so this is normally ``None`` - and a
+    #: ``None`` attestation never becomes a TEE claim.
+    attestation: dict[str, Any] | None = None
     #: The unmodified provider body, kept for independent investigation.
     evidence: dict[str, Any] = field(default_factory=dict)
 
@@ -316,6 +320,11 @@ class OutLayerCustodyProvider:
                 request_hash=(
                     str(result.data.get("request_hash"))
                     if isinstance(result.data.get("request_hash"), str)
+                    else None
+                ),
+                attestation=(
+                    result.data.get("attestation")
+                    if isinstance(result.data.get("attestation"), dict)
                     else None
                 ),
                 evidence=dict(result.data),

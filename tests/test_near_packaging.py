@@ -311,3 +311,55 @@ finally:
     line = [ln for ln in out.stdout.splitlines() if ln.startswith("RESULT:")][-1]
     results = json.loads(line[len("RESULT:") :])
     assert results == {"/api/guard/near/wallet": 200, "/assets/near-connect.js": 200}, results
+
+
+def test_custody_attestation_module_ships_and_runs_from_a_package_only_copy(tmp_path):
+    """The custody evidence layer must import and bind from the shipped package.
+
+    The real captured TDX fixture lives under ``tracesettle/near/fixtures/`` so a
+    package-only image can verify it; a module that depended on a test-only file
+    would fail here.
+    """
+    root = _package_only_copy(tmp_path)
+    script = (
+        "import sys, json;"
+        f"sys.path.insert(0, {str(root)!r});"
+        "from tracesettle.near import custody_attestation as ca;"
+        "from tracesettle.near import tdx;"
+        "from pathlib import Path;"
+        "import tracesettle.near as near;"
+        "fx = Path(near.__file__).parent / 'fixtures' / 'attestation_nearai_cloud.json';"
+        "q = json.loads(fx.read_text());"
+        "v = tdx.verify_tdx_quote(bytes.fromhex(q['intel_quote']),"
+        " nonce=bytes.fromhex(q['request_nonce']),"
+        " signing_address=bytes.fromhex(q['signing_address']),"
+        " tls_cert_fingerprint=bytes.fromhex(q['tls_cert_fingerprint']),"
+        " event_log=q['event_log']);"
+        "print(json.dumps({'verified': v.verified,"
+        " 'has_combine': hasattr(ca, 'combine_evidence'),"
+        " 'has_verify': hasattr(ca, 'verify_custody_attestation')}))"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, timeout=120
+    )
+    assert out.returncode == 0, out.stderr
+    result = json.loads(out.stdout.strip().splitlines()[-1])
+    assert result["verified"] is True
+    assert result["has_combine"] is True
+    assert result["has_verify"] is True
+
+
+def test_custody_tee_invariant_runs_from_a_package_only_copy(tmp_path):
+    root = _package_only_copy(tmp_path)
+    script = (
+        "import sys, json;"
+        f"sys.path.insert(0, {str(root)!r});"
+        "from tracesettle.guard.invariants import INVARIANTS;"
+        "r = INVARIANTS['custody_tee_signing_requires_bound_attestation_and_settlement']();"
+        "print(json.dumps({'holds': r.holds}))"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, timeout=120
+    )
+    assert out.returncode == 0, out.stderr
+    assert json.loads(out.stdout.strip().splitlines()[-1])["holds"] is True

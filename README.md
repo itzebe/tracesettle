@@ -197,6 +197,28 @@ Where each capability stands:
   `SuccessValue`). The default **simulated executor** never signs or broadcasts
   anything — that is by design, and no Testnet or Mainnet evidence is claimed
   for it.
+- **OutLayer custody execution — independently verified signing, honest TEE claim.**
+  The opt-in custody boundary (`TRACESETTLE_OUTLAYER_ENABLED=1`) sends an
+  authorized operation to an **OutLayer TEE-held signing wallet**, then verifies
+  settlement independently against the NEAR RPC. It reports the evidence state it
+  actually established, on a strict ladder that never promotes a weaker state:
+  `PROVIDER_CLAIMED` < `CUSTODY_BOUND` < `SETTLEMENT_VERIFIED` <
+  `ATTESTATION_VERIFIED` < `TEE_SIGNING_VERIFIED`. A provider `success` is a
+  claim, not proof. **An independent review of the OutLayer Agent Custody OpenAPI
+  (testnet, `0.1.0-alpha.4`, 96 paths) found no per-operation attestation
+  schema** — no measurement, collateral, MRTD/RTMR or PCR fields, and
+  `/wallet/v1/transfer` returns only `request_id`/`status`/`tx_hash`/`result`. A
+  TEE claim therefore cannot be cryptographically established for a custody
+  transfer, so the state is reported as
+  `PER_OPERATION_TEE_ATTESTATION_UNAVAILABLE`, never as `TEE_SIGNING_VERIFIED`.
+  If a provider ever supplies a quote, `tracesettle/near/custody_attestation.py`
+  verifies it for real (pinned Intel SGX root, `report_data` bound to *this*
+  operation's digest and wallet key) before it is accepted. The guarantee is
+  structural: `custody_tee_signing_requires_bound_attestation_and_settlement`
+  holds, and is mutation-tested against both a trusting evidence ladder and an
+  accepting verifier. Live provider-*policy* integration for custody remains
+  **unverified** — no OutLayer API key is configured, so the routes report
+  themselves disabled and refuse.
 - **Wallet-mediated flow:** Testnet verified — the authorize → prepare → verify
   path was exercised against real NEAR testnet: a funded `*.testnet` account
   signed the exact wallet request the server returned, the harness broadcast it,
@@ -765,7 +787,13 @@ mutation-tested: `near_policy_must_be_in_force`,
 in total). Two further guarantees cover the newer controls and are mutation-tested
 too: `counterparty_intelligence_only_adds_restriction` (a counterparty read can
 never weaken a decision) and `human_approval_cannot_override_a_block` (an approval
-can never lift a `BLOCK` or a `HOLD`).
+can never lift a `BLOCK` or a `HOLD`). Four more cover the OutLayer custody
+boundary: `custody_execution_requires_an_authorization`,
+`custody_provider_success_is_never_verified_without_chain_evidence`,
+`custody_authorization_is_bound_to_the_sent_operation`, and
+`custody_tee_signing_requires_bound_attestation_and_settlement` (a TEE claim
+requires an attestation bound to the exact operation *and* independent settlement
+verification).
 
 ## Try it: do X → see Y
 
@@ -789,12 +817,12 @@ a bare interpreter.
 **1. Run the tests.**
 
 ```sh
-python -m pytest tests/ --collect-only -q   # 1485 tests collected
-python -m pytest tests/ -q                  # 1458 passed, 27 skipped
+python -m pytest tests/ --collect-only -q   # 1581 tests collected
+python -m pytest tests/ -q                  # 1554 passed, 27 skipped
 ```
-→ `1458 passed, 27 skipped`. The skips are the PostgreSQL integration
+→ `1554 passed, 27 skipped`. The skips are the PostgreSQL integration
 tests; set `TRACESETTLE_TEST_PG_DSN` to a real server to run them
-(**1482 passed, 3 skipped** — the remaining 3 are opt-in *live-infrastructure*
+(**1578 passed, 3 skipped** — the remaining 3 are opt-in *live-infrastructure*
 tests that need real provider credentials, a testnet key, or a TDX enclave
 harness, none of which a zero-budget local run has).
 
@@ -866,7 +894,7 @@ curl -sS -X POST http://127.0.0.1:8080/api/guard/sign \
 curl -sS http://127.0.0.1:8080/api/guard/invariants \
   | python3 -c 'import sys,json;d=json.load(sys.stdin);print("all hold:",d["all_hold"]);[print(" ",i["name"]) for i in d["invariants"]]'
 ```
-→ `all hold: True` and the forty-seven invariant names, including the sixteen NEAR
+→ `all hold: True` and the fifty-one invariant names, including the sixteen NEAR
 ones (`near_policy_must_be_in_force`, `near_native_scope_gap_is_always_stated`,
 `near_function_call_key_cannot_transfer_near`,
 `near_unrecognised_access_key_never_allows`,
@@ -1244,7 +1272,7 @@ transaction request ──▶ │ guard/rules.py      7 controls, all run  │
                         │                     validate, then execute │
                         │ guard/audit.py      hash-chained records  │
                         │ guard/monitor.py    counters + incidents  │
-                        │ guard/invariants.py 47 checked guarantees │
+                        │ guard/invariants.py 51 checked guarantees │
                         └────────────────────┬─────────────────────┘
                                              │ ALLOW + authorization
                                              ▼
@@ -1317,7 +1345,7 @@ identical decisions.
 | `tracesettle/guard/safeguards.py` | Durable security safeguards: the learning loop's store (SQLite). |
 | `tracesettle/guard/learning.py` | The learning loop: derive a lesson, apply safeguards (only ever tightening). |
 | `tracesettle/guard/state_pg.py` | Optional PostgreSQL backend: shared nonces, counters, revocations, idempotency. |
-| `tracesettle/guard/invariants.py` | The forty-seven structural guarantees, checked by execution. |
+| `tracesettle/guard/invariants.py` | The fifty-one structural guarantees, checked by execution. |
 | `tracesettle/guard/api.py` | Guard HTTP routing and JSON serialization. |
 | `tracesettle/guard/console.py` | The security operations console page. |
 | `docs/TRANSACTION_SECURITY.md` | The security layer in full, including what it does not do. |
@@ -1329,7 +1357,7 @@ identical decisions.
 | `tracesettle/near/agent_demo.py` | The one implementation of the offline end-to-end demonstration (policy, harness, `run_agent_payment_demo`); used by the CLI, the `/api/guard/near/agent-demo` endpoint, and the console panel. |
 | `demo/replay_opener.py` | Offline transport that replays `evidence/raw/` through the real code. |
 | `tracesettle/static/near-connect.js` | Vendored `@hot-labs/near-connect` (MIT) wallet connector, served same-origin at `/assets/near-connect.js`. |
-| `tests/` | 1485 tests (27 PostgreSQL tests skip without `TRACESETTLE_TEST_PG_DSN`; 3 further tests are opt-in live tests that skip without a live testnet key, live Agent API credentials, or `TRACESETTLE_ENCLAVE_HARNESS=1`). `evidence/raw/` fixtures are real captures; `tests/fixtures/synthetic/` are clearly labelled synthetic. |
+| `tests/` | 1581 tests (27 PostgreSQL tests skip without `TRACESETTLE_TEST_PG_DSN`; 3 further tests are opt-in live tests that skip without a live testnet key, live Agent API credentials, or `TRACESETTLE_ENCLAVE_HARNESS=1`). `evidence/raw/` fixtures are real captures; `tests/fixtures/synthetic/` are clearly labelled synthetic. |
 | `PHASE1_FEASIBILITY.md` | Phase 1 feasibility and API verification. |
 | `submission/` | Hackathon artifacts: API payload shape, technical summary, demo post draft, publication checklist. |
 | `docs/official/` | NEAR documentation captured during Phase 1. |
@@ -1422,7 +1450,7 @@ variable and all documented in `docs/TRANSACTION_SECURITY.md`:
   replay-nonce store all have explicit caps, so a flood cannot exhaust memory.
   When durable state is configured, spent nonces and the limit counters live in
   SQLite instead, so they survive a restart (see **Durable state** below).
-- **Structural invariants, checked by execution.** Forty-seven guarantees at
+- **Structural invariants, checked by execution.** Fifty-one guarantees at
   `GET /api/guard/invariants`, each mutation-tested so a checker that cannot fail
   is treated as a defect.
 - **Honest audit claim.** In-place modification of an audit record is detectable;
@@ -1647,7 +1675,7 @@ immutable commit SHA (not a moving tag), and cancels superseded runs.
 ## Tests
 
 ```sh
-python3 -m pytest tests/ -q          # 1458 passed, 27 skipped (1482 passed, 3 skipped with PostgreSQL)
+python3 -m pytest tests/ -q          # 1554 passed, 27 skipped (1578 passed, 3 skipped with PostgreSQL)
 python3 -m pytest tests/test_guard_authorization.py -q
 python3 -m pytest tests/test_guard_invariants.py -q
 python3 -m pytest tests/test_guard_end_to_end.py -q

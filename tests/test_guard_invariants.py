@@ -453,3 +453,55 @@ def test_custody_binding_invariant_notices_an_unbound_authorization():
         assert result.holds is False
     finally:
         ox.OutLayerCustodyBoundary.verify_binding = original
+
+
+def test_custody_tee_signing_invariant_notices_a_trusting_evidence_combiner():
+    """Mutation check: if the evidence ladder promoted to TEE_SIGNING_VERIFIED
+    without a bound attestation, the checker must fail.
+
+    The mutation makes ``combine_evidence`` claim TEE signing whenever settlement
+    verified - the exact overstatement the invariant exists to catch.
+    """
+    from tracesettle.guard import invariants as inv
+    from tracesettle.near import custody_attestation as catt
+
+    original = catt.combine_evidence
+
+    def trusting(**kwargs):  # noqa: ANN003
+        # The mutation: settlement alone is enough for a TEE claim.
+        if kwargs.get("settlement_verified"):
+            return catt.CustodyEvidenceState.TEE_SIGNING_VERIFIED
+        return original(**kwargs)
+
+    catt.combine_evidence = trusting
+    try:
+        result = inv.INVARIANTS["custody_tee_signing_requires_bound_attestation_and_settlement"]()
+        assert result.holds is False
+    finally:
+        catt.combine_evidence = original
+
+
+def test_custody_tee_signing_invariant_notices_an_accepting_attestation_verifier():
+    """Mutation check: if an unbound attestation were accepted, the checker must fail."""
+    from tracesettle.guard import invariants as inv
+    from tracesettle.near import custody_attestation as catt
+
+    original = catt.verify_custody_attestation
+
+    def accepting(*args, **kwargs):  # noqa: ANN002, ANN003
+        # The mutation: accept any attestation as fully bound and verified.
+        return catt.CustodyAttestationEvidence(
+            state=catt.CustodyEvidenceState.ATTESTATION_VERIFIED,
+            detail="",
+            quote_present=True,
+            quote_verified=True,
+            operation_bound=True,
+            signing_key_bound=True,
+        )
+
+    catt.verify_custody_attestation = accepting
+    try:
+        result = inv.INVARIANTS["custody_tee_signing_requires_bound_attestation_and_settlement"]()
+        assert result.holds is False
+    finally:
+        catt.verify_custody_attestation = original

@@ -50,6 +50,12 @@ from ..guard.model import (
 from ..guard.service import GuardService
 from ..model import SourceStatus
 from .networks import NearNetwork
+from .custody_attestation import (
+    CustodyAttestationEvidence,
+    CustodyEvidenceState,
+    combine_evidence,
+    verify_custody_attestation,
+)
 from .outlayer import (
     ProviderOutcome,
     OutLayerCustodyProvider,
@@ -164,6 +170,8 @@ class CustodyExecution:
     transaction_digest: str = ""
     settlement_verified: bool = False
     provider_claimed_success: bool = False
+    attestation: CustodyAttestationEvidence | None = None
+    evidence_state: CustodyEvidenceState = CustodyEvidenceState.INSUFFICIENT_EVIDENCE
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -173,6 +181,8 @@ class CustodyExecution:
             "transaction_digest": self.transaction_digest,
             "provider_claimed_success": self.provider_claimed_success,
             "settlement_verified": self.settlement_verified,
+            "evidence_state": self.evidence_state.value,
+            "attestation": self.attestation.to_dict() if self.attestation is not None else None,
             "verification": self.verification.to_dict(),
         }
 
@@ -339,6 +349,7 @@ class OutLayerCustodyBoundary:
         poll_delay: float = 1.5,
         sleep: Any | None = None,
         identity: Any | None = None,
+        approved_measurements: Any | None = None,
     ) -> None:
         self.guard = guard_service
         self.provider = provider
@@ -348,6 +359,10 @@ class OutLayerCustodyBoundary:
         self.poll_delay = poll_delay
         self._sleep = sleep if sleep is not None else time.sleep
         self._identity = identity
+        #: The operator-approved TDX measurement set. ``None`` means "not
+        #: configured": approval is then recorded as *not checked*, never as
+        #: approved.
+        self._approved_measurements = approved_measurements
 
     # -- identity -----------------------------------------------------------
 
@@ -372,6 +387,13 @@ class OutLayerCustodyBoundary:
             "wallet_id": self.provider.config.wallet_id or None,
             "mode": "outlayer-custody",
             "signing": "TEE (OutLayer Agent Custody)",
+            "per_operation_attestation": "unavailable",
+            "attestation_note": (
+                "The OutLayer Agent Custody signing API exposes no per-operation TDX quote, "
+                "so TEE signing cannot be cryptographically established for a custody "
+                "transfer. Settlement is verified independently through the NEAR RPC."
+            ),
+            "evidence_states": [s.value for s in CustodyEvidenceState],
             "note": (
                 "Operations are authorized by TraceSettle and then signed by an "
                 "OutLayer TEE-held wallet key. Settlement is verified independently "
@@ -555,14 +577,36 @@ class OutLayerCustodyBoundary:
                 note="no NEAR RPC is configured, so settlement could not be verified",
             )
 
+        settlement_verified = verification.state is SettlementState.VERIFIED
+        # Per-operation TEE evidence. The OutLayer Agent Custody signing API
+        # supplies none, so this normally resolves to
+        # PER_OPERATION_TEE_ATTESTATION_UNAVAILABLE; if an attestation *is*
+        # present it is verified for real and bound to this exact operation.
+        attestation = verify_custody_attestation(
+            outcome.attestation,
+            custody_digest=prepared.transaction_digest,
+            wallet_public_key=prepared.wallet_public_key,
+            wallet_account=prepared.wallet_account,
+            network=prepared.network.value,
+            approved_measurements=self._approved_measurements,
+        )
+        evidence_state = combine_evidence(
+            provider_claimed_success=outcome.claimed_success,
+            custody_bound=True,  # verify_binding() above proved the operation matches
+            settlement_verified=settlement_verified,
+            attestation=attestation,
+        )
+
         return CustodyExecution(
             provider=outcome,
             tx_hash=tx_hash,
             verification=verification,
             authorization_id=prepared.authorization_id,
             transaction_digest=prepared.transaction_digest,
-            settlement_verified=verification.state is SettlementState.VERIFIED,
+            settlement_verified=settlement_verified,
             provider_claimed_success=outcome.claimed_success,
+            attestation=attestation,
+            evidence_state=evidence_state,
         )
 
     def _poll_to_terminal(self, outcome: ProviderOutcome) -> ProviderOutcome:

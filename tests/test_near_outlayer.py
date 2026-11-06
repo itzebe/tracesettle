@@ -416,3 +416,65 @@ def _verified_result(*, receiver: str = DEST, deposit: str = str(5 * 10**23), pu
             "actions": [{"Transfer": {"deposit": deposit}}],
         },
     }
+
+
+# --- boundary: per-operation TEE evidence state -----------------------------
+
+
+def test_custody_evidence_is_unavailable_not_tee_signed_without_attestation():
+    """Provider success + verified settlement is SETTLEMENT_VERIFIED, never TEE.
+
+    The OutLayer Agent Custody signing API supplies no per-operation attestation,
+    so the strongest honest state is SETTLEMENT_VERIFIED, and the TEE evidence is
+    explicitly PER_OPERATION_TEE_ATTESTATION_UNAVAILABLE.
+    """
+    from tracesettle.near.custody_attestation import CustodyEvidenceState
+
+    opener = _address_route(FakeOpener())
+    opener.json("POST", "/wallet/v1/transfer", {"request_id": "r1", "status": "success", "tx_hash": TX_HASH})
+    nc = network_config("testnet")
+    rpc = FakeNearRpc(nc)
+    rpc.tx_status_result = _verified_result()
+    boundary = _boundary(opener, rpc=rpc)
+    prepared = boundary.prepare(service_id="treasury-agent", destination=DEST, amount_human=Decimal("0.5"))
+    execution = boundary.execute(prepared)
+    assert execution.settlement_verified is True
+    assert execution.evidence_state is CustodyEvidenceState.SETTLEMENT_VERIFIED
+    assert execution.evidence_state is not CustodyEvidenceState.TEE_SIGNING_VERIFIED
+    assert execution.attestation is not None
+    assert execution.attestation.state is CustodyEvidenceState.PER_OPERATION_TEE_ATTESTATION_UNAVAILABLE
+    assert execution.attestation.tee_attested is False
+
+
+def test_provider_success_without_settlement_is_only_provider_claimed():
+    from tracesettle.near.custody_attestation import CustodyEvidenceState
+
+    opener = _address_route(FakeOpener())
+    opener.json("POST", "/wallet/v1/transfer", {"request_id": "r1", "status": "success", "tx_hash": TX_HASH})
+    nc = network_config("testnet")
+    rpc = FakeNearRpc(nc)
+    rpc.tx_status_status = SourceStatus.TIMEOUT
+    boundary = _boundary(opener, rpc=rpc)
+    prepared = boundary.prepare(service_id="treasury-agent", destination=DEST, amount_human=Decimal("0.5"))
+    execution = boundary.execute(prepared)
+    assert execution.provider_claimed_success is True
+    assert execution.settlement_verified is False
+    # The authorization binding did hold (verify_binding ran), so the honest
+    # state is CUSTODY_BOUND: better than a bare provider claim, far short of
+    # settlement or TEE signing.
+    assert execution.evidence_state is CustodyEvidenceState.CUSTODY_BOUND
+
+
+def test_custody_execution_serialises_the_evidence_state_and_attestation():
+    opener = _address_route(FakeOpener())
+    opener.json("POST", "/wallet/v1/transfer", {"request_id": "r1", "status": "success", "tx_hash": TX_HASH})
+    nc = network_config("testnet")
+    rpc = FakeNearRpc(nc)
+    rpc.tx_status_result = _verified_result()
+    boundary = _boundary(opener, rpc=rpc)
+    prepared = boundary.prepare(service_id="treasury-agent", destination=DEST, amount_human=Decimal("0.5"))
+    execution = boundary.execute(prepared)
+    payload = execution.to_dict()
+    assert payload["evidence_state"] == "SETTLEMENT_VERIFIED"
+    assert payload["attestation"]["state"] == "PER_OPERATION_TEE_ATTESTATION_UNAVAILABLE"
+    assert payload["provider_claimed_success"] is True

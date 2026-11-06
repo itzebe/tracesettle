@@ -360,3 +360,35 @@ endpoint via `TRACESETTLE_ENCLAVE_SIGN_URL` and a pinned measurement via
 `TRACESETTLE_ENCLAVE_APPROVED_MEASUREMENT` and the same boundary provisions a key
 against a verified, measurement-pinned, transaction-bound attestation and signs.
 Until then it refuses — it never substitutes software signing for TEE signing.
+
+### OutLayer custody — signing reachable, per-operation attestation unavailable
+
+`tracesettle/near/outlayer.py` and `outlayer_execution.py` add an opt-in custody
+boundary (`TRACESETTLE_OUTLAYER_ENABLED=1`) that sends an authorized operation to
+an OutLayer TEE-held signing wallet and then verifies settlement independently
+against the NEAR RPC. The boundary is deliberately evidence-honest: it reports the
+state it actually established on a strict ladder, and a provider `success` is
+never promoted past `SETTLEMENT_VERIFIED`.
+
+The limit was found by reading the provider's own published OpenAPI, not by
+assuming. The OutLayer Agent Custody OpenAPI (testnet, version `0.1.0-alpha.4`,
+96 paths) contains **no per-operation attestation schema** — no measurement,
+collateral, MRTD, RTMR or PCR fields — and `POST /wallet/v1/transfer` returns only
+`request_id`, `status`, `tx_hash` and `result`. Attestation-shaped paths exist only
+in the separate compute/inbox ("Agent Connect") surface, which does not sign a
+custody transfer. A per-operation TEE claim therefore cannot be cryptographically
+established here, so the boundary reports
+`PER_OPERATION_TEE_ATTESTATION_UNAVAILABLE`, never `TEE_SIGNING_VERIFIED`.
+
+`tracesettle/near/custody_attestation.py` is the evidence layer that makes the
+claim honest *and* forward-compatible. If a provider ever returns an `attestation`
+object, it is verified for real: the quote's signature chain is checked against the
+pinned Intel SGX Root CA (reusing `tracesettle/near/tdx.py`), and its `report_data`
+must commit to `sha256(wallet_public_key) || operation_commitment` — a digest over
+the exact custody digest, wallet key, account and network of *this* operation. A
+quote for any other key or operation, an unapproved measurement, or an unverifiable
+quote resolves to `DISPUTED`, never to an accepted state. The guarantee is
+structural (`custody_tee_signing_requires_bound_attestation_and_settlement`) and
+mutation-tested against both a trusting evidence ladder and an accepting verifier.
+No new provider endpoint is invented and no key is configured, so the routes report
+themselves disabled and refuse by default.
