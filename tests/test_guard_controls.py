@@ -68,6 +68,40 @@ def test_parse_amount_rejects_absurd_precision():
         parse_amount("0." + "1" * 19)
 
 
+@pytest.mark.parametrize("text", ["1e1000000000", "1e100000", "1e41", "9" * 50 + "e40"])
+def test_parse_amount_rejects_an_absurd_magnitude(text):
+    """A huge positive exponent must be refused at the parse boundary.
+
+    ``1e1000000000`` is a finite Decimal with few significant digits, so a
+    precision-only check lets it through; adding it later overflows the Decimal
+    context and raises ``decimal.Overflow`` inside the control evaluation, which
+    an unhandled request path turns into a 500. The magnitude is bounded here so
+    every parsed amount is safe to do arithmetic with.
+    """
+    with pytest.raises(AmountError):
+        parse_amount(text)
+
+
+def test_a_huge_amount_is_refused_by_the_api_not_a_500():
+    """The same bound holds end to end: a 400, never an unhandled overflow."""
+    service = make_service()
+    payload = {
+        "request_id": "req-huge",
+        "service_id": "treasury-agent",
+        "operation": "WITHDRAWAL",
+        "chain": "eth",
+        "asset": "USDC",
+        "amount": "1e1000000000",
+        "destination": APPROVED_DESTINATION,
+        "amount_raw": "1e1000000000",
+    }
+    from tracesettle.guard.api import GuardAPI
+
+    response = GuardAPI(service).dispatch("POST", "/api/guard/evaluate", {}, payload)
+    assert response.status == 400
+    assert "amount" in response.payload.get("error", "")
+
+
 def test_canonical_amount_is_stable_across_representations():
     assert canonical_amount(Decimal("100.50")) == "100.5"
     assert canonical_amount(Decimal("100.500")) == "100.5"

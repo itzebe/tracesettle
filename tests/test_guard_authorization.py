@@ -155,6 +155,22 @@ def test_malformed_authorization_is_refused():
     assert authority.validate({"version": "x"}, expected={}).state is AuthState.MALFORMED
 
 
+@pytest.mark.parametrize("token", ["a-string-token", 12345, True, ["v"], object()])
+def test_a_non_token_authorization_is_refused_not_raised(token):
+    """A caller may present any JSON value as ``authorization``.
+
+    A bare string, int, bool, list or arbitrary object is not an authorization,
+    so validating it must return a refusal. It must never raise: an unhandled
+    exception on the sign path is a 500 and, worse, an availability risk on the
+    enforcement boundary. Only a token object or a token-shaped dict may reach
+    the field checks.
+    """
+    authority = make_authority()
+    verification = authority.validate(token, expected={})
+    assert verification.state is AuthState.MALFORMED
+    assert "expected a token object" in verification.detail
+
+
 def test_bad_signature_is_refused():
     authority = make_authority()
     request = make_request()

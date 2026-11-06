@@ -607,3 +607,54 @@ def test_public_demo_invariant_notices_a_broadcasting_demonstration():
         assert result.holds is False
     finally:
         demo_module.run_agent_payment_demo = original
+
+
+def test_hostile_input_invariant_notices_an_amount_that_overflows(monkeypatch):
+    """If an absurd amount raised instead of being refused, the invariant must fail.
+
+    The mutation restores the pre-fix behaviour: a magnitude bound that lets a
+    huge exponent through to ``Decimal`` comparison, which raises ``OverflowError``
+    rather than ``AmountError``.
+    """
+    from tracesettle.guard import invariants as inv
+    from tracesettle.guard import model as model_module
+
+    def leaky_parse_amount(raw):
+        value = model_module.Decimal(str(raw).strip())
+        if not value.is_finite():
+            raise model_module.AmountError("amount must be finite")
+        if value < 0:
+            raise model_module.AmountError("amount must not be negative")
+        # No magnitude bound: the pre-fix path.
+        return value
+
+    monkeypatch.setattr(model_module, "parse_amount", leaky_parse_amount)
+    try:
+        result = inv.INVARIANTS["hostile_input_never_crashes_the_guard"]()
+        assert result.holds is False
+        assert "raised" in result.detail or "accepted" in result.detail
+    finally:
+        monkeypatch.undo()
+
+
+def test_hostile_input_invariant_notices_a_token_that_raises(monkeypatch):
+    """If a non-token authorization raised instead of being refused, it must fail."""
+    from tracesettle.guard import invariants as inv
+    from tracesettle.guard import authorization as auth_module
+
+    original = auth_module.AuthorizationAuthority.validate
+
+    def leaky_validate(self, token, *, expected, consume=True, expected_service_id=None):
+        if token is None:
+            return original(self, token, expected=expected, consume=consume, expected_service_id=expected_service_id)
+        if not isinstance(token, (auth_module.Authorization, dict)):
+            # The mutation: dereference the token without the shape guard.
+            return original(self, {"version": token.version}, expected=expected)
+        return original(self, token, expected=expected, consume=consume, expected_service_id=expected_service_id)
+
+    monkeypatch.setattr(auth_module.AuthorizationAuthority, "validate", leaky_validate)
+    try:
+        result = inv.INVARIANTS["hostile_input_never_crashes_the_guard"]()
+        assert result.holds is False
+    finally:
+        monkeypatch.undo()

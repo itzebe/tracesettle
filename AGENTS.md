@@ -2121,3 +2121,56 @@ untouched; runtime stays standard-library only.
   and reports the custody boundary disabled by default.
 - **Not done, requires explicit human confirmation:** no mainnet transaction, no
   key material configured, no paid infrastructure.
+
+## Adversarial input-hardening sweep (2026-11-06, branch `fix/adversarial-hardening`)
+
+Final-mission adversarial pass over the guard's public boundary. Three latent
+crash defects were found and fixed, each mutation-checked, and a new structural
+invariant now guards the whole class. No authorization rule was weakened; the
+settlement engine is untouched; runtime stays standard-library only.
+
+- **Defect 1 — `outlayer_execution._implicit_account` could raise `OverflowError`.**
+  The hand-rolled base58 decoder did ``n.to_bytes(32, "big")`` on a value that
+  decoded to more than 32 bytes (or used an alphabet index on an invalid
+  character), raising `OverflowError`/`ValueError`. The caller caught only
+  `(CustodyError, ValueError)`, so a malformed on-chain public key aborted the
+  custody settlement verification instead of refusing it. It now delegates to the
+  shared, validating `tracesettle.base58.b58decode` and requires exactly 32 bytes.
+  Tests: `test_a_malformed_signing_key_is_disputed_not_raised` (4 cases) and
+  `test_the_implicit_account_decoder_rejects_a_key_that_is_not_32_bytes`.
+- **Defect 2 — a non-token `authorization` raised `AttributeError` (HTTP 500).**
+  `AuthorizationAuthority.validate` dereferenced `token.version` before checking
+  the type, so a bare string, int, list or bool presented to `/api/guard/sign`
+  produced an unhandled exception rather than a refusal. A type guard now returns
+  `AuthState.MALFORMED` for any non-token, non-dict value. Tests:
+  `test_a_non_token_authorization_is_refused_not_raised` (parametrized) and
+  `test_sign_refuses_a_non_token_authorization_without_raising`.
+- **Defect 3 — an absurd positive-exponent amount raised `decimal.Overflow`.**
+  ``1e1000000000`` parses to a finite `Decimal` that passes the digits/scale
+  checks, then overflows the decimal context during control arithmetic, turning a
+  bad request into a 500. `parse_amount` now bounds the magnitude
+  (`MAX_AMOUNT_VALUE = 10**40`), so ``1e41`` and above are refused with
+  `AmountError` → HTTP 400. Tests: `test_parse_amount_rejects_an_absurd_magnitude`
+  and `test_a_huge_amount_is_refused_by_the_api_not_a_500`.
+- **New invariant (54 total): `hostile_input_never_crashes_the_guard`.** Exercises
+  the real authority and service with a non-token authorization, an absurd amount
+  exponent, and non-string destinations, and requires a typed refusal or a
+  non-ALLOW decision for each — never an exception. Mutation-tested two ways
+  (`test_hostile_input_invariant_notices_an_amount_that_overflows`,
+  `test_hostile_input_invariant_notices_a_token_that_raises`); reverting the
+  amount bound or the token guard makes it fail with the real defect message.
+- **Sweep coverage.** All POST routes and every transaction field were fuzzed with
+  hostile shapes (`None`, ints, bools, lists, dicts, 5 KB strings, NUL bytes,
+  `nan`, `inf`, `1e308`): zero uncaught raises after the fixes. `verify_intent`
+  was fuzzed with malformed chain records: zero raises. Service-identity binding,
+  the public-demo allowlist, and the durable-state fail-closed paths were
+  re-checked and hold.
+- **Gates:** full suite **1657 passed, 7 skipped** with PostgreSQL 16; pyflakes
+  clean; compileall OK; offline demo byte-identical (`4864f13c…`); near demo
+  byte-identical (`fc2949ef…`); agent demo byte-identical (`d23f8b52…`); 54/54
+  invariants hold. README architecture count updated (53 → 54).
+- **Product truth (Mission 21) is already shipped on `master`:** the landing page
+  states the two-sided proposition (block before signing, verify the settlement
+  afterward), `/demo` runs the six-scene narrative, and the keyless public
+  demonstration at `/api/guard/near/agent-demo` proves the block with a zero
+  signer-call count. Verified live on production (`tracesettle-navy.vercel.app`).

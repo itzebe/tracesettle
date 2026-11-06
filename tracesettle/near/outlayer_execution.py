@@ -86,16 +86,20 @@ class CustodyError(ValueError):
 
 
 def _implicit_account(public_key: str) -> str:
-    """The NEAR implicit account id for an ``ed25519:<base58>`` public key."""
-    if not public_key.startswith("ed25519:"):
+    """The NEAR implicit account id for an ``ed25519:<base58>`` public key.
+
+    Uses the shared :func:`tracesettle.base58.b58decode`, which validates the
+    alphabet and returns ``None`` on malformed input, and requires exactly 32
+    bytes. A key that is not 32 bytes cannot be an ed25519 key, so it is refused
+    with :class:`CustodyError` rather than decoded into a bogus account.
+    """
+    from ..base58 import b58decode
+
+    if not isinstance(public_key, str) or not public_key.startswith("ed25519:"):
         raise CustodyError("the wallet public key is not an ed25519 key")
-    b58 = public_key.split(":", 1)[1]
-    # base58-decode without a dependency
-    alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
-    n = 0
-    for ch in b58:
-        n = n * 58 + alphabet.index(ch)
-    raw = n.to_bytes(32, "big")
+    raw = b58decode(public_key.split(":", 1)[1])
+    if raw is None or len(raw) != 32:
+        raise CustodyError("the wallet public key is not a valid 32-byte ed25519 key")
     return raw.hex()
 
 

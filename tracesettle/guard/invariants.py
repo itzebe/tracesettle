@@ -3486,6 +3486,90 @@ def _public_demo_never_exposes_a_state_changing_route() -> InvariantResult:
     )
 
 
+def _hostile_input_never_crashes_the_guard() -> InvariantResult:
+    """A malformed request is always a decision or a typed refusal, never a crash.
+
+    Every value on a transaction request is caller-controlled, so the guard's
+    boundary must be *total* over hostile input. An unhandled exception here is
+    two failures at once: an availability risk (a 500 a caller can trigger on
+    demand) and a classification failure (a malformed token that raised could
+    have been mistaken for a token that merely failed a check).
+
+    This exercises the real service with hostile shapes — a token that is not a
+    token, an amount with an absurd exponent, a destination that is not a string
+    — and asserts each returns a decision, never an exception.
+    """
+    service = _fresh()[0]
+
+    authority = _authority_for_check()
+
+    # 1. A token that is not an Authorization object must be a refusal.
+    for bogus in ("not-a-token", 12345, True, ["x"], {"k": "v"}):
+        try:
+            verification = authority.validate(bogus, expected={})
+        except Exception as exc:  # noqa: BLE001 - a raise here is the defect
+            return InvariantResult(
+                "hostile_input_never_crashes_the_guard",
+                False,
+                f"a {type(bogus).__name__} token raised {type(exc).__name__} instead of refusing",
+            )
+        if verification.state not in (AuthState.MALFORMED, AuthState.MISSING):
+            return InvariantResult(
+                "hostile_input_never_crashes_the_guard",
+                False,
+                f"a {type(bogus).__name__} token produced {verification.state}, not a refusal",
+            )
+
+    # 2. Absurd amounts must be refused at parse time, never raise OverflowError.
+    from .model import AmountError, parse_amount
+
+    for hostile in ("1e1000000000", "1e100000", "1e41", "9" * 41):
+        try:
+            parse_amount(hostile)
+        except AmountError:
+            continue
+        except Exception as exc:  # noqa: BLE001 - any other exception is the defect
+            return InvariantResult(
+                "hostile_input_never_crashes_the_guard",
+                False,
+                f"amount {hostile!r} raised {type(exc).__name__}, not AmountError",
+            )
+        return InvariantResult(
+            "hostile_input_never_crashes_the_guard",
+            False,
+            f"amount {hostile!r} was accepted, not refused",
+        )
+
+    # 3. A non-string destination must be refused as a validation error, never
+    #    crash the evaluation. The API surfaces this as a 400.
+    from .service import RequestValidationError
+
+    for hostile in (None, 12345, ["a"], {"a": 1}, ""):
+        payload = _payload(destination=hostile)
+        try:
+            decision = service.evaluate_payload(payload)
+        except RequestValidationError:
+            continue
+        except Exception as exc:  # noqa: BLE001 - any other exception is the defect
+            return InvariantResult(
+                "hostile_input_never_crashes_the_guard",
+                False,
+                f"a {type(hostile).__name__} destination raised {type(exc).__name__}",
+            )
+        if decision.decision == Decision.ALLOW:
+            return InvariantResult(
+                "hostile_input_never_crashes_the_guard",
+                False,
+                f"a {type(hostile).__name__} destination was allowed",
+            )
+
+    return InvariantResult(
+        "hostile_input_never_crashes_the_guard",
+        True,
+        "malformed tokens, absurd amounts and non-string destinations each yield a typed refusal or a non-ALLOW decision, never an exception",
+    )
+
+
 INVARIANTS: dict[str, Callable[[], InvariantResult]] = {
     "non_allow_never_authorizes": _non_allow_never_authorizes,
     "refusal_never_reaches_the_executor": _refusal_never_reaches_the_executor,
@@ -3586,6 +3670,7 @@ INVARIANTS: dict[str, Callable[[], InvariantResult]] = {
     "public_demo_never_exposes_a_state_changing_route": (
         _public_demo_never_exposes_a_state_changing_route
     ),
+    "hostile_input_never_crashes_the_guard": _hostile_input_never_crashes_the_guard,
 }
 
 #: Human-readable statement of each guarantee, for the console and the docs.
@@ -3643,6 +3728,7 @@ INVARIANT_DESCRIPTIONS: dict[str, str] = {
     "custody_tee_signing_requires_bound_attestation_and_settlement": "TEE signing is claimed only when a genuine TDX attestation is cryptographically bound to the exact authorized operation and signing key and independent NEAR RPC settlement verification also holds; a provider success or an unbound quote never reaches TEE_SIGNING_VERIFIED.",
     "service_facing_routes_require_a_credential": "Every guard route that consults the authenticated service identity is gated by the credential registry: with a registry configured, a request with no credential is refused (401) before any work, so a caller cannot adopt another service's identity by editing a field.",
     "public_demo_never_exposes_a_state_changing_route": "The keyless public demonstration is an exact allowlist of read-only routes; it never evaluates, signs, broadcasts or mutates state, and enabling it does not relax the API-key requirement on any sensitive route.",
+    "hostile_input_never_crashes_the_guard": "A malformed request is always a decision or a typed refusal, never an unhandled exception: a non-token authorization, an absurd amount exponent and a non-string destination each fail closed.",
 }
 
 

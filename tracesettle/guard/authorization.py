@@ -377,6 +377,16 @@ class AuthorizationAuthority:
                 token = Authorization.from_dict(token)
             except ValueError as exc:
                 return AuthVerification(AuthState.MALFORMED, f"malformed authorization: {exc}")
+        elif not isinstance(token, Authorization):
+            # A caller may present anything: a bare string, an int, a list. None of
+            # them is a token, so this is a refusal, never an exception. Reaching
+            # the attribute checks below with a non-token would raise, and an
+            # unhandled exception on the sign path is both a 500 and an availability
+            # risk, so the shape is checked before anything is dereferenced.
+            return AuthVerification(
+                AuthState.MALFORMED,
+                f"malformed authorization: expected a token object, got {type(token).__name__}",
+            )
 
         if token.version != AUTHORIZATION_VERSION:
             return AuthVerification(
