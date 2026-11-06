@@ -2107,6 +2107,13 @@ untouched; runtime stays standard-library only.
 - **Invariants:** 53 total (unchanged in count; the four custody invariants hold
   and are mutation-tested). All 53 verified by execution (`check_all()` -> 0
   failures) and over HTTP.
+- **Second gap closed in `public_demo_never_exposes_a_state_changing_route`.** The
+  banned-token set omitted `custody`, so a custody route added to the keyless
+  allowlist would not have failed the invariant. `custody` is now in the set and
+  a mutation test
+  (`test_public_demo_invariant_notices_a_custody_route_in_the_allowlist`) fails
+  if it is removed. The four custody routes are gated by
+  `SERVICE_FACING_POST_PATHS` and are absent from `PUBLIC_DEMO_ROUTES`.
 - **Release gates:** pyflakes clean; compileall OK; offline demo byte-identical
   (md5 `4864f13c…`); near demo byte-identical (`fc2949ef…`); 9/9 attack scenarios
   pass; packaging 12 pass; Docker image builds, runs non-root (uid 10001), health
