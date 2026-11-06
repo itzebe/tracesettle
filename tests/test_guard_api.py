@@ -131,6 +131,20 @@ def test_sign_rejects_a_missing_transaction(api):
     assert api.dispatch("POST", "/api/guard/sign", {}, {"authorization": None}).status == 400
 
 
+@pytest.mark.parametrize("token", ["a-string", 12345, ["v"], {"not": "a-token"}])
+def test_sign_refuses_a_non_token_authorization_without_raising(api, token):
+    """A malformed ``authorization`` value is refused, never an unhandled error.
+
+    The sign endpoint accepts arbitrary JSON, so ``authorization`` can be any
+    value. Each must produce a REFUSED result with a MALFORMED state; a raised
+    exception here would surface as a 500 on the enforcement boundary.
+    """
+    response = api.dispatch("POST", "/api/guard/sign", {}, {"transaction": LEGIT, "authorization": token})
+    assert response.status == 200
+    assert response.payload["outcome"] == "REFUSED"
+    assert response.payload["state"] == "MALFORMED"
+
+
 def test_sign_binds_expected_service_to_the_authenticated_caller():
     """A body-supplied expected_service_id cannot override the authenticated identity.
 

@@ -23,6 +23,13 @@ from typing import Any
 #: near this, and an unbounded Decimal is a cheap denial-of-service vector.
 MAX_AMOUNT_DIGITS = 40
 MAX_AMOUNT_SCALE = 18
+#: The largest magnitude a parsed amount may have. A positive exponent is not a
+#: precision problem but a magnitude one: ``1e1000000000`` parses to a finite
+#: Decimal whose later addition overflows the Decimal context, raising
+#: ``decimal.Overflow`` deep inside the control evaluation and turning a bad
+#: request into an unhandled 500. Bounding the value here keeps every amount
+#: arithmetic-safe and rejects the absurd input at the parse boundary.
+MAX_AMOUNT_VALUE = Decimal(10) ** MAX_AMOUNT_DIGITS
 
 #: Fields a caller might send hoping to skip evaluation. They are never honoured.
 #: Their presence is itself a finding.
@@ -251,6 +258,8 @@ def parse_amount(raw: Any) -> Decimal:
         raise AmountError("amount must be finite")
     if value < 0:
         raise AmountError("amount must not be negative")
+    if value > MAX_AMOUNT_VALUE:
+        raise AmountError("amount is larger than the supported maximum")
     sign, digits, exponent = value.as_tuple()
     if len(digits) > MAX_AMOUNT_DIGITS:
         raise AmountError("amount has too many significant digits")

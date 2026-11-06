@@ -543,6 +543,53 @@ def test_verify_requires_the_signing_key_to_be_the_wallet_key():
     assert "signing_key_is_the_wallet_key" in [c.name for c in verification.failed_checks()]
 
 
+@pytest.mark.parametrize(
+    "public_key",
+    [
+        # A base58 value that decodes to more than 32 bytes: the old hand-rolled
+        # decoder did ``n.to_bytes(32, "big")`` and raised OverflowError, which the
+        # caller's ``except (CustodyError, ValueError)`` did not catch.
+        "ed25519:" + "z" * 60,
+        # Not valid base58 at all (0, O, I, l are excluded from the alphabet).
+        "ed25519:0OIl",
+        # Fewer than 32 bytes.
+        "ed25519:1",
+        # Not an ed25519 key.
+        "secp256k1:B4RodGLvA3a8wyPQydgJwAUtm6ULkfdia17WP9hPYBGs",
+    ],
+)
+def test_a_malformed_signing_key_is_disputed_not_raised(public_key):
+    """A malformed on-chain public key must yield a refusal, never an exception.
+
+    The key comes from the chain record, so it is not fully trusted. Deriving its
+    implicit account must be total: any malformed value becomes a failed
+    ``signing_key_is_the_wallet_key`` check and a DISPUTED verdict, not a raise
+    that would abort the verification.
+    """
+    verification = verify_custody_transaction(
+        transaction_digest="d",
+        tx_hash=TX_HASH,
+        wallet_account=WALLET,
+        expected_receiver=DEST,
+        expected_deposit_yocto=10**22,
+        result=_verified_result(public_key=public_key),
+        source_status=SourceStatus.OK,
+    )
+    assert verification.state.value == "DISPUTED"
+    assert "signing_key_is_the_wallet_key" in [c.name for c in verification.failed_checks()]
+
+
+def test_the_implicit_account_decoder_rejects_a_key_that_is_not_32_bytes():
+    from tracesettle.near.outlayer_execution import _implicit_account
+
+    # The real wallet key round-trips exactly.
+    assert _implicit_account(WALLET_PUB) == WALLET
+    with pytest.raises(CustodyError):
+        _implicit_account("ed25519:" + "z" * 60)
+    with pytest.raises(CustodyError):
+        _implicit_account("ed25519:" + "1" * 2)
+
+
 def test_verify_is_insufficient_without_a_record():
     verification = verify_custody_transaction(
         transaction_digest="d",
