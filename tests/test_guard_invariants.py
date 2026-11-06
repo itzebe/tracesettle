@@ -559,6 +559,28 @@ def test_public_demo_invariant_notices_a_write_route_in_the_allowlist():
         ui_module.PUBLIC_DEMO_ROUTES = original
 
 
+def test_public_demo_invariant_notices_a_custody_route_in_the_allowlist():
+    """A custody route on the keyless allowlist must fail the invariant.
+
+    The custody boundary sends an authorized operation to a TEE-held signing
+    wallet; exposing it without a key would be a real write surface. This guards
+    the token the invariant exists to catch.
+    """
+    from tracesettle.guard import invariants as inv
+    from tracesettle import ui as ui_module
+
+    original = ui_module.PUBLIC_DEMO_ROUTES
+    ui_module.PUBLIC_DEMO_ROUTES = frozenset(
+        set(original) | {"/api/guard/near/custody/prepare"}
+    )
+    try:
+        result = inv.INVARIANTS["public_demo_never_exposes_a_state_changing_route"]()
+        assert result.holds is False
+        assert "custody" in result.detail
+    finally:
+        ui_module.PUBLIC_DEMO_ROUTES = original
+
+
 def test_public_demo_invariant_notices_a_broadcasting_demonstration():
     """If the demonstration broadcast a transaction, it must fail."""
     from tracesettle.guard import invariants as inv

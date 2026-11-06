@@ -817,12 +817,12 @@ a bare interpreter.
 **1. Run the tests.**
 
 ```sh
-python -m pytest tests/ --collect-only -q   # 1586 tests collected
-python -m pytest tests/ -q                  # 1559 passed, 27 skipped
+python -m pytest tests/ --collect-only -q   # 1645 tests collected
+python -m pytest tests/ -q                  # 1616 passed, 29 skipped
 ```
-→ `1559 passed, 27 skipped`. The skips are the PostgreSQL integration
+→ `1616 passed, 29 skipped`. The skips are the PostgreSQL integration
 tests; set `TRACESETTLE_TEST_PG_DSN` to a real server to run them
-(**1578 passed, 3 skipped** — the remaining 3 are opt-in *live-infrastructure*
+(**1640 passed, 5 skipped** — the remaining 5 are opt-in *live-infrastructure*
 tests that need real provider credentials, a testnet key, or a TDX enclave
 harness, none of which a zero-budget local run has).
 
@@ -910,7 +910,7 @@ curl -sS -X POST http://127.0.0.1:8080/api/guard/sign \
 curl -sS http://127.0.0.1:8080/api/guard/invariants \
   | python3 -c 'import sys,json;d=json.load(sys.stdin);print("all hold:",d["all_hold"]);[print(" ",i["name"]) for i in d["invariants"]]'
 ```
-→ `all hold: True` and the fifty-two invariant names, including the sixteen NEAR
+→ `all hold: True` and the fifty-three invariant names, including the sixteen NEAR
 ones (`near_policy_must_be_in_force`, `near_native_scope_gap_is_always_stated`,
 `near_function_call_key_cannot_transfer_near`,
 `near_unrecognised_access_key_never_allows`,
@@ -1288,7 +1288,7 @@ transaction request ──▶ │ guard/rules.py      7 controls, all run  │
                         │                     validate, then execute │
                         │ guard/audit.py      hash-chained records  │
                         │ guard/monitor.py    counters + incidents  │
-                        │ guard/invariants.py 52 checked guarantees │
+                        │ guard/invariants.py 53 checked guarantees │
                         └────────────────────┬─────────────────────┘
                                              │ ALLOW + authorization
                                              ▼
@@ -1361,7 +1361,7 @@ identical decisions.
 | `tracesettle/guard/safeguards.py` | Durable security safeguards: the learning loop's store (SQLite). |
 | `tracesettle/guard/learning.py` | The learning loop: derive a lesson, apply safeguards (only ever tightening). |
 | `tracesettle/guard/state_pg.py` | Optional PostgreSQL backend: shared nonces, counters, revocations, idempotency. |
-| `tracesettle/guard/invariants.py` | The fifty-two structural guarantees, checked by execution. |
+| `tracesettle/guard/invariants.py` | The fifty-three structural guarantees, checked by execution. |
 | `tracesettle/guard/api.py` | Guard HTTP routing and JSON serialization. |
 | `tracesettle/guard/console.py` | The security operations console page. |
 | `docs/TRANSACTION_SECURITY.md` | The security layer in full, including what it does not do. |
@@ -1384,7 +1384,9 @@ tracesettle/near/          NEAR agent protection: policy scope, access-key
                           scenarios, the local agent harness (agent_harness.py),
                           the settlement assurance view, the Intents lifecycle
                           (create → authorize → quote → approve → deposit →
-                          settle), TEE research, and the enclave signing boundary
+                          settle), TEE research, the enclave signing boundary,
+                          and the opt-in OutLayer custody boundary (outlayer.py,
+                          outlayer_execution.py, custody_attestation.py)
 
 ## Runtime dependencies
 
@@ -1476,7 +1478,7 @@ variable and all documented in `docs/TRANSACTION_SECURITY.md`:
   replay-nonce store all have explicit caps, so a flood cannot exhaust memory.
   When durable state is configured, spent nonces and the limit counters live in
   SQLite instead, so they survive a restart (see **Durable state** below).
-- **Structural invariants, checked by execution.** Fifty-two guarantees at
+- **Structural invariants, checked by execution.** Fifty-three guarantees at
   `GET /api/guard/invariants`, each mutation-tested so a checker that cannot fail
   is treated as a defect.
 - **Honest audit claim.** In-place modification of an audit record is detectable;
@@ -1701,7 +1703,7 @@ immutable commit SHA (not a moving tag), and cancels superseded runs.
 ## Tests
 
 ```sh
-python3 -m pytest tests/ -q          # 1559 passed, 27 skipped (1583 passed, 3 skipped with PostgreSQL)
+python3 -m pytest tests/ -q          # 1616 passed, 29 skipped (1640 passed, 5 skipped with PostgreSQL)
 python3 -m pytest tests/test_guard_authorization.py -q
 python3 -m pytest tests/test_guard_invariants.py -q
 python3 -m pytest tests/test_guard_end_to_end.py -q

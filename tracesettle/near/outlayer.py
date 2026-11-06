@@ -119,25 +119,42 @@ _IN_FLIGHT = frozenset(
     {ProviderState.PENDING, ProviderState.PROCESSING, ProviderState.PENDING_APPROVAL}
 )
 
+#: The provider's documented ``RequestStatus`` enum, mapped onto the local
+#: vocabulary. Every value the OpenAPI document lists is present, so a status the
+#: provider genuinely returns is never silently read as ``UNKNOWN``.
+#:
+#: ``completed`` is the provider's terminal *success* synonym (its own idempotency
+#: documentation groups ``success``/``completed`` together as the terminal success
+#: states), so it maps to ``SUCCESS``; ``approved`` is the in-flight state after a
+#: multisig approval, so it maps to ``PROCESSING``; ``cancelled`` is terminal and
+#: never executed, so it maps to ``REJECTED``; ``needs_review`` is terminal but
+#: unresolved and is deliberately left as ``UNKNOWN`` - never a success, never a
+#: plain failure. A status outside this map still resolves to ``UNKNOWN``.
 _STATUS_MAP: dict[str, ProviderState] = {
     "success": ProviderState.SUCCESS,
+    "completed": ProviderState.SUCCESS,
     "failed": ProviderState.FAILED,
+    "partially_failed": ProviderState.FAILED,
     "rejected": ProviderState.REJECTED,
+    "cancelled": ProviderState.REJECTED,
     "refunded": ProviderState.REFUNDED,
     "pending": ProviderState.PENDING,
-    "processing": ProviderState.PROCESSING,
-    "pending_approval": ProviderState.PENDING_APPROVAL,
     "pending_deposit": ProviderState.PROCESSING,
-    "partially_failed": ProviderState.FAILED,
+    "processing": ProviderState.PROCESSING,
+    "approved": ProviderState.PROCESSING,
+    "pending_approval": ProviderState.PENDING_APPROVAL,
+    "needs_review": ProviderState.UNKNOWN,
 }
 
 
 def provider_state(raw: Any) -> ProviderState:
     """Map a provider status string onto :class:`ProviderState`.
 
-    An unrecognised status is ``UNKNOWN`` - never ``SUCCESS``. A provider that
-    starts returning a new status word must not be read as a completed
-    operation.
+    Every status the provider's OpenAPI document lists is mapped (see
+    :data:`_STATUS_MAP`), so a status the provider genuinely returns is not read
+    as ``UNKNOWN``. A status outside that set is ``UNKNOWN`` - never ``SUCCESS``.
+    A provider that starts returning a new status word must not be read as a
+    completed operation.
     """
     if not isinstance(raw, str):
         return ProviderState.UNKNOWN

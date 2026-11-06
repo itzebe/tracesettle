@@ -3411,7 +3411,8 @@ def _public_demo_never_exposes_a_state_changing_route() -> InvariantResult:
 
     * the allowlist contains no route that evaluates, signs, broadcasts, or
       mutates state (``evaluate``, ``sign``, wallet, execution, lifecycle,
-      incidents, audit, metrics, policy, safeguards, TEE, enclave, access-keys);
+      custody, incidents, audit, metrics, policy, safeguards, TEE, enclave,
+      access-keys);
     * with the flag on, every allowlisted route answers ``200`` **without** a key;
     * with the flag on, every sensitive route still answers ``401`` **without** a
       key, so enabling the demonstration cannot widen the surface.
@@ -3425,7 +3426,7 @@ def _public_demo_never_exposes_a_state_changing_route() -> InvariantResult:
     banned_tokens = (
         "evaluate", "sign", "wallet", "execution", "lifecycle",
         "incident", "audit", "metrics", "safeguards", "tee", "enclave",
-        "access-keys", "investigations",
+        "access-keys", "investigations", "custody",
     )
     for path in PUBLIC_DEMO_ROUTES:
         if not path.startswith("/api/guard/"):

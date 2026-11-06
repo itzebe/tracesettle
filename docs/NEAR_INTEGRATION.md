@@ -392,3 +392,12 @@ structural (`custody_tee_signing_requires_bound_attestation_and_settlement`) and
 mutation-tested against both a trusting evidence ladder and an accepting verifier.
 No new provider endpoint is invented and no key is configured, so the routes report
 themselves disabled and refuse by default.
+
+The provider's documented `RequestStatus` enum is mapped in full, so a status the
+provider genuinely returns is never silently read as `UNKNOWN`: `completed` (its
+terminal *success* synonym) maps to `SUCCESS`, `approved` to `PROCESSING`,
+`cancelled` to `REJECTED`, and `needs_review` is left `UNKNOWN` — terminal but
+unresolved, never a success. Only the two documented success synonyms
+(`success`, `completed`) map to `SUCCESS`; every other value is refused that
+promotion. This is asserted against the provider's live OpenAPI document in
+`tests/test_near_live_outlayer.py`, so the map cannot drift from the API.

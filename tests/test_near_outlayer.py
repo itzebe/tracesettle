@@ -118,12 +118,21 @@ def test_config_serialisation_never_contains_the_key():
     [
         ("success", ProviderState.SUCCESS),
         ("SUCCESS", ProviderState.SUCCESS),
+        # The provider's documented terminal *success* synonym.
+        ("completed", ProviderState.SUCCESS),
+        ("COMPLETED", ProviderState.SUCCESS),
         ("pending", ProviderState.PENDING),
         ("processing", ProviderState.PROCESSING),
+        # In-flight after a multisig approval, not yet settled.
+        ("approved", ProviderState.PROCESSING),
         ("pending_approval", ProviderState.PENDING_APPROVAL),
         ("failed", ProviderState.FAILED),
         ("rejected", ProviderState.REJECTED),
+        # Terminal, never executed.
+        ("cancelled", ProviderState.REJECTED),
         ("refunded", ProviderState.REFUNDED),
+        # Terminal but unresolved: never a success, never a plain failure.
+        ("needs_review", ProviderState.UNKNOWN),
         ("something_new", ProviderState.UNKNOWN),
         (None, ProviderState.UNKNOWN),
         ("", ProviderState.UNKNOWN),
@@ -131,6 +140,37 @@ def test_config_serialisation_never_contains_the_key():
 )
 def test_provider_state_never_invents_success(raw, expected):
     assert provider_state(raw) is expected
+
+
+def test_every_documented_provider_status_is_mapped():
+    """Every value of the provider's documented RequestStatus enum maps.
+
+    The live OpenAPI document lists this exact set; a status the provider
+    genuinely returns must never be silently read as ``UNKNOWN`` (which would
+    under-report a completed transfer), and no non-success status may map to
+    ``SUCCESS``. This is the guard against the map drifting from the API.
+    """
+    documented = {
+        "pending_deposit",
+        "processing",
+        "success",
+        "completed",
+        "partially_failed",
+        "failed",
+        "refunded",
+        "pending_approval",
+        "approved",
+        "rejected",
+        "cancelled",
+        "needs_review",
+    }
+    from tracesettle.near.outlayer import _STATUS_MAP
+
+    unmapped = documented - set(_STATUS_MAP)
+    assert not unmapped, f"documented statuses not mapped: {sorted(unmapped)}"
+    # Only the documented success synonyms may read as SUCCESS.
+    success_states = {k for k, v in _STATUS_MAP.items() if v is ProviderState.SUCCESS}
+    assert success_states == {"success", "completed"}, success_states
 
 
 # --- provider: address ------------------------------------------------------
@@ -360,6 +400,130 @@ def test_the_digest_commits_to_every_field():
     assert base != custody_digest(network="testnet", wallet_account=WALLET, destination="x.testnet", amount_yocto=10**22, service_id="s")
     assert base != custody_digest(network="testnet", wallet_account=WALLET, destination=DEST, amount_yocto=10**23, service_id="s")
     assert base != custody_digest(network="testnet", wallet_account=WALLET, destination=DEST, amount_yocto=10**22, service_id="t")
+
+
+def test_a_substituted_amount_invalidates_the_binding():
+    """Changing the amount after authorization is refused before the provider."""
+    opener = _address_route(FakeOpener())
+    opener.json("POST", "/wallet/v1/transfer", {"request_id": "r1", "status": "success", "tx_hash": TX_HASH})
+    boundary = _boundary(opener)
+    prepared = boundary.prepare(service_id="treasury-agent", destination=DEST, amount_human=Decimal("0.5"))
+    # Tamper: raise the amount after the authorization was issued.
+    prepared.amount_yocto = 9 * 10**23
+    with pytest.raises(CustodyError):
+        boundary.execute(prepared)
+    assert not any("/wallet/v1/transfer" in call for call in opener.calls)
+
+
+def test_a_substituted_network_invalidates_the_binding():
+    """Re-pointing the operation at another network is refused before the provider."""
+    opener = _address_route(FakeOpener())
+    opener.json("POST", "/wallet/v1/transfer", {"request_id": "r1", "status": "success", "tx_hash": TX_HASH})
+    boundary = _boundary(opener)
+    prepared = boundary.prepare(service_id="treasury-agent", destination=DEST, amount_human=Decimal("0.5"))
+    from tracesettle.near.networks import NearNetwork
+
+    prepared.network = NearNetwork.MAINNET
+    with pytest.raises(CustodyError):
+        boundary.execute(prepared)
+    assert not any("/wallet/v1/transfer" in call for call in opener.calls)
+
+
+def test_a_swapped_service_invalidates_the_binding():
+    """Re-labelling the operation's service is refused before the provider."""
+    opener = _address_route(FakeOpener())
+    opener.json("POST", "/wallet/v1/transfer", {"request_id": "r1", "status": "success", "tx_hash": TX_HASH})
+    boundary = _boundary(opener)
+    prepared = boundary.prepare(service_id="treasury-agent", destination=DEST, amount_human=Decimal("0.5"))
+    prepared.service_id = "another-service"
+    with pytest.raises(CustodyError):
+        boundary.execute(prepared)
+    assert not any("/wallet/v1/transfer" in call for call in opener.calls)
+
+
+# --- boundary: provider status fidelity -------------------------------------
+
+
+def test_a_completed_status_is_read_as_provider_success_not_unknown():
+    """The provider's ``completed`` success synonym is not read as UNKNOWN.
+
+    ``completed`` is the provider's documented terminal success state. Reading it
+    as UNKNOWN would under-report a settled transfer; the adapter must map it to
+    SUCCESS. Settlement is still established only by the independent RPC check.
+    """
+    opener = _address_route(FakeOpener())
+    opener.json("POST", "/wallet/v1/transfer", {"request_id": "r1", "status": "completed", "tx_hash": TX_HASH})
+    nc = network_config("testnet")
+    rpc = FakeNearRpc(nc)
+    rpc.tx_status_result = _verified_result()
+    boundary = _boundary(opener, rpc=rpc)
+    prepared = boundary.prepare(service_id="treasury-agent", destination=DEST, amount_human=Decimal("0.5"))
+    execution = boundary.execute(prepared)
+    assert execution.provider.state is ProviderState.SUCCESS
+    assert execution.provider_claimed_success is True
+    # The provider claim is still not the source of verification.
+    assert execution.settlement_verified is True
+    assert execution.verification.state.value == "VERIFIED"
+
+
+def test_an_unknown_status_is_never_read_as_a_success_or_a_failure():
+    """A status outside the documented enum is UNKNOWN, never SUCCESS/FAILED."""
+    opener = _address_route(FakeOpener())
+    opener.json("POST", "/wallet/v1/transfer", {"request_id": "r1", "status": "some_new_word", "tx_hash": TX_HASH})
+    nc = network_config("testnet")
+    rpc = FakeNearRpc(nc)
+    rpc.tx_status_result = _verified_result()
+    boundary = _boundary(opener, rpc=rpc)
+    prepared = boundary.prepare(service_id="treasury-agent", destination=DEST, amount_human=Decimal("0.5"))
+    execution = boundary.execute(prepared)
+    assert execution.provider.state is ProviderState.UNKNOWN
+    assert execution.provider_claimed_success is False
+
+
+def test_a_needs_review_status_is_not_a_success():
+    """``needs_review`` is terminal but unresolved: never a provider success."""
+    opener = _address_route(FakeOpener())
+    opener.json("POST", "/wallet/v1/transfer", {"request_id": "r1", "status": "needs_review", "tx_hash": TX_HASH})
+    nc = network_config("testnet")
+    rpc = FakeNearRpc(nc)
+    rpc.tx_status_result = _verified_result()
+    boundary = _boundary(opener, rpc=rpc)
+    prepared = boundary.prepare(service_id="treasury-agent", destination=DEST, amount_human=Decimal("0.5"))
+    execution = boundary.execute(prepared)
+    assert execution.provider_claimed_success is False
+    assert execution.provider.state is ProviderState.UNKNOWN
+
+
+def test_an_unsigned_transaction_is_never_settlement_verified():
+    """A chain record for a different signer never verifies, even if otherwise identical."""
+    opener = _address_route(FakeOpener())
+    opener.json("POST", "/wallet/v1/transfer", {"request_id": "r1", "status": "success", "tx_hash": TX_HASH})
+    nc = network_config("testnet")
+    rpc = FakeNearRpc(nc)
+    record = _verified_result()
+    record["transaction"]["signer_id"] = "attacker.testnet"
+    rpc.tx_status_result = record
+    boundary = _boundary(opener, rpc=rpc)
+    prepared = boundary.prepare(service_id="treasury-agent", destination=DEST, amount_human=Decimal("0.5"))
+    execution = boundary.execute(prepared)
+    assert execution.settlement_verified is False
+    assert "signer_is_wallet" in [c.name for c in execution.verification.failed_checks()]
+
+
+def test_an_unfinalized_transaction_is_never_verified():
+    """A record that is not FINAL is never independently verified."""
+    opener = _address_route(FakeOpener())
+    opener.json("POST", "/wallet/v1/transfer", {"request_id": "r1", "status": "success", "tx_hash": TX_HASH})
+    nc = network_config("testnet")
+    rpc = FakeNearRpc(nc)
+    record = _verified_result()
+    record["final_execution_status"] = "EXECUTED_OPTIMISTIC"
+    rpc.tx_status_result = record
+    boundary = _boundary(opener, rpc=rpc)
+    prepared = boundary.prepare(service_id="treasury-agent", destination=DEST, amount_human=Decimal("0.5"))
+    execution = boundary.execute(prepared)
+    assert execution.settlement_verified is False
+    assert "final" in [c.name for c in execution.verification.failed_checks()]
 
 
 # --- settlement verification primitive -------------------------------------
