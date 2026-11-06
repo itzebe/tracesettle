@@ -204,6 +204,8 @@ class GuardAPI:
             return ApiResponse(200, self._near_policy_scope())
         if path == "/api/guard/near/settlement-demo":
             return ApiResponse(200, self._near_settlement_demo())
+        if path == "/api/guard/near/settlement-check":
+            return ApiResponse(200, self._near_settlement_check())
         if path == "/api/guard/near/tee":
             return self._near_tee_info()
         if path == "/api/guard/near/enclave":
@@ -400,6 +402,18 @@ class GuardAPI:
             "provider_reported_success": True,
             "assurance": assurance.to_dict(),
         }
+
+    def _near_settlement_check(self) -> dict[str, Any]:
+        """A live, read-only NEAR testnet settlement check for the demonstration.
+
+        This is the one non-simulated piece of evidence the public demonstration
+        shows: a real, already-final testnet transaction read from a public RPC
+        and verified field by field against its intended operation. Nothing is
+        signed, broadcast, or moved; the read is keyless and testnet-only.
+        """
+        from ..near.settlement_check import verify_reference_settlement
+
+        return verify_reference_settlement().to_dict()
 
     def _near_tee_info(self) -> ApiResponse:
         """Describe the TEE attestation capability honestly."""

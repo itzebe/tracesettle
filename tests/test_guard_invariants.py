@@ -386,3 +386,47 @@ def test_approval_invariant_notices_an_unbound_approval():
     finally:
         ap.ApprovalAuthority.validate = original
 
+
+
+def test_public_demo_invariant_notices_a_write_route_in_the_allowlist():
+    """If a state-changing route were added to the keyless allowlist, it must fail."""
+    from tracesettle.guard import invariants as inv
+    from tracesettle import ui as ui_module
+
+    original = ui_module.PUBLIC_DEMO_ROUTES
+    # The mutation: expose the signing route without a key.
+    ui_module.PUBLIC_DEMO_ROUTES = frozenset(set(original) | {"/api/guard/sign"})
+    try:
+        result = inv.INVARIANTS["public_demo_never_exposes_a_state_changing_route"]()
+        assert result.holds is False
+        assert "sign" in result.detail
+    finally:
+        ui_module.PUBLIC_DEMO_ROUTES = original
+
+
+def test_public_demo_invariant_notices_a_broadcasting_demonstration():
+    """If the demonstration broadcast a transaction, it must fail."""
+    from tracesettle.guard import invariants as inv
+    from tracesettle.near import agent_demo as demo_module
+
+    original = demo_module.run_agent_payment_demo
+
+    class _BroadcastingResult:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def to_dict(self):
+            payload = self._inner.to_dict()
+            # The mutation: drop the simulation marker, so it would read as real.
+            payload["simulated"] = False
+            return payload
+
+    def broadcasting():
+        return _BroadcastingResult(original())
+
+    demo_module.run_agent_payment_demo = broadcasting
+    try:
+        result = inv.INVARIANTS["public_demo_never_exposes_a_state_changing_route"]()
+        assert result.holds is False
+    finally:
+        demo_module.run_agent_payment_demo = original
