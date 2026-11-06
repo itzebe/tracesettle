@@ -85,6 +85,28 @@ _STATIC_FILES = {
     "/assets/near-connect.js": ("near-connect.js", "text/javascript; charset=utf-8"),
 }
 
+#: The **only** guard GET routes that may be served without the API key when
+#: ``TRACESETTLE_PUBLIC_DEMO`` is enabled. Every entry is self-contained,
+#: read-only, and deterministic, and the list is an exact-match allowlist: a
+#: route that is not named here keeps the API-key requirement, so enabling the
+#: demonstration cannot widen the surface by accident.
+#:
+#: Deliberately **absent** (and therefore still key-gated): ``/api/guard/policy``,
+#: ``/api/guard/metrics``, ``/api/guard/incidents``, ``/api/guard/audit``,
+#: ``/api/guard/invariants``, ``/api/guard/safeguards``, the investigations
+#: routes, the Intents lifecycle, the wallet and execution routes, the enclave
+#: and TEE attestation routes, ``/api/investigate``, and every POST route.
+PUBLIC_DEMO_ROUTES = frozenset(
+    {
+        "/api/guard/scenarios",
+        "/api/guard/near/agent-demo",
+        "/api/guard/near/policy-scope",
+        "/api/guard/near/behaviours",
+        "/api/guard/near/prompt-injection",
+        "/api/guard/near/settlement-check",
+    }
+)
+
 #: Sentinel returned by :meth:`Handler._authenticate_service` when it has already
 #: sent a refusal. Distinct from ``None``, which means "authentication disabled".
 _AUTH_REFUSED = object()
@@ -116,6 +138,7 @@ _INDEX_HTML = """<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>TRACESETTLE — Security infrastructure for autonomous payments</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230b0e14'/%3E%3Cpath d='M9 11h14M16 11v11' stroke='%236ea8fe' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E">
 <style>
   :root {
     --bg: #0d1117; --panel: #161b22; --border: #30363d; --fg: #e6edf3;
@@ -230,7 +253,7 @@ _INDEX_HTML = """<!DOCTYPE html>
           substitution after approval is refused.</li>
         <li>Refuses replay, expiry and reuse; a <strong>BLOCK</strong> never reaches the signer.</li>
       </ul>
-      <p class="cap-cta"><a href="console#guard">Open the authorization firewall &rarr;</a></p>
+      <p class="cap-cta">__GUARD_LINK__</p>
     </article>
 
     <article class="cap">
@@ -256,9 +279,10 @@ _INDEX_HTML = """<!DOCTYPE html>
         verifier: an agent is manipulated into redirecting a payment, the boundary
         <strong>BLOCK</strong>s it, and the signer is <strong>never invoked</strong> (proven by a
         zero call count). A legitimate payment is then authorized, signed and independently
-        verified. <span class="tag">Simulated — nothing is signed for real or broadcast.</span></p>
+        verified, and a real NEAR testnet settlement is read live as proof.
+        <span class="tag">Two simulated payments; the testnet check is real and read-only.</span></p>
     </div>
-    <p class="cap-cta"><a href="console#lab">Open the demonstration &rarr;</a></p>
+    <p class="cap-cta">__DEMO_LINK__</p>
   </section>
 
   <section id="investigate" class="investigate">
@@ -481,6 +505,301 @@ form.addEventListener('submit', async (ev) => {
 </html>
 """
 
+#: The public six-scene demonstration. It runs entirely from real endpoints and
+#: real code: the authorization boundary, the signer, the settlement verifier,
+#: and a live read-only NEAR testnet check. Nothing is hardcoded; every value on
+#: the page is read back from a response. Same-origin only (no third-party
+#: origin), so it is served under :data:`DEFAULT_CSP`.
+_DEMO_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TRACESETTLE — Stop an unauthorized AI payment, then prove the real one</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230b0e14'/%3E%3Cpath d='M9 11h14M16 11v11' stroke='%236ea8fe' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E">
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --border: #30363d; --fg: #e6edf3;
+    --muted: #8b949e; --accent: #58a6ff;
+    --ok: #3fb950; --warn: #d29922; --bad: #f85149; --sim: #a371f7;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+    font: 15px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  a { color: var(--accent); }
+  .skip { position: absolute; left: -999px; top: 0; background: var(--accent); color: #0d1117;
+    padding: 8px 12px; border-radius: 0 0 6px 0; z-index: 20; }
+  .skip:focus { left: 0; }
+  header { padding: 18px 16px 14px; border-bottom: 1px solid var(--border); }
+  header .wrap { max-width: 1080px; margin: 0 auto; }
+  h1 { margin: 0 0 4px; font-size: 19px; letter-spacing: .5px; }
+  .tag { color: var(--muted); font-size: 12px; }
+  main { max-width: 1080px; margin: 0 auto; padding: 20px 16px 40px; }
+  .hero { margin-bottom: 18px; }
+  .hero h2 { margin: 0 0 6px; font-size: 26px; line-height: 1.2; }
+  .hero .sub { margin: 0 0 10px; font-size: 16px; color: var(--accent); font-weight: 600; }
+  .hero p.body { margin: 0; color: var(--muted); font-size: 14px; max-width: 82ch; }
+  .flow { display: flex; flex-wrap: wrap; gap: 6px 10px; margin: 16px 0 4px; padding: 0;
+    list-style: none; font-size: 12px; }
+  .flow li { border: 1px solid var(--border); border-radius: 999px; padding: 4px 10px;
+    color: var(--muted); }
+  .flow li.hot { border-color: var(--accent); color: var(--fg); }
+  .controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 18px 0; }
+  button { padding: 11px 18px; border-radius: 6px; border: 1px solid var(--border);
+    background: #21262d; color: var(--fg); font: inherit; cursor: pointer; }
+  button.primary { background: var(--accent); color: #08111f; border-color: var(--accent);
+    font-weight: 700; }
+  button:hover { border-color: var(--accent); }
+  button[disabled] { opacity: .55; cursor: progress; }
+  .scenes { display: grid; gap: 14px; }
+  .scene { background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 16px; }
+  .scene[data-state="pending"] { opacity: .62; }
+  .scene .eyebrow { font-size: 11px; letter-spacing: .14em; text-transform: uppercase;
+    color: var(--muted); margin: 0 0 4px; }
+  .scene h3 { margin: 0 0 8px; font-size: 16px; }
+  .scene p { margin: 0 0 10px; font-size: 13.5px; color: var(--muted); }
+  .scene .verdict { display: inline-flex; align-items: center; gap: 8px; font-weight: 700;
+    font-size: 14px; padding: 4px 10px; border-radius: 6px; border: 1px solid var(--border); }
+  .v-ALLOW { color: var(--ok); border-color: var(--ok); }
+  .v-REQUIRE_APPROVAL { color: var(--warn); border-color: var(--warn); }
+  .v-BLOCK { color: var(--bad); border-color: var(--bad); }
+  .v-HOLD, .v-UNKNOWN { color: var(--muted); }
+  .v-VERIFIED { color: var(--ok); border-color: var(--ok); }
+  .v-UNAVAILABLE { color: var(--bad); border-color: var(--bad); }
+  .kv { display: grid; grid-template-columns: max-content 1fr; gap: 3px 14px; font-size: 12.5px;
+    margin-top: 8px; }
+  .kv dt { color: var(--muted); }
+  .kv dd { margin: 0; word-break: break-all; }
+  .reasons { margin: 8px 0 0; padding-left: 18px; font-size: 12.5px; }
+  .note { border-left: 3px solid var(--border); background: #1c2128; border-radius: 6px;
+    padding: 9px 12px; font-size: 12.5px; color: var(--muted); margin-top: 10px; }
+  .note.sim { border-left-color: var(--sim); color: #d6c9ff; }
+  .note.ok { border-left-color: var(--ok); }
+  .note.bad { border-left-color: var(--bad); }
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; margin-top: 8px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border);
+    vertical-align: top; word-break: break-word; }
+  th { color: var(--muted); font-weight: 600; }
+  .ok { color: var(--ok); } .bad { color: var(--bad); }
+  code { background: #0b0f14; padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+  .mono { word-break: break-all; }
+  footer { color: var(--muted); font-size: 12px; padding: 24px 16px; text-align: center;
+    border-top: 1px solid var(--border); }
+  @media (max-width: 640px) {
+    .hero h2 { font-size: 21px; }
+    .kv { grid-template-columns: 1fr; gap: 1px 0; }
+    .kv dt { margin-top: 6px; }
+  }
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to main content</a>
+<header>
+  <div class="wrap">
+    <h1>TRACESETTLE</h1>
+    <div class="tag">Security infrastructure for autonomous payments &middot; NEAR &middot; v__VERSION__</div>
+  </div>
+</header>
+<main id="main">
+  <section class="hero">
+    <h2>Stop an unauthorized AI payment &mdash; then prove the real one.</h2>
+    <p class="sub">An agent's intention is never payment authorization.</p>
+    <p class="body">An AI agent can propose a payment, but a compromised agent, a malicious
+      instruction, an altered recipient or a manipulated amount can turn an apparently
+      legitimate payment into an unauthorized transfer. TRACESETTLE puts an independent
+      security boundary between the agent's payment <em>intent</em> and the wallet that
+      <em>signs</em>. The agent does not control the decision, and the user keeps the signing
+      authority. This page runs that boundary for real.</p>
+    <ol class="flow" aria-label="The enforcement path">
+      <li>Agent proposes a payment</li>
+      <li class="hot">TRACESETTLE evaluates the transaction</li>
+      <li class="hot">Authorization decision</li>
+      <li>Wallet signs</li>
+      <li>Network executes</li>
+      <li>Independent settlement verification</li>
+    </ol>
+  </section>
+
+  <div class="controls">
+    <button class="primary" type="button" id="run">Run the six-scene demonstration</button>
+    <span class="tag" id="run-note">Runs the real authorization boundary, signer and
+      settlement verifier, plus a live read-only NEAR testnet check.</span>
+  </div>
+
+  <div id="output" aria-live="polite"></div>
+
+  <div class="note">
+    <strong>What is real here.</strong> The authorization boundary, the guard controls, the
+    signer enforcement, the pipeline and the settlement verifier are the production code. The
+    only substitution is the network transport for the two simulated payments: no key is held
+    and nothing is broadcast to a chain. Scene 6 is a genuine read-only check of an
+    already-final NEAR <strong>testnet</strong> transaction. TRACESETTLE never requests a
+    private key or seed phrase, never signs on your behalf, and never moves funds.
+  </div>
+</main>
+<footer>
+  <p>Read-only and non-custodial. This public demonstration never signs, broadcasts or moves
+    funds. The operator console is at <a href="console">/console</a>.</p>
+</footer>
+<script>
+const out = document.getElementById('output');
+const runBtn = document.getElementById('run');
+
+function esc(v) {
+  return String(v == null ? '' : v)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+function verdict(v) { return '<span class="verdict v-' + esc(v) + '">' + esc(v) + '</span>'; }
+function kv(pairs) {
+  return '<dl class="kv">' + pairs.map(function (p) {
+    return '<dt>' + esc(p[0]) + '</dt><dd>' + p[1] + '</dd>';
+  }).join('') + '</dl>';
+}
+function scene(n, eyebrow, title, body, state) {
+  return '<section class="scene" data-state="' + esc(state || 'pending') + '">' +
+    '<p class="eyebrow">Scene ' + n + ' &middot; ' + esc(eyebrow) + '</p>' +
+    '<h3>' + esc(title) + '</h3>' + body + '</section>';
+}
+
+function placeholder() {
+  out.innerHTML = '<div class="scenes">' +
+    scene(1, 'the threat', 'An AI agent is manipulated into redirecting a payment',
+      '<p>Press <strong>Run the six-scene demonstration</strong> to execute the real boundary.</p>') +
+    scene(2, 'the interception', 'TRACESETTLE evaluates the transaction before signing', '') +
+    scene(3, 'the decision', 'The unauthorized destination is blocked', '') +
+    scene(4, 'the legitimate payment', 'An approved payment passes the checks', '') +
+    scene(5, 'the execution', 'The wallet signing boundary', '') +
+    scene(6, 'the proof', 'Independent settlement verification', '') +
+    '</div>';
+}
+
+function render(demo, check) {
+  const mal = demo.malicious, leg = demo.legitimate;
+  const sc = (check && check.verification) || null;
+
+  let html = '<div class="scenes">';
+
+  html += scene(1, 'the threat', 'An AI agent is manipulated into redirecting a payment',
+    '<p>The agent was told to pay an approved supplier. Injected context then redirects the same ' +
+      'invoice to an attacker-controlled receiver.</p>' +
+    kv([['Agent instruction', '<span class="mono">' + esc(mal.instruction) + '</span>'],
+        ['Injected context', '<span class="mono">' + esc(mal.injected_context || '(none)') + '</span>'],
+        ['Receiver the agent proposed', '<strong class="mono">' + esc(mal.proposed_receiver) + '</strong>'],
+        ['Amount', esc(mal.proposed_amount) + ' NEAR']]), 'done');
+
+  html += scene(2, 'the interception', 'TRACESETTLE evaluates the transaction before signing',
+    '<p>The boundary reads the <strong>actual transaction parameters</strong> — recipient, amount, ' +
+      'network and asset — never the agent\u2019s explanation. A convincing instruction cannot ' +
+      'change the decision.</p>' +
+    kv([['Bound service identity', esc((mal.authorization_binding || {}).service_id || '—')],
+        ['Chain', esc((mal.authorization_binding || {}).chain || '—')],
+        ['Asset', esc((mal.authorization_binding || {}).asset || '—')],
+        ['Evaluated destination', '<span class="mono">' + esc(mal.proposed_receiver) + '</span>']]), 'done');
+
+  html += scene(3, 'the decision', 'The unauthorized destination is blocked',
+    '<p>The destination is not on the approved list, so the boundary returns ' + verdict(mal.decision) +
+      '. No authorization is issued, so the signer is <strong>never invoked</strong> — proven by a ' +
+      'call count of <strong>' + esc(String(mal.signer_calls)) + '</strong>, not asserted.</p>' +
+    (mal.reasons && mal.reasons.length
+      ? '<ul class="reasons">' + mal.reasons.map(function (r) { return '<li>' + esc(r) + '</li>'; }).join('') + '</ul>'
+      : '') +
+    kv([['Signer invocations', '<strong>' + esc(String(mal.signer_calls)) + '</strong>'],
+        ['Signed', esc(String(mal.signed))],
+        ['Broadcast', esc(String(mal.broadcast_occurred))]]), 'done');
+
+  html += scene(4, 'the legitimate payment', 'An approved payment passes the checks',
+    '<p>The same agent, with no injected context, proposes the operator-approved receiver. The ' +
+      'boundary returns ' + verdict(leg.decision) + ' and issues a short-lived authorization bound ' +
+      'to the exact bytes to be signed.</p>' +
+    kv([['Receiver', '<span class="mono">' + esc(leg.proposed_receiver) + '</span>'],
+        ['Amount', esc(leg.proposed_amount) + ' NEAR'],
+        ['Authorization digest', '<span class="mono">' + esc((leg.authorization_binding || {}).transaction_digest || '—') + '</span>'],
+        ['Digest of signed bytes', '<span class="mono">' + esc(leg.signed_bytes_digest || '—') + '</span>'],
+        ['Digests agree', ((leg.authorization_binding || {}).transaction_digest === leg.signed_bytes_digest)
+          ? '<span class="ok">yes</span>' : '<span class="bad">no</span>']]), 'done');
+
+  html += scene(5, 'the execution', 'The wallet signing boundary',
+    '<p>The signer re-derives the binding from the transaction it was asked to sign. A ' +
+      'substitution after approval, a replay, an expired authorization, or a token minted for a ' +
+      'different transaction is refused here. The demonstration replaces the network with a ' +
+      'deterministic offline transport, so the signer, pipeline and verifier all run for real but ' +
+      '<strong>nothing is signed for real and nothing reaches a chain</strong> — which is why this ' +
+      'whole run is labelled a simulation.</p>' +
+    kv([['Signer invocations', '<strong>' + esc(String(leg.signer_calls)) + '</strong>'],
+        ['Signed (real key)', '<span class="ok">no — simulated transport</span>'],
+        ['Simulated pipeline state', esc(leg.submission_state || '—')],
+        ['Reached a chain', '<span class="ok">no</span>']]), 'done');
+
+  let proofBody = '<p>The provider\u2019s success is never proof. Scene 6 reads a real, ' +
+    'already-final NEAR <strong>testnet</strong> transaction from a public RPC and checks it field ' +
+    'by field against the operation it was supposed to perform.</p>';
+  if (check && check.available && sc) {
+    const rows = (sc.checks || []).map(function (c) {
+      return '<tr><td>' + esc(c.name) + '</td><td class="' + (c.ok ? 'ok' : 'bad') + '">' +
+        (c.ok ? 'pass' : 'fail') + '</td><td class="mono">' + esc(c.detail) + '</td></tr>';
+    }).join('');
+    proofBody += kv([['Transaction hash', '<span class="mono">' + esc(check.tx_hash) + '</span>'],
+        ['Network', esc(check.network) + ' (mainnet: ' + esc(String(check.mainnet)) + ')'],
+        ['Verified state', verdict(check.state)],
+        ['Read live from', 'a public NEAR testnet RPC'],
+        ['Explorer', '<a href="' + esc(check.explorer_url) + '" rel="noopener noreferrer">' +
+          esc(check.tx_hash) + '</a>']]) +
+      '<table><thead><tr><th>Check</th><th>Result</th><th>Detail</th></tr></thead><tbody>' +
+      rows + '</tbody></table>' +
+      '<div class="note ok">Read live; the transaction was already final before this read. ' +
+      'Nothing was signed, broadcast or moved to produce this evidence.</div>';
+  } else {
+    proofBody += '<div class="note bad">' + esc((check && check.note) ||
+      'The public NEAR testnet RPC could not be reached, so no conclusion is drawn.') + '</div>';
+  }
+  html += scene(6, 'the proof', 'Independent settlement verification', proofBody,
+    check && check.available ? 'done' : 'pending');
+
+  html += '</div>';
+
+  html += '<div class="note ' + (demo.reproduced ? 'ok' : 'bad') + '">' +
+    esc(demo.reproduced
+      ? 'Reproduced: the injected redirect was blocked before signing, the approved payment was ' +
+        'authorized and signed, and a real testnet settlement was independently verified.'
+      : 'The demonstration did not reproduce the expected outcome.') + '</div>' +
+    '<div class="note sim">' + esc(demo.note) + '</div>';
+
+  out.innerHTML = html;
+}
+
+async function run() {
+  runBtn.disabled = true;
+  out.innerHTML = '<div class="note">Running the real boundary, signer and verifier&hellip;</div>';
+  try {
+    const demoRes = await fetch('api/guard/near/agent-demo');
+    const demo = await demoRes.json();
+    if (!demoRes.ok) { throw new Error(demo.error || ('HTTP ' + demoRes.status)); }
+
+    let check = null;
+    try {
+      const checkRes = await fetch('api/guard/near/settlement-check');
+      check = await checkRes.json();
+      if (!checkRes.ok) { check = null; }
+    } catch (e) { check = null; }
+
+    render(demo, check);
+  } catch (err) {
+    out.innerHTML = '<div class="note bad">' + esc(err.message) + '</div>';
+  } finally {
+    runBtn.disabled = false;
+  }
+}
+
+placeholder();
+runBtn.addEventListener('click', run);
+</script>
+</body>
+</html>
+"""
+
+
 
 def _classify_override(identifier: str) -> IdentifierType | None:
     """Never force a type; let the classifier decide. Kept explicit for clarity."""
@@ -577,11 +896,18 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._send(200, body, content_type, csp=CONSOLE_CSP)
 
-    def _guard_allowed(self) -> bool:
+    def _guard_allowed(self, path: str | None = None) -> bool:
         """Per-client rate limit and API-key check shared by every guard route.
 
         Returns True when the request may proceed. On refusal it has already sent
         the response and the caller must return immediately.
+
+        ``path`` is the exact request path. When the operator has enabled the
+        public demonstration and ``path`` is on the read-only allowlist
+        (:data:`PUBLIC_DEMO_ROUTES`), the API key is not required; every other
+        path keeps the requirement. The rate limit is charged exactly once on
+        every path, so a keyless demonstration route can never be used to hammer
+        the free upstreams, and a refusal is never written twice.
         """
         client_ip = self.client_address[0] if self.client_address else "unknown"
         limiter = self.server.guard_limiter  # type: ignore[attr-defined]
@@ -593,7 +919,10 @@ class Handler(BaseHTTPRequestHandler):
                 {"Retry-After": str(retry_after)},
             )
             return False
-        if not self._authorized():
+        keyless_demo = (
+            config.PUBLIC_DEMO_ENABLED and path is not None and path in PUBLIC_DEMO_ROUTES
+        )
+        if not keyless_demo and not self._authorized():
             self._json(401, {"error": "unauthorized"}, {"WWW-Authenticate": "X-API-Key"})
             return False
         return True
@@ -666,16 +995,51 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- routes -------------------------------------------------------------
 
+    def _index_page(self) -> bytes:
+        """Render the landing page, pointing at whichever demonstration exists.
+
+        When the public demonstration is enabled the primary call to action opens
+        the keyless ``/demo`` page; otherwise it opens the operator console's
+        attack simulations, so the page never links to a route that would answer
+        with an authentication error.
+        """
+        if config.PUBLIC_DEMO_ENABLED:
+            guard_link = '<a href="demo">Open the authorization firewall &rarr;</a>'
+            demo_link = '<a href="demo">Run the six-scene demonstration &rarr;</a>'
+        else:
+            guard_link = '<a href="console#guard">Open the authorization firewall &rarr;</a>'
+            demo_link = '<a href="console#lab">Open the demonstration &rarr;</a>'
+        html = (
+            _INDEX_HTML.replace("__VERSION__", __version__)
+            .replace("__DISCLAIMER__", DISCLAIMER)
+            .replace("__GUARD_LINK__", guard_link)
+            .replace("__DEMO_LINK__", demo_link)
+        )
+        return html.encode("utf-8")
+
     def do_GET(self) -> None:  # noqa: N802
         path = urlparse(self.path).path
         if path in ("/", "/index.html"):
-            html = _INDEX_HTML.replace("__VERSION__", __version__).replace(
+            self._send(200, self._index_page(), "text/html; charset=utf-8")
+        elif path in ("/demo", "/demo/"):
+            # The public, keyless six-scene demonstration. It is served only when
+            # the operator opted in; otherwise the landing page's link to it is
+            # not rendered either, so the two never disagree.
+            if not config.PUBLIC_DEMO_ENABLED:
+                self._json(404, {"error": "not found"})
+                return
+            html = _DEMO_HTML.replace("__VERSION__", __version__).replace(
                 "__DISCLAIMER__", DISCLAIMER
             )
             self._send(200, html.encode("utf-8"), "text/html; charset=utf-8")
         elif path in ("/console", "/console/"):
             html = CONSOLE_HTML.replace("__VERSION__", __version__).replace(
                 "__DISCLAIMER__", DISCLAIMER
+            ).replace(
+                "__DEMO_HINT__",
+                ' " For a keyless walkthrough, open the public demonstration at /demo."'
+                if config.PUBLIC_DEMO_ENABLED
+                else ' ""',
             )
             self._send(200, html.encode("utf-8"), "text/html; charset=utf-8", csp=CONSOLE_CSP)
         elif path in _STATIC_FILES:
@@ -685,8 +1049,10 @@ class Handler(BaseHTTPRequestHandler):
         elif path.startswith("/api/guard/"):
             # Guard reads expose operational state, not user data, but they are
             # still gated by the same API key as the investigate endpoint when
-            # one is configured, and carry their own per-client rate limit.
-            if not self._guard_allowed():
+            # one is configured, and carry their own per-client rate limit. The
+            # only exception is the exact public-demonstration allowlist, served
+            # keyless (and rate-limited) when the operator opts in.
+            if not self._guard_allowed(path):
                 return
             parsed = urlparse(self.path)
             params = {k: v[0] for k, v in parse_qs(parsed.query).items()}

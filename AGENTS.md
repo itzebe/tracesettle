@@ -1989,3 +1989,71 @@ review and fixed on `feat/outlayer-custody-execution`.
   gap waiting to happen. Derive the required set from the code that consumes it,
   and fail closed when a route consults an identity the transport did not
   authenticate.
+## Mission 21 — public demonstration readiness + production verification (2026-11-06)
+
+The product was implemented and correct, but a first-time visitor to production
+could not see it work: every guard route answered `401` behind the operator API
+key and `/demo` answered `404`. The landing-page copy was accurate but the only
+path to the demonstration was the key-gated console. This pass makes the real
+boundary visible **without widening the authenticated surface**.
+
+- **Opt-in keyless demonstration (`TRACESETTLE_PUBLIC_DEMO`, off by default).**
+  When enabled, `tracesettle/ui.py:PUBLIC_DEMO_ROUTES` is served without the API
+  key, plus the `/demo` page that presents the six-scene story. The allowlist is
+  an **exact match**: `/api/guard/scenarios` and
+  `/api/guard/near/{agent-demo,policy-scope,behaviours,prompt-injection,settlement-check}`.
+  Every write route, the live policy document, metrics, incidents, audit,
+  invariants, safeguards, the Intents lifecycle, the wallet/execution routes and
+  `/api/investigate` keep the key requirement. Enabling it cannot relax the
+  fail-closed start-up check: a public bind still requires credentials.
+- **One gate, not two.** `Handler._guard_allowed(path)` charges the per-client
+  rate limit **exactly once** and writes a refusal **once**. An earlier two-gate
+  form could attempt two responses on a 429 and could double-charge the limit.
+  Do not split it again.
+- **Scene 6 is real, read-only evidence (`tracesettle/near/settlement_check.py`).**
+  It reads an already-final NEAR **testnet** transaction from a public RPC and
+  verifies it field by field (`signer_matches`, `receiver_matches`, `final`,
+  `execution_success`, `transfer_amount_matches`). It refuses mainnet and reports
+  `UNAVAILABLE` on an outage — never a fabricated verdict. Nothing is signed,
+  broadcast or moved.
+- **Landing page.** Capability copy states both halves (authorization firewall +
+  settlement verification); the demonstration CTA is labelled and its link target
+  is chosen at render time so it never points at a key-gated route when the demo
+  is off (`__GUARD_LINK__` / `__DEMO_LINK__`). Both public pages ship the
+  same-origin inline SVG favicon the console already had, so no page logs a 404.
+- **Console 401 hint is honest.** The unauthorized message uses the
+  `__DEMO_HINT__` placeholder and points at `/demo` **only** when the flag is on;
+  otherwise it renders empty. No placeholder ever reaches a client.
+- **New invariant (48 total):** `public_demo_never_exposes_a_state_changing_route`.
+  It fails if a state-changing token (`sign`, `evaluate`, `wallet`, `execution`,
+  `lifecycle`, `incident`, `audit`, `metrics`, `safeguards`, `tee`, `enclave`,
+  `access-keys`, `investigations`) appears in the allowlist, or if the
+  demonstration stops being labelled `simulated`. Mutation-tested two ways in
+  `tests/test_guard_invariants.py`.
+- **New fail-closed test:** `test_public_demo_does_not_relax_the_credential_check`
+  proves `TRACESETTLE_PUBLIC_DEMO=1` on a `0.0.0.0` bind with no credentials still
+  exits `2`.
+- **Tests:** 1458 → **1497 passed, 28 skipped** (1525 collected; 1521 passed with
+  PostgreSQL). New `tests/test_public_demo.py` (36) plus the two invariant
+  mutations and the fail-closed test. pyflakes clean; compileall OK; offline demo
+  byte-identical (`4864f13c…`); near demo byte-identical (`fc2949ef…`).
+- **Production, verified live (2026-11-06).** PR #13 squash-merged to master as
+  **`9aa3931d344a82fd9fe0a4b24036aa320cb2f070`**; all six CI checks green
+  (Tests and static analysis; PostgreSQL shared-state integration; Docker build
+  and runtime; Vercel; Vercel Preview Comments; Vercel container image). With
+  `TRACESETTLE_PUBLIC_DEMO=1` set on the Vercel project and a fresh production
+  deployment (`dpl_FJmYKU2mtxjvfdT8rQdqixdAKoDA`, alias `tracesettle-navy.vercel.app`):
+  `/`, `/demo`, `/console`, `/api/health` and the six keyless routes return `200`;
+  `/api/guard/metrics`, `/api/guard/policy`, `/api/guard/invariants`,
+  `/api/guard/near/execution`, `/api/guard/near/wallet` and a keyless
+  `POST /api/guard/evaluate` still return `401`. The live
+  `/api/guard/near/settlement-check` returns `state: VERIFIED`, `mainnet: false`,
+  all five checks `true`. The `/demo` page was driven in a real Chromium browser
+  at desktop (1280×900) and mobile (390×844): zero console errors, zero failed
+  requests, no horizontal overflow, and the six scenes render the real values.
+- **Changing a Vercel env var does not redeploy.** Trigger one with
+  `POST /v13/deployments?forceNew=1` and a `gitSource` that includes `org`
+  (omitting `org` is a `400`).
+- **Not changed:** the settlement engine, every authorization/verification rule,
+  and the `SimulatedExecutor` default. No mainnet transaction, no key material in
+  any response, no paid infrastructure.

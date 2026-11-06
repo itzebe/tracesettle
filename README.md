@@ -847,6 +847,22 @@ The response carries `"simulated": true`. The same run is the console's **NEAR
 Agent Security → End-to-end demonstration** panel, and
 `python3 demo/near_agent_demo.py` prints it as a narrative.
 
+**2b. Let a first-time visitor run it (opt-in).**
+
+```sh
+TRACESETTLE_PUBLIC_DEMO=1 python3 -m tracesettle serve --port 8080 &
+```
+
+`http://127.0.0.1:8080/demo` now runs the real six-scene demonstration **without an
+API key**: the injected redirect is `BLOCK`ed before the signer, the approved
+payment is authorized and signed, and Scene 6 reads a real, already-final NEAR
+**testnet** transaction from a public RPC and verifies it field by field. The flag
+opens a strict, exact allowlist of read-only guard GET routes and is **off by
+default**; every write route, the live policy document, metrics, incidents, audit,
+the wallet/execution routes and `/api/investigate` keep the API-key requirement,
+and the demonstration routes stay per-IP rate-limited. It does not relax the
+fail-closed start-up check: a public bind still requires credentials.
+
 **3. Prove the enforcement boundary: a permitted request executes, a suspicious
 one cannot.**
 
@@ -1408,6 +1424,16 @@ limit configurable by environment variable:
 - **API-key authentication.** Set `TRACESETTLE_API_KEY` to require an `X-API-Key`
   header on `POST /api/investigate` (constant-time comparison; the key is never
   logged or echoed). Unset, the endpoint is open — the default for loopback use.
+- **Opt-in public demonstration.** `TRACESETTLE_PUBLIC_DEMO=1` opens a strict,
+  read-only allowlist of guard GET routes *without* the API key — the agent-payment
+  demonstration, the deterministic attack scenarios, the policy-scope analysis and a
+  live read-only NEAR testnet settlement check — plus the `/demo` page that presents
+  them, so a first-time visitor can run the real boundary instead of meeting an
+  authentication error. The allowlist is an exact set: `/api/guard/evaluate`,
+  `/api/guard/sign`, the wallet and execution routes, the Intents lifecycle,
+  incidents, audit, metrics, the live policy document and `/api/investigate` all
+  keep the API-key requirement. It is **off by default**, so an unset deployment is
+  unchanged; the demonstration routes are still per-IP rate-limited.
 - **Per-IP rate limiting.** `TRACESETTLE_RATE_LIMIT_PER_MINUTE` /
   `_BURST` bound each client IP (keyed on the socket peer, so a spoofed
   `X-Forwarded-For` cannot bypass it); over-budget requests get `429` with

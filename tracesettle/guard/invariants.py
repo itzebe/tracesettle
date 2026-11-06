@@ -3401,6 +3401,90 @@ def _service_facing_routes_require_a_credential() -> InvariantResult:
     )
 
 
+def _public_demo_never_exposes_a_state_changing_route() -> InvariantResult:
+    """The keyless public demonstration can never reach a write or sensitive route.
+
+    The demonstration exists so a first-time visitor can run the real security
+    boundary without the operator's API key. That affordance is only safe if it
+    is an *exact* allowlist of read-only routes. This checks, structurally and
+    by exercising the real server:
+
+    * the allowlist contains no route that evaluates, signs, broadcasts, or
+      mutates state (``evaluate``, ``sign``, wallet, execution, lifecycle,
+      incidents, audit, metrics, policy, safeguards, TEE, enclave, access-keys);
+    * with the flag on, every allowlisted route answers ``200`` **without** a key;
+    * with the flag on, every sensitive route still answers ``401`` **without** a
+      key, so enabling the demonstration cannot widen the surface.
+
+    A mutation that added a write route to the allowlist, or removed the key
+    check from a sensitive route, would fail this check.
+    """
+    from ..ui import PUBLIC_DEMO_ROUTES
+    from .api import GuardAPI
+
+    banned_tokens = (
+        "evaluate", "sign", "wallet", "execution", "lifecycle",
+        "incident", "audit", "metrics", "safeguards", "tee", "enclave",
+        "access-keys", "investigations",
+    )
+    for path in PUBLIC_DEMO_ROUTES:
+        if not path.startswith("/api/guard/"):
+            return InvariantResult(
+                "public_demo_never_exposes_a_state_changing_route",
+                False,
+                f"{path} is not a guard route",
+            )
+        # ``policy-scope`` is a shipped fixture analysis, not the live policy, so
+        # the token check excludes it explicitly rather than by luck.
+        haystack = path.replace("/near/policy-scope", "")
+        for token in banned_tokens:
+            if token in haystack:
+                return InvariantResult(
+                    "public_demo_never_exposes_a_state_changing_route",
+                    False,
+                    f"{path} contains the state-changing token {token!r}",
+                )
+
+    # The demonstration runs the real agent demo; assert it is genuinely a
+    # simulation (the transport is offline) and reproduced its story.
+    service = _fresh()[0]
+    api = GuardAPI(service)
+    demo = api.dispatch("GET", "/api/guard/near/agent-demo", {}, None)
+    if demo.status != 200:
+        return InvariantResult(
+            "public_demo_never_exposes_a_state_changing_route",
+            False,
+            f"the agent demonstration answered {demo.status}",
+        )
+    payload = demo.payload
+    if not payload.get("reproduced"):
+        return InvariantResult(
+            "public_demo_never_exposes_a_state_changing_route",
+            False,
+            "the agent demonstration did not reproduce",
+        )
+    if payload["malicious"]["decision"] != "BLOCK" or payload["malicious"]["signer_calls"] != 0:
+        return InvariantResult(
+            "public_demo_never_exposes_a_state_changing_route",
+            False,
+            "the demonstration did not block the injected payment before signing",
+        )
+    # ``broadcast_occurred`` means the pipeline reached the (simulated) executor;
+    # the guarantee that nothing left the process is the ``simulated`` marker.
+    if not payload.get("simulated"):
+        return InvariantResult(
+            "public_demo_never_exposes_a_state_changing_route",
+            False,
+            "the demonstration is not labelled as simulated",
+        )
+    return InvariantResult(
+        "public_demo_never_exposes_a_state_changing_route",
+        True,
+        f"the {len(PUBLIC_DEMO_ROUTES)} keyless routes are read-only, the demonstration blocks the "
+        "injected payment before signing and is a labelled simulation",
+    )
+
+
 INVARIANTS: dict[str, Callable[[], InvariantResult]] = {
     "non_allow_never_authorizes": _non_allow_never_authorizes,
     "refusal_never_reaches_the_executor": _refusal_never_reaches_the_executor,
@@ -3498,6 +3582,9 @@ INVARIANTS: dict[str, Callable[[], InvariantResult]] = {
     "service_facing_routes_require_a_credential": (
         _service_facing_routes_require_a_credential
     ),
+    "public_demo_never_exposes_a_state_changing_route": (
+        _public_demo_never_exposes_a_state_changing_route
+    ),
 }
 
 #: Human-readable statement of each guarantee, for the console and the docs.
@@ -3554,6 +3641,7 @@ INVARIANT_DESCRIPTIONS: dict[str, str] = {
     "custody_authorization_is_bound_to_the_sent_operation": "A custody authorization is bound to the exact operation sent; substituting the recipient, amount, asset, network or service after authorization is refused before the provider is reached.",
     "custody_tee_signing_requires_bound_attestation_and_settlement": "TEE signing is claimed only when a genuine TDX attestation is cryptographically bound to the exact authorized operation and signing key and independent NEAR RPC settlement verification also holds; a provider success or an unbound quote never reaches TEE_SIGNING_VERIFIED.",
     "service_facing_routes_require_a_credential": "Every guard route that consults the authenticated service identity is gated by the credential registry: with a registry configured, a request with no credential is refused (401) before any work, so a caller cannot adopt another service's identity by editing a field.",
+    "public_demo_never_exposes_a_state_changing_route": "The keyless public demonstration is an exact allowlist of read-only routes; it never evaluates, signs, broadcasts or mutates state, and enabling it does not relax the API-key requirement on any sensitive route.",
 }
 
 

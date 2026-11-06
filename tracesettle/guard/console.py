@@ -640,6 +640,14 @@ async function api(method, path, body) {
   let payload = null;
   try { payload = await res.json(); } catch (e) { payload = null; }
   if (!res.ok) {
+    if (res.status === 401) {
+      // The operator console is key-gated. Say so plainly instead of a bare
+      // "unauthorized", and point at the keyless public demonstration when the
+      // operator has enabled it.
+      throw new Error(
+        "This console requires the operator API key (enter it above)." + __DEMO_HINT__
+      );
+    }
     const msg = (payload && payload.error) || ("HTTP " + res.status);
     throw new Error(msg);
   }
