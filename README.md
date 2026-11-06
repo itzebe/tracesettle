@@ -492,6 +492,62 @@ re-read from two independent public testnet RPCs
 the RPC transport (a network boundary), so every line of `execution.py` and
 `pipeline.py` runs.
 
+### End-to-end agent lifecycle (interception → block/authorize → settle → verify)
+
+`demo/near_agent_demo.py` runs the whole story through the **production**
+boundary in one command. A deterministic **local agent harness**
+(`tracesettle/near/agent_harness.py`) turns a payment instruction into a
+concrete transaction *proposal* - no model, no network - and drives it through
+the real `NearExecutionBoundary`, the real signer, the real broadcast, and the
+real independent settlement verification:
+
+```
+agent instruction -> proposal -> TraceSettle evaluation -> decision ->
+signer enforcement -> NEAR broadcast -> independent verification
+```
+
+Two scenarios run side by side:
+
+| Scenario | What the agent does | What TraceSettle does |
+| --- | --- | --- |
+| **malicious** | injected context redirects a legitimate invoice to an attacker receiver; the (compromised) planner proposes the attacker | the real guard `BLOCK`s it (`UNAPPROVED_DESTINATION`), the **signer is never invoked** (count `0`), nothing is broadcast |
+| **legitimate** | the operator-approved receiver is paid | the real guard `ALLOW`s it, the signer signs exactly the authorized bytes, the transaction is broadcast, and settlement is independently `VERIFIED` |
+
+The guard reads the proposal's **parameters**, never the agent's text: a
+convincing instruction cannot change the decision. "The signer was never
+reached" is proved as "the counting signer was called zero times" and "the
+transport recorded zero broadcasts", never as prose.
+
+```sh
+python3 demo/near_agent_demo.py            # offline, deterministic, no key
+python3 demo/near_agent_demo.py --json
+```
+→ the malicious payment is `BLOCK`ed before signing and the legitimate payment
+reaches `SETTLED` / `VERIFIED`. The offline transport is the only substitution
+(a network boundary); the boundary, guard, signer, pipeline and verifier are the
+real code. Labelled **SIMULATED**.
+
+**Live testnet run (`--live`).** With a funded `*.testnet` key the same harness
+signs and broadcasts a **real** testnet transaction and reads the on-chain
+record back to verify it. It refuses to point at mainnet and never writes the
+key anywhere.
+
+```sh
+TRACESETTLE_DEMO_TESTNET_KEY=<64-hex-seed> \
+TRACESETTLE_DEMO_ACCOUNT=<you.testnet> \
+TRACESETTLE_DEMO_RECEIVER=<recipient.testnet> \
+python3 demo/near_agent_demo.py --live
+```
+→ **Testnet verified:** the malicious scenario still `BLOCK`s (signer calls
+`0`); the legitimate scenario settles and verifies against the live chain. A
+real run (2026-11-06) moved 0.1 NEAR from `tsdemo916196f7.testnet` to
+`tsrecv2f0f12b8.testnet` (tx
+`HRKsn8s1L6h97aGHBWdkBmg7S8USzMN5aQePgxMc5o3n`), `FINAL` with status
+`SuccessValue`, re-read from two independent public testnet RPCs
+(`rpc.testnet.near.org`, `rpc.testnet.fastnear.com`). The live run is not
+reproduced in CI (it needs a funded key); the offline run is, and is
+byte-identical across runs.
+
 ### TEE-bound signing (optional, off by default)
 
 The same boundary can additionally require a verified Intel TDX attestation
@@ -710,12 +766,12 @@ a bare interpreter.
 **1. Run the tests.**
 
 ```sh
-python -m pytest tests/ --collect-only -q   # 1457 tests collected
-python -m pytest tests/ -q                  # 1429 passed, 28 skipped
+python -m pytest tests/ --collect-only -q   # 1467 tests collected
+python -m pytest tests/ -q                  # 1440 passed, 27 skipped
 ```
-→ `1429 passed, 28 skipped`. The skips are the PostgreSQL integration
+→ `1440 passed, 27 skipped`. The skips are the PostgreSQL integration
 tests; set `TRACESETTLE_TEST_PG_DSN` to a real server to run them
-(**1453 passed, 4 skipped** — the remaining 4 are opt-in *live-infrastructure*
+(**1464 passed, 3 skipped** — the remaining 3 are opt-in *live-infrastructure*
 tests that need real provider credentials, a testnet key, or a TDX enclave
 harness, none of which a zero-budget local run has).
 
@@ -915,6 +971,20 @@ python3 demo/near_demo.py --access-keys
 `NATIVE_NEAR` request; the second prints that a function-call key cannot transfer
 NEAR, that an omitted `method_names` means every method, and that an omitted
 `allowance` means unlimited gas.
+
+**13b. Run the full agent lifecycle end to end: intercept → block → authorize →
+settle → verify.**
+
+```sh
+python3 demo/near_agent_demo.py
+```
+→ a deterministic local agent proposes two payments through the **real**
+execution boundary. The malicious one (a legitimate invoice redirected to an
+attacker receiver) is `BLOCK`ed with the signer invoked **zero** times and
+nothing broadcast; the legitimate one is `ALLOW`ed, signed, broadcast, and
+independently verified (`SETTLED` / `VERIFIED`). Add `--live` with a funded
+`*.testnet` key to run the identical path against **NEAR testnet** (see
+[End-to-end agent lifecycle](#end-to-end-agent-lifecycle-interception--blockauthorize--settle--verify)).
 
 **14. Inspect the NEAR surface over HTTP (server from step 8 running).**
 
@@ -1215,9 +1285,10 @@ identical decisions.
 | `Dockerfile.vercel` / `vercel.json` | Vercel Hobby deployment via the Container Runtime (see `deploy/production/VERCEL_DEPLOYMENT.md`). |
 | `.github/workflows/ci.yml` | CI: tests, static analysis, Docker build + runtime, demo determinism. |
 | `demo/demonstrate.py` | Read-only walkthrough (live, or `--offline` replay of captures). |
+| `demo/near_agent_demo.py` | End-to-end agent lifecycle (intercept → block/authorize → settle → verify), offline or `--live` on testnet. |
 | `demo/replay_opener.py` | Offline transport that replays `evidence/raw/` through the real code. |
 | `tracesettle/static/near-connect.js` | Vendored `@hot-labs/near-connect` (MIT) wallet connector, served same-origin at `/assets/near-connect.js`. |
-| `tests/` | 1384 tests (24 PostgreSQL tests skip without `TRACESETTLE_TEST_PG_DSN`; 4 further tests are opt-in live tests that skip without a live testnet key, live Agent API credentials, or `TRACESETTLE_ENCLAVE_HARNESS=1`). `evidence/raw/` fixtures are real captures; `tests/fixtures/synthetic/` are clearly labelled synthetic. |
+| `tests/` | 1467 tests (27 PostgreSQL tests skip without `TRACESETTLE_TEST_PG_DSN`; 3 further tests are opt-in live tests that skip without a live testnet key, live Agent API credentials, or `TRACESETTLE_ENCLAVE_HARNESS=1`). `evidence/raw/` fixtures are real captures; `tests/fixtures/synthetic/` are clearly labelled synthetic. |
 | `PHASE1_FEASIBILITY.md` | Phase 1 feasibility and API verification. |
 | `submission/` | Hackathon artifacts: API payload shape, technical summary, demo post draft, publication checklist. |
 | `docs/official/` | NEAR documentation captured during Phase 1. |
@@ -1225,10 +1296,10 @@ identical decisions.
 
 tracesettle/near/          NEAR agent protection: policy scope, access-key
                           analysis, the agent authorization wrapper, the attack
-                          scenarios, the settlement assurance view, the Intents
-                          lifecycle (create → authorize → quote → approve →
-                          deposit → settle), TEE research, and the enclave
-                          signing boundary
+                          scenarios, the local agent harness (agent_harness.py),
+                          the settlement assurance view, the Intents lifecycle
+                          (create → authorize → quote → approve → deposit →
+                          settle), TEE research, and the enclave signing boundary
 
 ## Runtime dependencies
 
@@ -1518,6 +1589,9 @@ It performs no deployment, publish, or release, and needs no repository secrets:
 - the offline demo run twice, asserted byte-identical (determinism);
 - the NEAR attack demonstration run twice, asserted byte-identical, with every
   scenario required to match its expected outcome;
+- the agent lifecycle demonstration (`demo/near_agent_demo.py`) run twice,
+  asserted byte-identical, requiring the malicious payment to `BLOCK` with the
+  signer invoked `0` times and the legitimate payment to reach `VERIFIED`;
 - a gate that fails if any non-standard-library import appears at module level
   (the optional PostgreSQL driver is allowed only as a lazy, function-body import);
 - a PostgreSQL job (`postgres:16` service) that runs the distributed
@@ -1532,7 +1606,7 @@ immutable commit SHA (not a moving tag), and cancels superseded runs.
 ## Tests
 
 ```sh
-python3 -m pytest tests/ -q          # 1429 passed, 28 skipped (1453 passed, 4 skipped with PostgreSQL)
+python3 -m pytest tests/ -q          # 1440 passed, 27 skipped (1464 passed, 3 skipped with PostgreSQL)
 python3 -m pytest tests/test_guard_authorization.py -q
 python3 -m pytest tests/test_guard_invariants.py -q
 python3 -m pytest tests/test_guard_end_to_end.py -q
@@ -1543,6 +1617,7 @@ python3 -m pytest tests/test_ui.py -q
 python3 -m pytest tests/test_near_policy.py tests/test_near_access_keys.py -q
 python3 -m pytest tests/test_near_agent_wrapper.py tests/test_near_attacks.py -q
 python3 -m pytest tests/test_near_api.py tests/test_near_invariants.py -q
+python3 -m pytest tests/test_near_agent_harness.py -q   # full lifecycle through the real boundary
 python3 -m pytest tests/test_near_acceptance.py -q   # product-level wiring
 ```
 

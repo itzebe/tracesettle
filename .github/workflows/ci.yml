@@ -88,6 +88,31 @@ jobs:
           print(f'{len(data["results"])} NEAR attack scenarios matched expectation')
           PY
 
+      - name: Agent lifecycle demonstration (offline) determinism
+        run: |
+          set -eu
+          python demo/near_agent_demo.py --json > /tmp/agent-1.json
+          python demo/near_agent_demo.py --json > /tmp/agent-2.json
+          if ! cmp -s /tmp/agent-1.json /tmp/agent-2.json; then
+            echo "agent lifecycle demonstration output is not deterministic"
+            diff -u /tmp/agent-1.json /tmp/agent-2.json || true
+            exit 1
+          fi
+          python - <<'PY'
+          import json
+          with open("/tmp/agent-1.json") as handle:
+              data = json.load(handle)
+          mal = data["malicious"]
+          legit = data["legitimate"]
+          assert mal["decision"] == "BLOCK", mal["decision"]
+          assert mal["signer_calls"] == 0, "the signer was reached for a blocked payment"
+          assert mal["broadcast_occurred"] is False
+          assert legit["decision"] == "ALLOW", legit["decision"]
+          assert legit["signer_calls"] == 1
+          assert legit["settlement_state"] == "VERIFIED", legit["settlement_state"]
+          print("agent lifecycle demonstration reproduced: block-before-sign + verified settlement")
+          PY
+
       - name: Confirm no runtime third-party imports
         run: |
           set -eu
