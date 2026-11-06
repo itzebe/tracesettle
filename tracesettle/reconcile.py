@@ -22,6 +22,8 @@ list asserted by the test-suite):
 10. A hash commitment is not represented as proof the committed event is true.
 11. Simulated evidence is never treated as confirmation, even when it carries a
     ``CONFIRMED`` verification label.
+12. A transaction confirmed to have reverted is never treated as a confirmation:
+    block inclusion proves the transaction was mined, not that it succeeded.
 """
 
 from __future__ import annotations
@@ -82,6 +84,10 @@ SAFETY_INVARIANTS: dict[str, str] = {
     "simulated_evidence_never_confirms": (
         "Evidence whose provenance is simulated is never treated as confirmation, even if it "
         "carries a CONFIRMED verification label."
+    ),
+    "reverted_execution_never_confirms": (
+        "A stage whose transaction is confirmed to have reverted is never labelled confirmed; "
+        "inclusion in a block proves the transaction was mined, not that it succeeded."
     ),
 }
 
@@ -227,6 +233,28 @@ def _assess_stage_inner(
             state=StageState.CONTRADICTORY,
             summary="Independent evidence at this stage conflicts materially.",
             conflicting_evidence_ids=tuple(e.id for e in stage_items),
+        )
+
+    # A transaction that was independently confirmed to have *reverted* delivered
+    # nothing. Its inclusion in a block is authentic, but inclusion only proves the
+    # transaction was mined — not that it succeeded. Treating a reverted execution
+    # as a confirmation would report a failed deposit as a confirmed one, so a
+    # confirmed revert at an origin or destination stage is decisive negative
+    # evidence and resolves the stage CONTRADICTORY, never CONFIRMED. NEAR
+    # settlement failures keep their own FAILED_VERIFIED path in ``_derive_outcome``.
+    if stage in {Stage.SOURCE_CHAIN_DEPOSIT, Stage.DESTINATION_CHAIN_DELIVERY} and _confirmed_revert(
+        stage_items
+    ):
+        return StageAssessment(
+            stage=stage,
+            state=StageState.CONTRADICTORY,
+            summary=(
+                "An on-chain transaction at this stage was confirmed to have reverted, so it "
+                "did not deliver anything. Its inclusion in a block does not confirm this stage."
+            ),
+            conflicting_evidence_ids=tuple(
+                e.id for e in stage_items if _is_confirmed_revert(e)
+            ),
         )
 
     confirmed = [
@@ -602,6 +630,25 @@ def _reported_summary(stage: Stage, reported: list[EvidenceItem]) -> str:
     if stage is Stage.DESTINATION_CHAIN_DELIVERY:
         return f"Destination delivery is reported by an upstream service ({joined}) but not independently confirmed."
     return f"Reported by an upstream service ({joined}) but not independently confirmed."
+
+
+def _is_confirmed_revert(e: EvidenceItem) -> bool:
+    """True when an item is authoritative evidence that a transaction reverted.
+
+    An EVM ``REVERTED`` receipt status is an execution fact, but a provider that
+    merely *reports* a failure is not proof it happened, so only a CONFIRMED,
+    non-simulated item counts. A NEAR execution failure is excluded: it has its
+    own FAILED_VERIFIED path and must not be read as a source-chain revert.
+    """
+    if e.verification is not Verification.CONFIRMED or e.provenance is Provenance.SIMULATED:
+        return False
+    if e.event_type is EventType.NEAR_TX_EXECUTION:
+        return False
+    return e.reported_status == "REVERTED" or e.details.get("execution_succeeded") is False
+
+
+def _confirmed_revert(items: list[EvidenceItem]) -> bool:
+    return any(_is_confirmed_revert(e) for e in items)
 
 
 def _has_material_conflict(items: list[EvidenceItem]) -> bool:
@@ -1076,6 +1123,13 @@ def _safety_report(
         "simulated_evidence_never_confirms": not any(
             s.state is StageState.CONFIRMED
             and any(e.provenance is Provenance.SIMULATED for e in items if e.id in s.supporting_evidence_ids)
+            for s in stages
+        ),
+        # A confirmed revert is never a confirmation: the stage must not be CONFIRMED
+        # while it carries decisive evidence that the transaction reverted.
+        "reverted_execution_never_confirms": not any(
+            s.state is StageState.CONFIRMED
+            and any(_is_confirmed_revert(e) for e in items if e.id in s.supporting_evidence_ids)
             for s in stages
         ),
     }

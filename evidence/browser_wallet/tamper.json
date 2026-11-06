@@ -1,0 +1,36 @@
+{
+  "scenario": "tamper",
+  "events": [
+    "wallet:near:signIn",
+    "wallet:near:signIn",
+    "wallet:near:getAccounts",
+    "wallet:near:signIn",
+    "dialog: confirm Authorize and send this transfer?",
+    "wallet:near:getAccounts",
+    "wallet:near:signAndSendTransaction",
+    "wallet:tampered deposit -> 500000000000000000000000"
+  ],
+  "connectedAccount": "tsw768d7b5551.testnet",
+  "broadcast": {
+    "expectedHash": "BHgNvQ2AUBLknEWMo13dueR1yWc84puLaahu8dYhhRTR",
+    "onchainHash": "BHgNvQ2AUBLknEWMo13dueR1yWc84puLaahu8dYhhRTR",
+    "status": {
+      "SuccessValue": ""
+    }
+  },
+  "outputText": "Settlement\nDISPUTED\nTransaction\nBHgNvQ2AUBLknEWMo13dueR1yWc84puLaahu8dYhhRTR\nIndependent evidence\nthe on-chain record contradicts the intended operation\nView the transaction on the explorer\nChecks performed on the on-chain record\nCHECK\tRESULT\tDETAIL\nsigner_matches\tpass\texpected tsw768d7b5551.testnet, got tsw768d7b5551.testnet\nreceiver_matches\tpass\texpected tsr0c0e96c307.testnet, got tsr0c0e96c307.testnet\nfinal\tpass\tfinal_execution_status=FINAL\nexecution_success\tpass\tstatus=success\ntransfer_amount_matches\tfail\texpected 20000000000000000000000 yoctoNEAR, found 500000000000000000000000\nThe wallet success message is not evidence. The state above comes from the on-chain record, checked field by field against the authorized intent.",
+  "walletAsked": 1,
+  "lastWalletRequest": {
+    "signerId": "tsw768d7b5551.testnet",
+    "receiverId": "tsr0c0e96c307.testnet",
+    "actions": [
+      {
+        "type": "Transfer",
+        "params": {
+          "deposit": "500000000000000000000000"
+        }
+      }
+    ],
+    "network": "testnet"
+  }
+}

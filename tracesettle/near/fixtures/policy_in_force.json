@@ -1,0 +1,63 @@
+{
+  "_provenance": "synthetic",
+  "_note": "Reproduces the documented shape of an applied, provider-synced NEAR Intents agent policy. Not live provider state.",
+  "agent_id": "demo-agent.near",
+  "revision": 7,
+  "status": "APPLIED",
+  "provider_policy_synced": true,
+  "frozen": false,
+  "actions": [
+    "swap",
+    "transfer",
+    "withdraw"
+  ],
+  "assets": "any",
+  "confidential": false,
+  "owner_approval": false,
+  "limits": {
+    "per_transaction": {
+      "nep141:usdc.near": "100000000"
+    },
+    "daily": {
+      "nep141:usdc.near": "500000000"
+    },
+    "max_actions_per_hour": 20
+  },
+  "destinations": {
+    "mode": "only",
+    "list": [
+      {
+        "action": "withdraw",
+        "chain": "base",
+        "address": "0x1111111111111111111111111111111111111111",
+        "memo": null
+      },
+      {
+        "action": "withdraw",
+        "chain": "base",
+        "address": "0x2222222222222222222222222222222222222222",
+        "memo": null
+      }
+    ]
+  },
+  "budget_usd": "500",
+  "timelock_ms": 0,
+  "schedule": null,
+  "native": {
+    "near": {
+      "sign_message": false,
+      "transfer": false,
+      "call": false
+    },
+    "evm": {
+      "sign_typed_data": false,
+      "sign_message": false,
+      "sign_transaction": false
+    },
+    "solana": {
+      "sign_message": false,
+      "sign_transaction": false
+    }
+  },
+  "policy_hash": "synthetichash0000000000000000000000000000000000000000000000000000000000"
+}

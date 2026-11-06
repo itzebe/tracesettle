@@ -69,6 +69,58 @@ jobs:
           fi
           echo "offline demo is byte-identical across runs"
 
+      - name: NEAR attack demonstration determinism
+        run: |
+          set -eu
+          python demo/near_demo.py --json > /tmp/near-1.json
+          python demo/near_demo.py --json > /tmp/near-2.json
+          if ! cmp -s /tmp/near-1.json /tmp/near-2.json; then
+            echo "NEAR demonstration output is not deterministic"
+            diff -u /tmp/near-1.json /tmp/near-2.json || true
+            exit 1
+          fi
+          python - <<'PY'
+          import json
+          with open("/tmp/near-1.json") as handle:
+              data = json.load(handle)
+          if not data["all_passed"]:
+              raise SystemExit("a NEAR attack scenario did not match its expected outcome")
+          print(f'{len(data["results"])} NEAR attack scenarios matched expectation')
+          PY
+
+      - name: Agent lifecycle demonstration (offline) determinism
+        run: |
+          set -eu
+          python demo/near_agent_demo.py --json > /tmp/agent-1.json
+          python demo/near_agent_demo.py --json > /tmp/agent-2.json
+          if ! cmp -s /tmp/agent-1.json /tmp/agent-2.json; then
+            echo "agent lifecycle demonstration output is not deterministic"
+            diff -u /tmp/agent-1.json /tmp/agent-2.json || true
+            exit 1
+          fi
+          python - <<'PY'
+          import json
+          with open("/tmp/agent-1.json") as handle:
+              data = json.load(handle)
+          mal = data["malicious"]
+          legit = data["legitimate"]
+          assert mal["decision"] == "BLOCK", mal["decision"]
+          assert mal["signer_calls"] == 0, "the signer was reached for a blocked payment"
+          assert mal["broadcast_occurred"] is False
+          assert legit["decision"] == "ALLOW", legit["decision"]
+          assert legit["signer_calls"] == 1
+          assert legit["settlement_state"] == "VERIFIED", legit["settlement_state"]
+          # The authorization must be bound to the exact bytes that are signed:
+          # the bound transaction_digest equals the recomputed signed-bytes digest.
+          binding = legit["authorization_binding"]
+          assert binding["destination"] == legit["proposed_receiver"], binding
+          assert binding["transaction_digest"] == legit["signed_bytes_digest"], (
+              "the authorization is not bound to the exact signed bytes"
+          )
+          assert legit["signed_bytes_digest"].startswith("sha256:")
+          print("agent lifecycle demonstration reproduced: block-before-sign + verified settlement")
+          PY
+
       - name: Confirm no runtime third-party imports
         run: |
           set -eu

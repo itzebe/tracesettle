@@ -299,6 +299,14 @@ class TransactionRequest:
     asserted_approval_fields: tuple[str, ...] = ()
     #: Free-form extras, recorded for audit but never evaluated as policy input.
     metadata: dict[str, Any] = field(default_factory=dict)
+    #: A digest of the exact bytes the authorization must cover, when the caller
+    #: holds them. It is bound into the authorization fingerprint so that a
+    #: transaction whose *bytes* differ from the evaluated parameters - a swapped
+    #: action, a substituted token contract, forged call arguments - cannot ride
+    #: on a valid authorization. ``None`` for callers that do not construct the
+    #: bytes (e.g. the EVM path); a ``None`` digest is simply absent from the
+    #: fingerprint, so those authorizations are unchanged.
+    transaction_digest: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -343,18 +351,25 @@ def canonical_fields(
     asset: str,
     amount: Decimal,
     destination: str,
+    transaction_digest: str | None = None,
 ) -> dict[str, str]:
     """The exact parameter set that an authorization is bound to.
 
     Case is normalised only where the chain's own encoding is case-insensitive
     (EVM hex addresses, asset symbols, chain ids, operations). Addresses are
     compared exactly otherwise.
+
+    ``transaction_digest`` - when the caller holds the transaction bytes - is
+    folded into the same set, so the authorization commits to the exact bytes
+    that will be signed and not merely to a summary of them. It is omitted
+    entirely when ``None`` so existing (byte-less) authorizations keep the exact
+    same fingerprint.
     """
     chain_norm = chain.strip().lower()
     dest = destination.strip()
     if dest[:2].lower() == "0x":
         dest = "0x" + dest[2:].lower()
-    return {
+    fields = {
         "service_id": service_id.strip(),
         "operation": operation.strip().upper(),
         "chain": chain_norm,
@@ -362,6 +377,9 @@ def canonical_fields(
         "amount": canonical_amount(amount),
         "destination": dest,
     }
+    if transaction_digest is not None:
+        fields["transaction_digest"] = transaction_digest
+    return fields
 
 
 def fingerprint_of(fields: dict[str, str]) -> RequestFingerprint:
@@ -378,6 +396,7 @@ def fingerprint_request(request: TransactionRequest) -> RequestFingerprint:
             asset=request.asset,
             amount=request.amount,
             destination=request.destination,
+            transaction_digest=request.transaction_digest,
         )
     )
 
@@ -487,10 +506,20 @@ class GuardDecision:
     #: An internal, never-exposed key material reference is deliberately absent:
     #: this process holds no private key.
     simulated: bool = False
+    #: The safeguards that changed this decision, if any (the learning loop).
+    safeguards_applied: tuple[Any, ...] = ()
+    #: Human-readable reasons each applied safeguard fired.
+    safeguard_reasons: tuple[str, ...] = ()
+    #: The lesson this decision created, if it created one.
+    learned_safeguard: Any = None
 
     @property
     def authorizes_signing(self) -> bool:
         return self.decision is Decision.ALLOW and self.authorization is not None
+
+    @property
+    def influenced_by_learning(self) -> bool:
+        return bool(self.safeguards_applied)
 
     def to_dict(self, *, include_authorization: bool = False) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -507,6 +536,16 @@ class GuardDecision:
             "controls": [c.to_dict() for c in self.controls],
             "simulated": self.simulated,
             "authorizes_signing": self.authorizes_signing,
+            "safeguards_applied": [
+                s.to_dict() if hasattr(s, "to_dict") else s for s in self.safeguards_applied
+            ],
+            "safeguard_reasons": list(self.safeguard_reasons),
+            "influenced_by_learning": self.influenced_by_learning,
+            "learned_safeguard": (
+                self.learned_safeguard.to_dict()
+                if hasattr(self.learned_safeguard, "to_dict")
+                else self.learned_safeguard
+            ),
         }
         if include_authorization and self.authorization is not None:
             out["authorization"] = self.authorization.to_dict()

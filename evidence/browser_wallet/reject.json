@@ -1,0 +1,16 @@
+{
+  "scenario": "reject",
+  "events": [
+    "wallet:near:signIn",
+    "wallet:near:signIn",
+    "wallet:near:getAccounts",
+    "wallet:near:signIn",
+    "dialog: confirm Authorize and send this transfer?",
+    "wallet:near:getAccounts",
+    "wallet:near:signAndSendTransaction"
+  ],
+  "connectedAccount": "tsw768d7b5551.testnet",
+  "outputText": "The wallet did not send the transaction: User rejected the signature request",
+  "walletAsked": 0,
+  "lastWalletRequest": null
+}

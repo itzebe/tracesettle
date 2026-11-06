@@ -153,10 +153,49 @@ Severity is compared by an explicit `rank`, never by the severity's string value
 `"MEDIUM"` sorts after `"HIGH"` alphabetically, so a string comparison would
 silently downgrade an outcome. This was a real defect caught by a test.
 
+## 7b. The learning loop (`guard/learning.py`, `guard/safeguards.py`)
+
+The mission lifecycle is *identify → authorize → protect → execute → verify →
+investigate → learn*. The learning loop closes the last step: when a decision
+surfaces a security failure, the lesson becomes a **durable safeguard** applied to
+later decisions, so the guard adapts instead of repeating the same mistake.
+
+A safeguard is a restriction scoped to a service identity and (optionally) an
+asset, with one of two dimensions:
+
+- `require_approval_above` — above a threshold (the amount that tripped the
+  lesson), a human must approve;
+- `require_verification` — the operation needs independent verification before it
+  may sign.
+
+A lesson is drawn **only** from a recognised risk finding (`LESSON_BY_FINDING`). An
+`ALLOW` never teaches — a decision that already did the right thing has nothing to
+learn — and an unrecognised finding code teaches nothing. Application restricts
+*above* the threshold, so the exact amount that tripped the lesson is still
+allowed; approval applies to the next, larger request.
+
+**Learning can only ever tighten.** The safeguard is folded into the operator's
+outcome through `_stricter`, so the strictest of the two wins. Nothing in the loop
+can grant a permission, relax a limit, or edit the policy. The store is a SQLite
+file (`SafeguardStore`, stdlib `sqlite3`) whose `record()` is idempotent per
+(service, asset, dimension) and keeps the **stricter** threshold, so a later,
+looser lesson cannot weaken an existing one. A store from a newer schema is
+refused rather than misread. With `TRACESETTLE_GUARD_SAFEGUARD_DB` unset the loop
+is inert and the guard is unchanged. A safeguard store that cannot be read is a
+**fail-closed** condition: the request is tightened to `REQUIRE_APPROVAL`, never
+silently allowed.
+
+Two invariants hold this property (`learning_loop_only_tightens`,
+`learning_never_relaxes_policy`), both mutation-tested. The deterministic
+demonstration is `python3 demo/near_demo.py --learning-loop`; the safeguards in
+force are reported by `GET /api/guard/safeguards` and rendered on the console's
+NEAR tab.
+
 ## 8. Structural invariants (`guard/invariants.py`)
 
-Fifteen guarantees, each checked by *running the real code* against an isolated
-service, exposed at `GET /api/guard/invariants` and asserted in
+Eighteen core guarantees (the NEAR-specific ones are listed in
+`docs/NEAR_INTEGRATION.md`), each checked by *running the real code* against an
+isolated service, exposed at `GET /api/guard/invariants` and asserted in
 `tests/test_guard_invariants.py`:
 
 | Invariant | Guarantee |
@@ -176,6 +215,8 @@ service, exposed at `GET /api/guard/invariants` and asserted in
 | `durable_nonce_is_single_use_across_restart` | a nonce spent before a restart is refused as `REPLAYED` after it |
 | `durable_counters_survive_restart` | velocity/volume counters persist across a restart; a limit is not reset by a bounce |
 | `state_store_failure_fails_closed` | an unreadable durable store yields `HOLD` with no authorization, never `ALLOW` |
+| `learning_loop_only_tightens` | a failure teaches a durable safeguard that tightens a later decision and survives a restart |
+| `learning_never_relaxes_policy` | a learned safeguard can only ever tighten; none can override or weaken the operator's policy |
 
 Every checker is also mutation-tested: the guarded behaviour is deliberately
 broken and the checker is shown to notice. A checker that cannot fail proves
@@ -196,7 +237,7 @@ single document with no third-party origins and a restrictive
 | `POST` | `/api/guard/incidents/{id}/status` | acknowledge or resolve |
 | `GET` | `/api/guard/audit` | audit records (`?verify=1` to check the chain) |
 | `GET` | `/api/guard/scenarios` | the three labelled simulation scenarios |
-| `GET` | `/api/guard/invariants` | run the fifteen structural checks now |
+| `GET` | `/api/guard/invariants` | run the structural checks now |
 | `POST` | `/api/guard/evaluate` | evaluate a transaction request |
 | `POST` | `/api/guard/sign` | attempt a signing through the reference signer |
 
@@ -278,6 +319,7 @@ transactions themselves are not real, and the console says so on the page.
 | `TRACESETTLE_GUARD_AUDIT_LOG` | in-memory | path to a persistent audit log |
 | `TRACESETTLE_GUARD_STATE_DB` | in-memory | path to a SQLite store for spent nonces and counters (survives a restart) |
 | `TRACESETTLE_GUARD_STATE_BUSY_TIMEOUT_MS` | 5000 | SQLite writer-lock wait in milliseconds |
+| `TRACESETTLE_GUARD_SAFEGUARD_DB` | unset | path to a SQLite store for learned safeguards (enables the learning loop) |
 | `TRACESETTLE_GUARD_MAX_BODY_BYTES` | 8192 | request body cap |
 | `TRACESETTLE_API_KEY` | unset | guards the guard endpoints |
 | `TRACESETTLE_SERVICE_CREDENTIALS` | unset | path to a per-service credential store |

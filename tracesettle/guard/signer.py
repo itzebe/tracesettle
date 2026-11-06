@@ -173,6 +173,7 @@ class ReferenceSigner:
             asset=request.transaction.asset,
             amount=request.transaction.amount,
             destination=request.transaction.destination,
+            transaction_digest=request.transaction.transaction_digest,
         )
         verification = self._authority.validate(
             request.authorization,
@@ -234,6 +235,7 @@ class ReferenceSigner:
                 asset=request.transaction.asset,
                 amount=request.transaction.amount,
                 destination=request.transaction.destination,
+                transaction_digest=request.transaction.transaction_digest,
             )
         )
         return self._authority.validate(
@@ -253,5 +255,6 @@ def fingerprint_of_request(request: TransactionRequest) -> RequestFingerprint:
             asset=request.asset,
             amount=request.amount,
             destination=request.destination,
+            transaction_digest=request.transaction_digest,
         )
     )

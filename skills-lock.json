@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "near-intents": {
+      "source": "near/agent-skills",
+      "sourceType": "github",
+      "skillPath": "skills/near-intents/SKILL.md",
+      "computedHash": "0f763c182b01e69695f730f359f6ebbbbb732c1ce23f4d71d7a0202060fed18f"
+    }
+  }
+}

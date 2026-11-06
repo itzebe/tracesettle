@@ -637,7 +637,7 @@ def test_guard_invariants_all_hold():
 def test_settlement_invariants_all_hold():
     from tracesettle.reconcile import SAFETY_INVARIANTS
 
-    assert len(SAFETY_INVARIANTS) == 11
+    assert len(SAFETY_INVARIANTS) == 12
 
 
 # --- extra: idempotency ----------------------------------------------------

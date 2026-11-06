@@ -15,6 +15,12 @@ from dataclasses import dataclass
 
 ONECLICK_BASE = os.environ.get("TRACESETTLE_ONECLICK_BASE", "https://1click.chaindefuser.com")
 ONECLICK_STATUS_PATH = "/v0/status"
+#: The documented public 1Click endpoints used by the live lifecycle client.
+#: Source: the vendored OpenAPI documents (``info.version 0.1.10``) under
+#: ``docs/official/api-reference_oneclick_*.md``. No endpoint is invented.
+ONECLICK_TOKENS_PATH = "/v0/tokens"
+ONECLICK_QUOTE_PATH = "/v0/quote"
+ONECLICK_DEPOSIT_SUBMIT_PATH = "/v0/deposit/submit"
 
 SOLVER_RELAY_URL = os.environ.get(
     "TRACESETTLE_SOLVER_RELAY_URL", "https://solver-relay-v2.chaindefuser.com/rpc"
@@ -173,6 +179,18 @@ GUARD_REQUIRE_POSTGRES = (os.environ.get("TRACESETTLE_GUARD_REQUIRE_POSTGRES") o
     "on",
 }
 
+#: Optional SQLite database for durable *security safeguards* (the learning loop).
+#: When set, a security failure or unverified condition recorded from one decision
+#: becomes a persistent restriction applied to later decisions; the lesson and its
+#: effect survive a restart. Unset disables the learning loop entirely, so a
+#: deployment without this variable behaves exactly as before. A configured path
+#: that cannot be opened stops start-up rather than running with learning silently
+#: disabled.
+GUARD_SAFEGUARD_DB = os.environ.get("TRACESETTLE_GUARD_SAFEGUARD_DB") or None
+GUARD_SAFEGUARD_BUSY_TIMEOUT_MS = int(
+    os.environ.get("TRACESETTLE_GUARD_SAFEGUARD_BUSY_TIMEOUT_MS", "5000")
+)
+
 #: Per-client-IP budget for the guard endpoints. Tighter than the investigation
 #: endpoint: these endpoints make no outbound calls, so a high rate is abusive.
 GUARD_RATE_LIMIT_PER_MINUTE = int(os.environ.get("TRACESETTLE_GUARD_RATE_LIMIT_PER_MINUTE", "120"))
@@ -248,6 +266,269 @@ def load_service_registry():
 #: True when the guard's authorization signing key is configured. The value is
 #: read by ``guard.authorization.load_key``; only its presence is inspected here.
 GUARD_AUTH_KEY_CONFIGURED = bool(os.environ.get("TRACESETTLE_GUARD_AUTH_KEY"))
+
+#: Optional key for signing human approvals (see ``tracesettle.near.approval``).
+#: Hex (64 chars) or any passphrase (hashed to 32 bytes). Unset mints an
+#: ephemeral per-process key, which is safe for a single instance; a multi-process
+#: deployment must configure it so an approval minted by one instance validates on
+#: another. The value is never logged or returned.
+GUARD_APPROVAL_KEY = os.environ.get("TRACESETTLE_GUARD_APPROVAL_KEY") or None
+
+# ---------------------------------------------------------------------------
+# NEAR Intents agent API (read-only policy inspection)
+# ---------------------------------------------------------------------------
+#
+# The NEAR integration reads an agent's policy to scope-check a transaction
+# before an agent signs. The base URL and key are NEVER invented: with no base
+# URL set the adapter reports UNCONFIGURED and the caller must supply a local
+# fixture. The key is read only by tracesettle.near.policy.PolicyAdapter and is
+# never logged or returned.
+
+#: Base URL of the NEAR Intents Agent API, e.g. https://<host>. Unset disables
+#: live policy reads (the loopback default); a local fixture is used instead.
+NEAR_AGENT_API_URL = os.environ.get("TRACESETTLE_NEAR_AGENT_API_URL") or None
+
+#: Agent API key. Only its presence is inspected here; the value is read by the
+#: adapter. Never logged, never returned, never committed.
+NEAR_AGENT_API_KEY = os.environ.get("TRACESETTLE_NEAR_AGENT_API_KEY") or None
+
+#: Optional path to a local policy fixture (JSON). When set, the wrapper can be
+#: exercised offline with no provider call. Fixtures are clearly labelled.
+NEAR_POLICY_FIXTURE = os.environ.get("TRACESETTLE_NEAR_POLICY_FIXTURE") or None
+
+#: Default agent id to read a policy for, when a request does not name one.
+NEAR_AGENT_ID = os.environ.get("TRACESETTLE_NEAR_AGENT_ID") or "treasury-agent"
+
+#: Whether live policy reads are configured. Only presence is inspected here.
+NEAR_AGENT_API_CONFIGURED = bool(NEAR_AGENT_API_URL)
+
+#: The provider host a live policy read must come from. When set, a read whose
+#: base URL host differs is refused (provider identity). Unset means the operator
+#: has not pinned a host; the base URL is then trusted as configured.
+NEAR_AGENT_API_EXPECTED_HOST = (
+    os.environ.get("TRACESETTLE_NEAR_AGENT_API_EXPECTED_HOST", "").strip().lower() or None
+)
+
+#: Maximum age (seconds) of a live policy revision. 0 disables the check. When
+#: set, a policy whose ``as_of`` is older (or missing) is refused as not current.
+NEAR_AGENT_POLICY_MAX_AGE_SECONDS = int(
+    os.environ.get("TRACESETTLE_NEAR_AGENT_POLICY_MAX_AGE_SECONDS", "0") or "0"
+)
+
+#: Whether a request may name the policy it is evaluated against.
+#:
+#: Off by default, and that is the security-relevant default: the policy a
+#: request is judged against is part of the *enforcement* decision, so a caller
+#: must never be able to select it. With this off, ``policy_fixture`` and
+#: ``agent_id`` in a request body are ignored and the operator's configuration
+#: is used (``TRACESETTLE_NEAR_POLICY_FIXTURE``, then the configured Agent API,
+#: then the guard's own policy). Turning it on is a deliberate, loopback-only
+#: affordance for exploring alternative policies; it must never be enabled on a
+#: public binding.
+NEAR_ALLOW_CLIENT_POLICY_SELECTION = (
+    os.environ.get("TRACESETTLE_NEAR_ALLOW_CLIENT_POLICY_SELECTION", "").strip().lower()
+    in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+)
+
+#: Whether the agent path reads counterparty risk intelligence from the NEAR RPC.
+#: Off by default (the loopback default), so a deployment that does not opt in
+#: has no counterparty signal. When on, an account that does not exist is
+#: blocked, a contract or a brand-new account forces a review, and a signal that
+#: cannot be read fails safe. Only public, keyless RPC reads are used.
+NEAR_COUNTERPARTY_ENABLED = (
+    os.environ.get("TRACESETTLE_NEAR_COUNTERPARTY", "").strip().lower()
+    in {"1", "true", "yes", "on"}
+)
+
+#: Optional path to an evidence-backed counterparty blocklist (JSON). Every
+#: entry must name a source, or loading fails. Unset means no blocklist. The file
+#: holds only public identifiers and published evidence, never secrets.
+NEAR_BLOCKLIST_PATH = os.environ.get("TRACESETTLE_NEAR_BLOCKLIST") or None
+
+#: The account-age floor, in blocks, below which a counterparty is reviewed as
+#: "new". At roughly one block per second, the default (86400) is about a day.
+NEAR_COUNTERPARTY_MIN_AGE_BLOCKS = int(
+    os.environ.get("TRACESETTLE_NEAR_COUNTERPARTY_MIN_AGE_BLOCKS", "86400") or "86400"
+)
+
+#: Whether the agent path can validate a human approval for a REQUIRE_APPROVAL
+#: decision. Off by default, so a request that needs approval can never become
+#: ALLOW on an unconfigured deployment (the fail-closed default). When on, an
+#: approval must be bound to the exact transaction payload, is single-use, and
+#: expires. The signing key is generated from ``TRACESETTLE_GUARD_APPROVAL_KEY``
+#: when set, otherwise an ephemeral key is used and reported as ephemeral.
+NEAR_APPROVAL_ENABLED = (
+    os.environ.get("TRACESETTLE_NEAR_APPROVAL", "").strip().lower()
+    in {"1", "true", "yes", "on"}
+)
+
+#: Seconds an approval remains valid. A short window keeps a stale approval from
+#: outliving the transaction it approved.
+NEAR_APPROVAL_TTL_SECONDS = int(
+    os.environ.get("TRACESETTLE_NEAR_APPROVAL_TTL_SECONDS", "300") or "300"
+)
+
+#: Path to the durable NEAR Intents lifecycle database (SQLite). Unset means the
+#: lifecycle keeps no durable record, which is the loopback default; a public
+#: deployment that offers the lifecycle must set it so investigations survive a
+#: restart. The file holds no signing material.
+INTENTS_DB = os.environ.get("TRACESETTLE_INTENTS_DB") or None
+
+#: Path to the durable settlement-investigations database (SQLite). Unset means a
+#: completed investigation is returned but not stored, which is the loopback
+#: default. When set, every investigation is persisted so a report produced
+#: before a restart can be retrieved afterward with its evidence intact. The file
+#: holds only public on-chain identifiers and published evidence.
+INVESTIGATIONS_DB = os.environ.get("TRACESETTLE_INVESTIGATIONS_DB") or None
+
+#: Whether the NEAR Intents lifecycle routes are enabled at all. Off by default:
+#: the lifecycle can issue a live quote (a fundable deposit address) and so is an
+#: explicit operator decision, not something a public bind turns on silently.
+NEAR_LIFECYCLE_ENABLED = (
+    os.environ.get("TRACESETTLE_NEAR_LIFECYCLE", "").strip().lower()
+    in {"1", "true", "yes", "on"}
+)
+
+#: Whether the NEAR execution boundary is enabled. Off by default. When enabled,
+#: TraceSettle builds real NEAR transactions, hands them to a caller's wallet to
+#: sign, broadcasts the signed bytes, and independently verifies settlement. It
+#: never holds a key. Because enabling it exposes a path to a live broadcast, it
+#: is an explicit operator decision and never turned on by a public bind.
+NEAR_EXECUTION_ENABLED = (
+    os.environ.get("TRACESETTLE_NEAR_EXECUTION", "").strip().lower()
+    in {"1", "true", "yes", "on"}
+)
+
+#: The NEAR network the execution boundary acts on: ``testnet`` (the default) or
+#: ``mainnet``. Testnet is the default so a misconfiguration cannot spend real
+#: funds. The network is resolved server-side and its genesis hash is checked
+#: against the RPC before any transaction is built.
+NEAR_EXECUTION_NETWORK = os.environ.get("TRACESETTLE_NEAR_EXECUTION_NETWORK", "testnet").strip() or "testnet"
+
+#: Whether a verified TEE attestation is **required** before the execution
+#: boundary will accept a signature. Off by default: the TEE gate is an explicit
+#: operator decision. When on, a transaction cannot reach the signer unless a
+#: genuine Intel TDX attestation is bound to its exact digest and decision nonce,
+#: so an attestation is enforced rather than merely displayed.
+NEAR_TEE_REQUIRED = (
+    os.environ.get("TRACESETTLE_NEAR_TEE_REQUIRED", "").strip().lower()
+    in {"1", "true", "yes", "on"}
+)
+
+#: The TD report measurement fingerprint (``sha256`` of the canonical measurement
+#: fields) the TEE gate requires. Empty means the measurement is recorded and
+#: reported as ``UNPINNED`` rather than claimed; a non-empty value pins it, and a
+#: quote whose measurement differs is refused.
+NEAR_TEE_EXPECTED_MEASUREMENT = (
+    os.environ.get("TRACESETTLE_NEAR_TEE_EXPECTED_MEASUREMENT", "").strip().lower()
+)
+
+#: The durable execution-record database (SQLite). Unset means execution records
+#: live in memory only, which is the loopback default; a deployment that relies
+#: on the TEE gate should set it so a record survives a restart.
+NEAR_EXECUTION_DB = os.environ.get("TRACESETTLE_NEAR_EXECUTION_DB", "").strip() or None
+
+#: The enclave signing endpoint. Unset disables enclave signing: the boundary
+#: reports itself unavailable and refuses to sign, so hardware-required
+#: execution stays disabled until a genuine endpoint is supplied. It is NOT
+#: invented; the operator must configure it.
+ENCLAVE_SIGN_URL = os.environ.get("TRACESETTLE_ENCLAVE_SIGN_URL", "").strip() or None
+
+#: The approved enclave measurement, as ``field=hex`` pairs separated by commas
+#: (for example ``mr_config_id=01dc14...000``). Every field is checked against the
+#: verified quote. Unset means no identity is approved, so provisioning is
+#: refused (fail-closed) rather than trusting an unpinned measurement.
+ENCLAVE_APPROVED_MEASUREMENT = (
+    os.environ.get("TRACESETTLE_ENCLAVE_APPROVED_MEASUREMENT", "").strip() or None
+)
+
+#: Whether enclave signing is required for execution. When set, a transaction is
+#: never signed by the software signer; it must come from a verified enclave.
+ENCLAVE_REQUIRED = (
+    os.environ.get("TRACESETTLE_ENCLAVE_REQUIRED", "").strip().lower()
+    in {"1", "true", "yes", "on"}
+)
+
+#: The durable enclave-key lifecycle database (SQLite). Unset keeps the lifecycle
+#: in memory, which is the loopback default; a deployment that revokes keys
+#: should set it so a revocation survives a restart.
+ENCLAVE_KEY_DB = os.environ.get("TRACESETTLE_ENCLAVE_KEY_DB", "").strip() or None
+
+
+def parse_approved_measurement(raw: str | None) -> dict[str, str]:
+    """Parse ``field=hex,field=hex`` into a mapping, raising on a malformed value.
+
+    A malformed value is a hard error: an operator who tried to pin an identity
+    and mistyped it must not end up with a boundary that pins nothing (which,
+    fail-closed, refuses everything — but silently, which is worse than a clear
+    start-up failure).
+    """
+    if not raw:
+        return {}
+    fields: dict[str, str] = {}
+    for pair in raw.split(","):
+        pair = pair.strip()
+        if not pair:
+            continue
+        if "=" not in pair:
+            raise ValueError(
+                f"approved measurement entry {pair!r} is not 'field=hex'; refusing to "
+                "start with a malformed measurement pin"
+            )
+        key, value = pair.split("=", 1)
+        key, value = key.strip(), value.strip().lower()
+        if not key or not value:
+            raise ValueError(f"approved measurement entry {pair!r} has an empty field or value")
+        fields[key] = value
+    return fields
+
+
+#: The TTL, in seconds, of an execution record. It is the window in which an
+#: authorization may be signed; after it the record is EXPIRED and refuses.
+NEAR_EXECUTION_TTL_SECONDS = int(
+    os.environ.get("TRACESETTLE_NEAR_EXECUTION_TTL_SECONDS", "90") or "90"
+)
+
+#: The durable submission-ledger database (SQLite). Every signed/broadcast
+#: submission is recorded here before it is sent and updated after, so a
+#: submission whose outcome is unknown (a timeout at broadcast) is resolved from
+#: the chain on recovery instead of being blindly retried. Unset means records
+#: live in memory only; a deployment that broadcasts should set it.
+NEAR_LEDGER_DB = os.environ.get("TRACESETTLE_NEAR_LEDGER_DB", "").strip() or None
+
+#: How many times to poll the chain for a *final* execution status after a
+#: broadcast before giving up and reporting the last (possibly non-final) state.
+#: A broadcast commonly returns an optimistic status; polling resolves it to a
+#: final one without ever inflating a pending state to verified.
+NEAR_FINALITY_ATTEMPTS = int(
+    os.environ.get("TRACESETTLE_NEAR_FINALITY_ATTEMPTS", "8") or "8"
+)
+
+#: The delay, in seconds, between finality polls.
+NEAR_FINALITY_DELAY_SECONDS = float(
+    os.environ.get("TRACESETTLE_NEAR_FINALITY_DELAY_SECONDS", "1.0") or "1.0"
+)
+
+#: The public NEAR AI Cloud gateway attestation endpoint. It returns a genuine,
+#: hardware-signed Intel TDX quote; TraceSettle verifies it locally. No key is
+#: required and no payment is involved.
+TEE_ATTESTATION_URL = os.environ.get(
+    "TRACESETTLE_TEE_ATTESTATION_URL",
+    "https://cloud-api.near.ai/v1/attestation/report",
+)
+
+#: Whether the TEE attestation route is enabled. Off by default: it makes an
+#: outbound request to the attestation endpoint, so enabling it is an explicit
+#: operator decision rather than something a public bind turns on silently.
+TEE_ATTESTATION_ENABLED = (
+    os.environ.get("TRACESETTLE_TEE_ATTESTATION", "").strip().lower()
+    in {"1", "true", "yes", "on"}
+)
 
 # ---------------------------------------------------------------------------
 # Serve defaults (env-driven so a container image needs no CLI flags)

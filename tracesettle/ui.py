@@ -19,6 +19,8 @@ from __future__ import annotations
 import hmac
 import json
 import logging
+import os
+import pathlib
 import signal
 import socket
 import sys
@@ -45,13 +47,59 @@ log = logging.getLogger("tracesettle.ui")
 MAX_BODY_BYTES = 8 * 1024
 MAX_IDENTIFIER_CHARS = 128
 
+#: The default Content-Security-Policy: everything same-origin, no third-party
+#: origin at all. It applies to every response except the security console and
+#: its vendored wallet asset.
+DEFAULT_CSP = (
+    "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; "
+    "connect-src 'self'; img-src 'self' data:; form-action 'none'; base-uri 'none'"
+)
+
+#: The console CSP. It additionally allows the *bundled* wallet connector to run
+#: wallet code in a sandboxed iframe and to resolve the wallet manifest. The
+#: connector executes wallet integrations hosted by the wallet teams, so the
+#: console alone permits those origins; the API responses and every other page
+#: keep :data:`DEFAULT_CSP`. ``script-src 'self'`` is deliberate - the connector
+#: is served from this origin, so no third-party script is loaded.
+#:
+#: ``connect-src`` also names the public NEAR JSON-RPC endpoints the connector's
+#: wallet integrations call to build and broadcast a transfer (``final`` block
+#: hash, access-key nonce, ``broadcast_tx_commit``). Without them the browser
+#: blocks the fetch and the wallet cannot sign, so the whole wallet-mediated flow
+#: is dead even though every other part works. Each host is an explicit literal;
+#: no wildcard is used. ``rpc.near.nightly.app`` is deliberately absent: it served
+#: a stale chain head and the wallet then broadcast against a mismatched block.
+CONSOLE_CSP = (
+    "default-src 'none'; style-src 'unsafe-inline'; script-src 'self' 'unsafe-inline'; "
+    "connect-src 'self' https://cdn.jsdelivr.net https://raw.githubusercontent.com "
+    "https://rpc.testnet.near.org https://test.rpc.fastnear.com "
+    "https://rpc.mainnet.near.org https://free.rpc.fastnear.com https://rpc.mainnet.fastnear.com "
+    "https://archival-rpc.mainnet.fastnear.com; "
+    "frame-src https://cdn.jsdelivr.net https://raw.githubusercontent.com; "
+    "img-src 'self' data:; form-action 'none'; base-uri 'none'"
+)
+
+#: Static assets served from ``tracesettle/static``. A fixed allowlist, so a
+#: request path can never escape the package directory.
+_STATIC_FILES = {
+    "/assets/near-connect.js": ("near-connect.js", "text/javascript; charset=utf-8"),
+}
+
 #: Sentinel returned by :meth:`Handler._authenticate_service` when it has already
 #: sent a refusal. Distinct from ``None``, which means "authentication disabled".
 _AUTH_REFUSED = object()
 
 #: The guard POST routes that carry a service identity and therefore require
 #: per-service authentication when a credential registry is configured.
-_SERVICE_OPERATION_PATHS = frozenset({"/api/guard/evaluate", "/api/guard/sign"})
+_SERVICE_OPERATION_PATHS = frozenset(
+    {
+        "/api/guard/evaluate",
+        "/api/guard/sign",
+        "/api/guard/near/agent-evaluate",
+        "/api/guard/near/lifecycle",
+        "/api/guard/near/lifecycle/list",
+    }
+)
 
 #: Distinguishes "no registry argument was supplied" (load from configuration)
 #: from an explicit ``None`` (service authentication deliberately disabled).
@@ -194,6 +242,29 @@ function render(d) {
     '</div>';
   summary += '<p>' + esc(d.summary) + '</p>';
   html += panel('Result', summary);
+
+  const assurance = d.settlement_assurance;
+  if (assurance) {
+    const aRows = (assurance.stages || []).map(s =>
+      '<tr class="stage-row"><td>' + esc(s.name) + '</td><td>' + pill(s.state) +
+      '</td><td>' + (s.confirmed ? 'yes' : 'no') + '</td><td>' + esc(s.detail) + '</td></tr>'
+    ).join('');
+    let aHtml = '<div class="kv">' +
+      '<dt>Assurance level</dt><dd class="outcome">' + esc(assurance.level) + '</dd>' +
+      '<dt>Independently verified</dt><dd>' + (assurance.independently_verified ? 'yes' : 'no') + '</dd>' +
+      '<dt>Provider claimed success</dt><dd>' + (assurance.provider_claimed_success ? 'yes' : 'no') + '</dd>' +
+      (assurance.partial_settlement ? '<dt>Partial settlement</dt><dd>yes</dd>' : '') +
+      '</div>';
+    aHtml += '<p>' + esc(assurance.summary) + '</p>';
+    aHtml += '<table><thead><tr><th>Settlement stage</th><th>State</th><th>Confirmed</th>' +
+      '<th>Detail</th></tr></thead><tbody>' + aRows + '</tbody></table>';
+    if ((assurance.limitations || []).length) {
+      aHtml += '<ul>';
+      assurance.limitations.forEach(l => { aHtml += '<li>' + esc(l) + '</li>'; });
+      aHtml += '</ul>';
+    }
+    html += panel('Settlement assurance', aHtml);
+  }
 
   let stageRows = '<table><thead><tr><th>Stage</th><th>State</th><th>Explanation</th></tr></thead><tbody>';
   stages.forEach(s => {
@@ -354,7 +425,12 @@ class Handler(BaseHTTPRequestHandler):
     # -- helpers ------------------------------------------------------------
 
     def _send(
-        self, status: int, body: bytes, content_type: str, extra_headers: dict[str, str] | None = None
+        self,
+        status: int,
+        body: bytes,
+        content_type: str,
+        extra_headers: dict[str, str] | None = None,
+        csp: str | None = None,
     ) -> None:
         self.send_response(status)
         self.send_header("Content-Type", content_type)
@@ -370,11 +446,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Connection", "close")
         for name, value in (extra_headers or {}).items():
             self.send_header(name, value)
-        self.send_header(
-            "Content-Security-Policy",
-            "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; "
-            "connect-src 'self'; img-src 'self' data:; form-action 'none'; base-uri 'none'",
-        )
+        self.send_header("Content-Security-Policy", csp or DEFAULT_CSP)
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)
@@ -404,6 +476,23 @@ class Handler(BaseHTTPRequestHandler):
             return True
         provided = self.headers.get("X-API-Key") or ""
         return hmac.compare_digest(provided.encode("utf-8"), expected.encode("utf-8"))
+
+    def _serve_static(self, path: str) -> None:
+        """Serve a bundled static asset from the package directory.
+
+        The path is resolved through a fixed allowlist (:data:`_STATIC_FILES`), so
+        no request string is ever joined onto a filesystem path; a traversal
+        attempt simply misses the allowlist and 404s. A missing file is a 404, not
+        a 500: the asset is optional and its absence must not break the console.
+        """
+        filename, content_type = _STATIC_FILES[path]
+        asset = pathlib.Path(__file__).resolve().parent / "static" / filename
+        try:
+            body = asset.read_bytes()
+        except OSError:
+            self._json(404, {"error": "not found"})
+            return
+        self._send(200, body, content_type, csp=CONSOLE_CSP)
 
     def _guard_allowed(self) -> bool:
         """Per-client rate limit and API-key check shared by every guard route.
@@ -483,7 +572,7 @@ class Handler(BaseHTTPRequestHandler):
         # identity; the administrative routes (incident status) are gated by the
         # API key alone, keeping the two authentication planes separate.
         authenticated: str | None = None
-        if path in _SERVICE_OPERATION_PATHS:
+        if path in _SERVICE_OPERATION_PATHS or path.startswith("/api/guard/near/lifecycle/"):
             authenticated = self._authenticate_service()
             if authenticated is _AUTH_REFUSED:
                 return
@@ -505,7 +594,9 @@ class Handler(BaseHTTPRequestHandler):
             html = CONSOLE_HTML.replace("__VERSION__", __version__).replace(
                 "__DISCLAIMER__", DISCLAIMER
             )
-            self._send(200, html.encode("utf-8"), "text/html; charset=utf-8")
+            self._send(200, html.encode("utf-8"), "text/html; charset=utf-8", csp=CONSOLE_CSP)
+        elif path in _STATIC_FILES:
+            self._serve_static(path)
         elif path == "/api/health":
             self._json(200, {"status": "ok", "tool": "TRACESETTLE", "version": __version__, "read_only": True})
         elif path.startswith("/api/guard/"):
@@ -644,7 +735,14 @@ class Handler(BaseHTTPRequestHandler):
         inv = investigate(identifier, client)
         result = build_result(inv)
         created_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        return build_report(inv, result, created_at)
+        report = build_report(inv, result, created_at)
+        # Persist the report when durability is configured. A configured store
+        # that cannot record the conclusion is a hard failure: the operator asked
+        # for a retrievable history, so a silent drop would be a false promise.
+        store = getattr(server, "investigation_store", None)
+        if store is not None:
+            store.save(report.to_dict())
+        return report
 
 
 def _build_guard_service() -> GuardService:
@@ -659,6 +757,7 @@ def _build_guard_service() -> GuardService:
     from .guard.audit import AuditLog
     from .guard.authorization import AuthorizationAuthority
     from .guard.policy import DEFAULT_POLICY, load_policy
+    from .guard.safeguards import open_safeguard_store
     from .guard.state import DurableReplayStore, DurableRevocationStore, open_state_store
 
     if config.GUARD_POLICY_PATH:
@@ -668,6 +767,13 @@ def _build_guard_service() -> GuardService:
     audit = AuditLog(
         path=config.GUARD_AUDIT_LOG_PATH,
         max_records=config.GUARD_AUDIT_MAX_RECORDS,
+    )
+    # The learning loop's durable store. Unset means the loop is inert; a
+    # configured path that cannot be opened raises here, so start-up fails rather
+    # than running with learning silently disabled.
+    safeguard_store = open_safeguard_store(
+        config.GUARD_SAFEGUARD_DB,
+        busy_timeout_ms=config.GUARD_SAFEGUARD_BUSY_TIMEOUT_MS,
     )
     state_store = open_state_store(
         config.GUARD_STATE_DB,
@@ -679,7 +785,13 @@ def _build_guard_service() -> GuardService:
         require_postgres=config.GUARD_REQUIRE_POSTGRES,
     )
     if state_store is None:
-        return GuardService(policy=policy, audit=audit)
+        return GuardService(
+            policy=policy,
+            audit=audit,
+            safeguard_store=safeguard_store,
+            approval_authority=_build_approval_authority(),
+            counterparty_reader=_build_counterparty_reader(),
+        )
     authority = AuthorizationAuthority(
         replay_store=DurableReplayStore(
             state_store, counter_retention_seconds=config.GUARD_STATE_RETENTION_SECONDS
@@ -687,7 +799,287 @@ def _build_guard_service() -> GuardService:
         revocations=DurableRevocationStore(state_store),
         ttl_seconds=policy.authorization_ttl_seconds,
     )
-    return GuardService(policy=policy, audit=audit, authority=authority, state_store=state_store)
+    return GuardService(
+        policy=policy,
+        audit=audit,
+        authority=authority,
+        state_store=state_store,
+        safeguard_store=safeguard_store,
+        approval_authority=_build_approval_authority(),
+        counterparty_reader=_build_counterparty_reader(),
+    )
+
+
+def _build_approval_authority() -> Any:
+    """Build the human-approval authority, or ``None`` when it is not enabled.
+
+    Off by default: with no authority, a REQUIRE_APPROVAL decision can never be
+    raised to ALLOW, which is the fail-closed default. When enabled, the key is
+    read from ``TRACESETTLE_GUARD_APPROVAL_KEY`` or an ephemeral one is minted
+    (and reported as ephemeral). The key never leaves this object.
+    """
+    if not config.NEAR_APPROVAL_ENABLED:
+        return None
+
+    from .near.approval import ApprovalAuthority
+
+    key = _approval_key()
+    return ApprovalAuthority(
+        key=key,
+        key_id="approval",
+        ttl_seconds=config.NEAR_APPROVAL_TTL_SECONDS,
+    )
+
+
+def _approval_key() -> bytes:
+    """The approval signing key: configured, else a fresh ephemeral key.
+
+    Only the hash of the key id is ever exposed. An ephemeral key is safe for a
+    single process (the approval must be validated in the same process that
+    minted it); a multi-process deployment must configure
+    ``TRACESETTLE_GUARD_APPROVAL_KEY``.
+    """
+    import hashlib
+    import secrets as _secrets
+
+    configured = config.GUARD_APPROVAL_KEY
+    if configured:
+        try:
+            return bytes.fromhex(configured.strip())
+        except ValueError:
+            return hashlib.sha256(configured.encode("utf-8")).digest()
+    return _secrets.token_bytes(32)
+
+
+def _build_counterparty_reader() -> Any:
+    """Build the counterparty intelligence reader, or ``None`` when disabled.
+
+    A configured blocklist that cannot be read or that carries an unevidenced
+    entry is a hard failure: a security control must not silently fall back to a
+    weaker default. The reader performs only public, keyless RPC reads.
+    """
+    if not config.NEAR_COUNTERPARTY_ENABLED:
+        return None
+    from .near.counterparty import Blocklist, CounterpartyIntelligence
+    from .near.networks import network_config
+    from .near.rpc import NearRpc
+
+    blocklist = None
+    if config.NEAR_BLOCKLIST_PATH:
+        try:
+            blocklist = Blocklist.from_file(config.NEAR_BLOCKLIST_PATH)
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(f"TRACESETTLE_NEAR_BLOCKLIST: {exc}") from exc
+    net_config = network_config(config.NEAR_EXECUTION_NETWORK)
+    client = HttpClient(
+        timeout=config.REQUEST_TIMEOUT_SECONDS,
+        max_attempts=config.MAX_ATTEMPTS,
+    )
+    rpc = NearRpc(net_config, client=client)
+    return CounterpartyIntelligence(
+        rpc,
+        chain=net_config.chain_id,
+        blocklist=blocklist,
+        min_account_age_blocks=config.NEAR_COUNTERPARTY_MIN_AGE_BLOCKS,
+    )
+
+
+def _build_lifecycle(guard_service: GuardService, *, upstream_cache: TtlCache | None = None) -> Any:
+    """Build the NEAR Intents lifecycle, or ``None`` when it is not enabled.
+
+    The lifecycle can issue a live (fundable) quote, so it is an explicit
+    operator decision: it is built only when ``TRACESETTLE_NEAR_LIFECYCLE`` is
+    on. It needs a durable store; when ``TRACESETTLE_INTENTS_DB`` is unset it
+    falls back to an in-process store so the loopback demo works, and that
+    fallback is reported honestly by the settings endpoint.
+
+    A configured database that cannot be opened is a hard failure: a security
+    record must not silently fall back to a weaker default.
+    """
+    if not config.NEAR_LIFECYCLE_ENABLED:
+        return None
+    from .intents_store import IntentStore
+    from .near.lifecycle import NearIntentsLifecycle
+
+    if config.INTENTS_DB:
+        store = IntentStore(config.INTENTS_DB)
+    else:
+        import tempfile
+
+        store = IntentStore(os.path.join(tempfile.mkdtemp(prefix="tracesettle-intents-"), "intents.db"))
+    client = HttpClient(
+        timeout=config.REQUEST_TIMEOUT_SECONDS,
+        max_attempts=config.MAX_ATTEMPTS,
+        cache=upstream_cache,
+    )
+    return NearIntentsLifecycle(guard_service=guard_service, http_client=client, store=store)
+
+
+def _build_near_execution(guard_service: GuardService) -> Any:
+    """Build the NEAR execution boundary, or ``None`` when it is not enabled.
+
+    The boundary can broadcast a real transaction, so it is an explicit operator
+    decision (``TRACESETTLE_NEAR_EXECUTION=1``), never a public-bind default. The
+    network is resolved server-side (testnet by default) and its genesis hash is
+    verified against the RPC before any transaction is built, so a mainnet
+    endpoint answering while the code believes it is on testnet is a hard error.
+
+    The boundary holds no key: it builds the transaction, accepts a wallet
+    signature, and broadcasts. A misconfigured network name is a hard failure at
+    start-up, not a silent fallback.
+    """
+    if not config.NEAR_EXECUTION_ENABLED:
+        return None
+    from .near.execution import NearExecutionBoundary
+    from .near.networks import NetworkError, network_config
+    from .near.rpc import NearRpc
+    from .near.tee_execution import ExecutionRecordStore, TeeExecutionAuthorizer
+
+    try:
+        net_config = network_config(config.NEAR_EXECUTION_NETWORK)
+    except NetworkError as exc:
+        raise RuntimeError(f"TRACESETTLE_NEAR_EXECUTION_NETWORK: {exc}") from exc
+    client = HttpClient(
+        timeout=config.REQUEST_TIMEOUT_SECONDS,
+        max_attempts=config.MAX_ATTEMPTS,
+    )
+
+    # The TEE trust boundary. When attestation is required, the authorizer makes
+    # a verified, transaction-bound attestation a precondition of signing; the
+    # boundary refuses any transaction that lacks one. A configured record
+    # database that cannot be opened is a hard failure, never a silent fallback.
+    tee_authorizer = None
+    tee_provider = None
+    if config.NEAR_TEE_REQUIRED:
+        try:
+            store = ExecutionRecordStore(config.NEAR_EXECUTION_DB)
+        except Exception as exc:  # noqa: BLE001 - a broken store must not start
+            raise RuntimeError(f"TRACESETTLE_NEAR_EXECUTION_DB: {exc}") from exc
+        tee_authorizer = TeeExecutionAuthorizer(
+            store=store,
+            require_attestation=True,
+            expected_measurement=config.NEAR_TEE_EXPECTED_MEASUREMENT,
+            ttl_seconds=config.NEAR_EXECUTION_TTL_SECONDS,
+        )
+        from .near.attestation import TeeAttestationProvider
+
+        tee_provider = TeeAttestationProvider(
+            url=config.TEE_ATTESTATION_URL,
+            client=HttpClient(
+                timeout=config.REQUEST_TIMEOUT_SECONDS,
+                max_attempts=config.MAX_ATTEMPTS,
+            ),
+        )
+
+    boundary = NearExecutionBoundary(
+        guard_service,
+        net_config,
+        rpc=NearRpc(net_config, client=client),
+        tee_authorizer=tee_authorizer,
+        tee_provider=tee_provider,
+    )
+    # The durable pipeline wraps the boundary for the broadcast route: it records
+    # every submission before it is sent (so an unknown outcome is resolved from
+    # the chain, never blindly retried) and polls for finality. A configured
+    # ledger that cannot be opened is a hard failure, never a silent fallback to
+    # memory. The pipeline never holds a key - the caller signs.
+    from .near.ledger import SubmissionLedger
+    from .near.pipeline import NearExecutionPipeline
+
+    try:
+        ledger = SubmissionLedger(config.NEAR_LEDGER_DB)
+    except Exception as exc:  # noqa: BLE001 - a broken ledger must not start
+        raise RuntimeError(f"TRACESETTLE_NEAR_LEDGER_DB: {exc}") from exc
+    boundary.pipeline = NearExecutionPipeline(
+        boundary,
+        ledger=ledger,
+        finality_attempts=config.NEAR_FINALITY_ATTEMPTS,
+        finality_delay=config.NEAR_FINALITY_DELAY_SECONDS,
+    )
+    return boundary
+
+
+def _build_enclave_boundary() -> Any:
+    """Build the enclave signing boundary, or ``None`` when it is not configured.
+
+    Enclave signing is an explicit operator decision (``TRACESETTLE_ENCLAVE_SIGN_URL``
+    plus ``TRACESETTLE_ENCLAVE_APPROVED_MEASUREMENT``). With no signing endpoint
+    the boundary reports itself unavailable and refuses to sign, so hardware
+    execution stays disabled rather than silently falling back to a software key.
+    A malformed approved measurement is a hard failure at start-up.
+    """
+    if not config.ENCLAVE_SIGN_URL:
+        return None
+    from .near.collateral import PcsCollateralClient
+    from .near.enclave import (
+        ApprovedMeasurement,
+        EnclaveKeyRegistry,
+        EnclaveSigningBoundary,
+        HttpEnclaveTransport,
+        MeasurementPolicy,
+    )
+
+    try:
+        fields = config.parse_approved_measurement(config.ENCLAVE_APPROVED_MEASUREMENT)
+    except ValueError as exc:
+        raise RuntimeError(f"TRACESETTLE_ENCLAVE_APPROVED_MEASUREMENT: {exc}") from exc
+    approved = [ApprovedMeasurement("operator-approved", fields)] if fields else []
+    client = HttpClient(
+        timeout=config.REQUEST_TIMEOUT_SECONDS,
+        max_attempts=config.MAX_ATTEMPTS,
+    )
+    registry = EnclaveKeyRegistry(config.ENCLAVE_KEY_DB)
+    return EnclaveSigningBoundary(
+        transport=HttpEnclaveTransport(
+            base_url=_attestation_base_url(), sign_url=config.ENCLAVE_SIGN_URL, client=client
+        ),
+        measurements=MeasurementPolicy(approved, require_pin=True),
+        registry=registry,
+        collateral_client=PcsCollateralClient(),
+    )
+
+
+def _attestation_base_url() -> str:
+    """The attested gateway origin, derived from the configured attestation URL."""
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(config.TEE_ATTESTATION_URL)
+    if parts.scheme and parts.netloc:
+        return f"{parts.scheme}://{parts.netloc}"
+    return "https://cloud-api.near.ai"
+
+
+def _build_tee_provider() -> Any:
+    """Build the real TEE attestation provider, or ``None`` when it is not enabled.
+
+    The provider fetches a genuine Intel TDX quote from the NEAR AI Cloud gateway
+    and verifies it locally against the pinned Intel SGX Root CA. It is an explicit
+    operator decision (``TRACESETTLE_TEE_ATTESTATION=1``) because it makes an
+    outbound request; when it is disabled no TEE protection is claimed anywhere.
+    """
+    if not config.TEE_ATTESTATION_ENABLED:
+        return None
+    from .near.attestation import TeeAttestationProvider
+
+    client = HttpClient(
+        timeout=config.REQUEST_TIMEOUT_SECONDS,
+        max_attempts=config.MAX_ATTEMPTS,
+    )
+    return TeeAttestationProvider(url=config.TEE_ATTESTATION_URL, client=client)
+
+
+def _build_investigation_store() -> Any:
+    """Build the durable investigations store, or ``None`` when unconfigured.
+
+    A configured database that cannot be opened is a hard failure: a recorded
+    conclusion must not silently fail to persist. Unset means investigations are
+    returned but not stored, which is the loopback default.
+    """
+    if not config.INVESTIGATIONS_DB:
+        return None
+    from .investigation_store import InvestigationStore
+
+    return InvestigationStore(config.INVESTIGATIONS_DB)
 
 
 def _load_service_registry() -> Any:
@@ -718,7 +1110,9 @@ class InvestigationServer(ThreadingHTTPServer):
         upstream_cache: TtlCache | None = None,
         guard_service: GuardService | None = None,
         guard_limiter: TokenBucketLimiter | None = None,
+        lifecycle: Any = _UNSET,
         service_registry: Any = _UNSET,
+        investigation_store: Any = _UNSET,
     ):
         super().__init__(address, Handler)
         self.timeout_seconds = timeout_seconds
@@ -743,7 +1137,25 @@ class InvestigationServer(ThreadingHTTPServer):
             config.UPSTREAM_CACHE_TTL_SECONDS, max_entries=config.UPSTREAM_CACHE_MAX_ENTRIES
         )
         self.guard_service = guard_service or _build_guard_service()
-        self.guard_api = GuardAPI(self.guard_service)
+        self.lifecycle = (
+            _build_lifecycle(self.guard_service, upstream_cache=self.upstream_cache)
+            if lifecycle is _UNSET
+            else lifecycle
+        )
+        # Durable settlement-investigation history. A configured database that
+        # cannot be opened raises in the builder, so the server refuses to start
+        # rather than silently fail to persist a recorded conclusion.
+        self.investigation_store = (
+            _build_investigation_store() if investigation_store is _UNSET else investigation_store
+        )
+        self.guard_api = GuardAPI(
+            self.guard_service,
+            lifecycle=self.lifecycle,
+            investigation_store=self.investigation_store,
+            near_execution=_build_near_execution(self.guard_service),
+            tee_provider=_build_tee_provider(),
+            enclave=_build_enclave_boundary(),
+        )
         self.guard_limiter = guard_limiter or TokenBucketLimiter(
             config.GUARD_RATE_LIMIT_PER_MINUTE, config.GUARD_RATE_LIMIT_BURST
         )

@@ -20,6 +20,11 @@ from .model import (
     StageState,
     Verification,
 )
+from .near.settlement import (
+    NearSettlementAssurance,
+    provider_claims_success_from_evidence,
+    settlement_assurance_from_result,
+)
 
 SUPPORTED_PATH = (
     "NEAR Intents 1Click swap, ORIGIN_CHAIN deposit, "
@@ -40,6 +45,11 @@ class Report:
     source_reports: tuple[dict[str, Any], ...]
     notes: tuple[str, ...]
     known_limitations: tuple[str, ...]
+    #: The NEAR settlement assurance view over the same result. This is the
+    #: product-level answer to "did the money arrive, and is that independently
+    #: proven?" — it never raises the assurance level from a provider claim, so
+    #: a provider SUCCESS with no decisive evidence is reported as not VERIFIED.
+    settlement_assurance: NearSettlementAssurance | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -53,6 +63,9 @@ class Report:
             "summary": self.result.summary,
             "last_confirmed_stage": (
                 self.result.last_confirmed_stage.value if self.result.last_confirmed_stage else None
+            ),
+            "settlement_assurance": (
+                self.settlement_assurance.to_dict() if self.settlement_assurance else None
             ),
             "stages": [s.to_dict() for s in self.result.stages],
             "confirmed_stages": [s.stage.value for s in self.result.stages if s.state is StageState.CONFIRMED],
@@ -102,6 +115,44 @@ class Report:
         add(f"- **Last confirmed stage:** `{d['last_confirmed_stage'] or 'none'}`")
         add(f"- **Summary:** {d['summary']}")
         add("")
+
+        assurance = d.get("settlement_assurance")
+        if assurance:
+            add("## Settlement assurance")
+            add("")
+            add(f"- **Assurance level:** `{assurance['level']}`")
+            add(
+                "- **Independently verified:** "
+                f"{'yes' if assurance['independently_verified'] else 'no'}"
+            )
+            add(
+                "- **Provider claimed success:** "
+                f"{'yes' if assurance['provider_claimed_success'] else 'no'}"
+            )
+            if assurance.get("partial_settlement"):
+                add("- **Partial settlement:** yes — an earlier stage is confirmed but delivery is not.")
+            add(f"- **Reading:** {assurance['summary']}")
+            add("")
+            add("| Settlement stage | Engine stage | State | Confirmed | Detail |")
+            add("| --- | --- | --- | --- | --- |")
+            for s in assurance["stages"]:
+                add(
+                    f"| {s['name']} | {s['stage']} | {s['state']} | "
+                    f"{'yes' if s['confirmed'] else 'no'} | {s['detail']} |"
+                )
+            add("")
+            if assurance.get("conflicting_evidence"):
+                add("Conflicting evidence:")
+                add("")
+                for c in assurance["conflicting_evidence"]:
+                    add(f"- {c}")
+                add("")
+            if assurance.get("limitations"):
+                add("Assurance limitations:")
+                add("")
+                for lim in assurance["limitations"]:
+                    add(f"- {lim}")
+                add("")
 
         add("## Stages")
         add("")
@@ -228,6 +279,16 @@ def build_report(
     created_at: str,
 ) -> Report:
     evidence = tuple(sorted(inv.evidence, key=lambda e: e.id))
+    # Derive the settlement assurance from the same deterministic result, so the
+    # report answers the mission's central question explicitly: did the money
+    # arrive, and is that independently proven rather than merely reported? A
+    # provider success claim is read from the collected evidence and never raises
+    # the level on its own.
+    assurance = settlement_assurance_from_result(
+        result,
+        provider_reported_success=provider_claims_success_from_evidence(inv.evidence),
+        evidence=evidence,
+    )
     return Report(
         investigation_id=_investigation_id(inv.identifier, evidence),
         created_at=created_at,
@@ -239,6 +300,7 @@ def build_report(
         source_reports=tuple(r.to_dict() for r in inv.source_reports),
         notes=tuple(inv.notes),
         known_limitations=TOOL_LIMITATIONS,
+        settlement_assurance=assurance,
     )
 
 

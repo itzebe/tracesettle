@@ -43,8 +43,10 @@ from .model import (
     TransactionRequest,
     canonical_fields,
     fingerprint_of,
+    fingerprint_request,
     parse_amount,
 )
+from .learning import LearningLoop, SafeguardApplication
 from .monitor import SecurityMonitor
 from .policy import DEFAULT_POLICY, PolicyConfig
 from .rules import evaluate_controls
@@ -210,10 +212,20 @@ class GuardService:
         audit: AuditLog | None = None,
         signer: ReferenceSigner | None = None,
         state_store: GuardStateStore | None = None,
+        http_client: Any = None,
+        safeguard_store: Any = None,
+        approval_authority: Any = None,
+        counterparty_reader: Any = None,
     ) -> None:
         self.policy = policy or DEFAULT_POLICY
-        self.audit = audit or AuditLog()
+        # ``is not None`` rather than truthiness: an empty AuditLog is falsy
+        # (it defines __len__), so ``audit or AuditLog()`` would silently drop a
+        # configured persistent log on every fresh start.
+        self.audit = audit if audit is not None else AuditLog()
         self.monitor = monitor or SecurityMonitor()
+        #: The learning loop. When no safeguard store is configured it is inert,
+        #: so a deployment without durable learning behaves exactly as before.
+        self.learning = LearningLoop(safeguard_store)
         #: When set, the counters that decide velocity, volume, and rejection
         #: limits are read from and written to durable storage, so a restart does
         #: not reset a limit. When None the guard keeps its in-memory behaviour.
@@ -224,6 +236,18 @@ class GuardService:
         )
         self._volume = _WindowVolume()
         self._signer = signer or ReferenceSigner(self.authority, on_outcome=self._on_sign_outcome)
+        #: Validates a human approval for a request the policy put at
+        #: REQUIRE_APPROVAL. When None, no approval can be validated, so such a
+        #: request can never become ALLOW - the fail-closed default.
+        self.approval_authority = approval_authority
+        #: Reads counterparty risk intelligence (see
+        #: :mod:`tracesettle.near.counterparty`). When None, the agent path has no
+        #: counterparty signal, so nothing is added or removed.
+        self.counterparty_reader = counterparty_reader
+        #: Optional HTTP client used only by the NEAR policy adapter to read
+        #: provider policy state. None disables live reads; a local fixture is
+        #: then used. The guard itself never performs network I/O.
+        self.http_client = http_client
 
     # -- evaluation ---------------------------------------------------------
 
@@ -295,7 +319,7 @@ class GuardService:
                 count += 1
         return count
 
-    def evaluate(self, request: TransactionRequest) -> GuardDecision:
+    def evaluate(self, request: TransactionRequest, *, approval: Any = None) -> GuardDecision:
         """Run the controls, decide, and (on ALLOW) issue an authorization.
 
         When a durable store is configured, the entire read-decide-record cycle
@@ -304,17 +328,97 @@ class GuardService:
         authorizing past the limit. A store error anywhere in the cycle rolls the
         transaction back and yields a fail-closed HOLD, so no authorization is
         issued against state that could not be read.
+
+        ``approval`` is a human approval (see
+        :mod:`tracesettle.near.approval`). It is consulted **only** when the
+        controls return ``REQUIRE_APPROVAL``, it must be bound to this exact
+        request's payload fingerprint, and it is single-use. It can turn a
+        ``REQUIRE_APPROVAL`` into an ``ALLOW`` and nothing else - it can never
+        override a ``BLOCK`` or a ``HOLD``.
         """
         if self.state_store is None:
-            return self._finalize(request, self._evaluate_locked(request))
+            return self._finalize(request, self._evaluate_locked(request, approval))
         try:
             with self.state_store.decision_cycle():
-                result = self._evaluate_locked(request)
+                result = self._evaluate_locked(request, approval)
         except StateStoreError as exc:
             return self._fail_closed(request, exc)
         return self._finalize(request, result)
 
-    def _evaluate_locked(self, request: TransactionRequest) -> GuardDecision:
+    def approval_payload_fingerprint(self, request: TransactionRequest) -> str:
+        """The exact payload fingerprint a human approval must be bound to.
+
+        It is the request's own authorization fingerprint, so the human approves
+        the same parameter set (including the transaction byte digest when the
+        caller holds the bytes) that the authorization will commit to.
+        """
+        return fingerprint_request(request).digest
+
+    def _resolve_approval(
+        self, request: TransactionRequest, approval: Any, payload_fingerprint: str
+    ) -> tuple[Decision, RiskFinding | None]:
+        """Try to raise a REQUIRE_APPROVAL decision to ALLOW with a human approval.
+
+        Returns the (possibly unchanged) decision and a finding describing the
+        approval outcome. Any failure - no authority configured, a missing,
+        forged, expired, replayed or payload-mismatched approval - leaves the
+        decision at REQUIRE_APPROVAL. There is no path from here to a weaker
+        decision.
+        """
+        if self.approval_authority is None:
+            return Decision.REQUIRE_APPROVAL, RiskFinding(
+                code="APPROVAL_UNAVAILABLE",
+                severity=FindingSeverity.MEDIUM,
+                title="No human-approval channel is configured",
+                detail=(
+                    "The policy requires a human approval but this deployment has no "
+                    "approval authority, so the request stays at REQUIRE_APPROVAL and "
+                    "cannot be signed."
+                ),
+                policy="human approval",
+            )
+        if approval is None:
+            return Decision.REQUIRE_APPROVAL, RiskFinding(
+                code="APPROVAL_REQUIRED",
+                severity=FindingSeverity.MEDIUM,
+                title="A human approval is required",
+                detail=(
+                    "This request is at REQUIRE_APPROVAL and no approval was presented. "
+                    "It stays unsigned until a human approves this exact payload."
+                ),
+                policy="human approval",
+            )
+        verification = self.approval_authority.validate(
+            approval,
+            expected_payload_fingerprint=payload_fingerprint,
+            expected_service_id=request.service_id,
+            consume=True,
+        )
+        if verification.valid:
+            return Decision.ALLOW, RiskFinding(
+                code="APPROVAL_VALID",
+                severity=FindingSeverity.INFO,
+                title="A valid human approval was presented",
+                detail=(
+                    f"The request was approved by {verification.approver} and the approval is "
+                    "bound to this exact payload. The decision is raised to ALLOW."
+                ),
+                policy="human approval",
+                observed={"approver": str(verification.approver or ""), "approval_id": str(verification.approval_id or "")},
+            )
+        # Any invalid approval is a refusal: the decision stays REQUIRE_APPROVAL.
+        return Decision.REQUIRE_APPROVAL, RiskFinding(
+            code=f"APPROVAL_{verification.state.value}",
+            severity=FindingSeverity.HIGH,
+            title="The human approval was not accepted",
+            detail=verification.detail,
+            policy="human approval",
+            observed={"state": verification.state.value},
+        )
+
+    def _evaluate_locked(
+        self, request: TransactionRequest, approval: Any = None
+    ) -> GuardDecision:
         """The body of a decision: read counters, run controls, claim, issue.
 
         Pure with respect to the process-local monitor and audit log; those are
@@ -325,9 +429,47 @@ class GuardService:
         controls = evaluate_controls(request, self.policy, ctx)
         findings = tuple(f for control in controls for f in control.findings)
         decision = _worst_decision(controls)
+        request_fingerprint = fingerprint_request(request)
         risk_level = _worst_severity(findings)
         decision_id = f"dec_{secrets.token_hex(10)}"
         created_at = _utc_now()
+
+        # The learning loop: apply any durable safeguard learned from a previous
+        # security failure. A safeguard only ever *tightens* the decision, so this
+        # can turn an ALLOW into REQUIRE_APPROVAL or HOLD, never the reverse. It is
+        # applied before the idempotency claim so a safeguarded request never
+        # consumes a client idempotency key as if it had been authorized.
+        application = self.learning.apply(request)
+        safeguards_applied: tuple[Any, ...] = ()
+        safeguard_reasons: tuple[str, ...] = ()
+        if application.applied and application.decision is not None:
+            decision = _stricter(decision, application.decision)
+            safeguards_applied = application.safeguards
+            safeguard_reasons = application.reasons
+            findings = findings + (
+                RiskFinding(
+                    code="LEARNED_SAFEGUARD_APPLIED",
+                    severity=FindingSeverity.HIGH,
+                    title="A learned safeguard tightened this decision",
+                    detail=" ".join(application.reasons),
+                    policy="learning loop (durable safeguard)",
+                    observed={"safeguard_ids": ", ".join(application.safeguard_ids)},
+                ),
+            )
+            risk_level = _worst_severity(findings)
+
+        # Human approval: only a REQUIRE_APPROVAL decision consults it, and only
+        # an approval bound to this exact payload fingerprint can raise the
+        # decision to ALLOW. It can never touch a BLOCK or a HOLD, and a failed
+        # validation leaves the decision at REQUIRE_APPROVAL with the refusal
+        # recorded as a finding.
+        if decision is Decision.REQUIRE_APPROVAL:
+            decision, approval_finding = self._resolve_approval(
+                request, approval, request_fingerprint.digest
+            )
+            if approval_finding is not None:
+                findings = findings + (approval_finding,)
+                risk_level = _worst_severity(findings)
 
         # Idempotency: an ALLOW with a client idempotency key is claimed durably
         # before the authorization is issued, so a retried request cannot obtain a
@@ -355,6 +497,7 @@ class GuardService:
                 asset=request.asset,
                 amount=request.amount,
                 destination=request.destination,
+                transaction_digest=request.transaction_digest,
             )
             authorization = self.authority.issue(
                 decision_id=decision_id,
@@ -364,21 +507,25 @@ class GuardService:
             )
 
         summary, explanation = _explain(decision, request, controls, findings)
+        if safeguard_reasons:
+            explanation = explanation + " " + " ".join(safeguard_reasons)
+
+        # The learning loop records the lesson of this decision, if it teaches one.
+        # It runs after the decision is fixed so a lesson can never change the
+        # decision that produced it; it only affects later requests.
+        learned_safeguard = self.learning.observe(
+            request,
+            decision,
+            tuple(f.code for f in findings),
+            decision_id=decision_id,
+        )
+
         result = GuardDecision(
             decision_id=decision_id,
             created_at=created_at,
             request=request,
             decision=decision,
-            fingerprint=fingerprint_of(
-                canonical_fields(
-                    service_id=request.service_id,
-                    operation=request.operation,
-                    chain=request.chain,
-                    asset=request.asset,
-                    amount=request.amount,
-                    destination=request.destination,
-                )
-            ),
+            fingerprint=request_fingerprint,
             risk_level=risk_level,
             summary=summary,
             explanation=explanation,
@@ -387,6 +534,9 @@ class GuardService:
             applicable_policies=tuple(sorted({c.policy for c in controls})),
             authorization=authorization,
             simulated=request.simulated,
+            safeguards_applied=safeguards_applied,
+            safeguard_reasons=safeguard_reasons,
+            learned_safeguard=learned_safeguard,
         )
 
         if self.state_store is not None:
@@ -400,6 +550,17 @@ class GuardService:
                 request.service_id, result.authorization.authorization_id
             )
             self._volume.add(request.service_id, request.asset.strip().upper(), request.amount)
+        if result.influenced_by_learning:
+            self.learning.note_applied(
+                SafeguardApplication(
+                    decision=result.decision,
+                    reasons=result.safeguard_reasons,
+                    safeguard_ids=tuple(
+                        getattr(s, "safeguard_id", "") for s in result.safeguards_applied
+                    ),
+                    safeguards=result.safeguards_applied,
+                )
+            )
         self.monitor.record_decision(result)
         self.audit.append(
             event_type="DECISION",
@@ -418,6 +579,76 @@ class GuardService:
             },
         )
         return result
+
+    def evaluate_agent_transaction(
+        self,
+        payload: dict[str, Any],
+        *,
+        policy_read: Any = None,
+        access_key: Any = None,
+        counterparty: Any = None,
+        approval: Any = None,
+    ) -> Any:
+        """Evaluate an agent transaction through the NEAR authorization wrapper.
+
+        This is the pre-execution boundary an AI agent must pass before it may
+        sign. The wrapper inspects the *actual* transaction parameters (never the
+        agent's explanation), the NEAR Intents policy scope, the access-key
+        scope, and the counterparty risk read, and returns one of ALLOW,
+        REQUIRE_APPROVAL, BLOCK, HOLD or UNKNOWN. Nothing is signed or broadcast
+        here.
+
+        ``approval`` is a human approval; it is honoured only for a
+        REQUIRE_APPROVAL outcome and only when bound to this exact payload.
+
+        Imported lazily so the NEAR integration never becomes a hard dependency
+        of the core guard, and so a deployment that does not use it pays nothing.
+        """
+        from ..near.agent_wrapper import AgentAuthorizationWrapper, AgentTransaction
+        from ..near.policy import PolicyScope
+
+        scope_raw = str(payload.get("scope", "INTENTS")).strip().upper()
+        try:
+            scope = PolicyScope(scope_raw)
+        except ValueError as exc:
+            raise RequestValidationError(
+                "field 'scope' must be one of INTENTS, NATIVE_NEAR, NATIVE_EVM, NATIVE_SOLANA"
+            ) from exc
+
+        asserted = tuple(
+            str(k)
+            for k, v in payload.items()
+            if str(k).strip().lower() in ASSERTED_APPROVAL_FIELDS and v not in (None, False, 0, "", [], {})
+        )
+        transaction = AgentTransaction(
+            service_id=str(payload.get("service_id", "")),
+            operation=str(payload.get("operation", "")),
+            chain=str(payload.get("chain", "")),
+            asset=str(payload.get("asset", "")),
+            amount=str(payload.get("amount", "")),
+            destination=str(payload.get("destination", "")),
+            scope=scope,
+            policy_action=(str(payload["policy_action"]) if payload.get("policy_action") else None),
+            request_id=(str(payload["request_id"]) if payload.get("request_id") else None),
+            idempotency_key=(
+                str(payload["idempotency_key"]) if payload.get("idempotency_key") else None
+            ),
+            client_reference=(
+                str(payload["client_reference"]) if payload.get("client_reference") else None
+            ),
+            receiver_id=(str(payload["receiver_id"]) if payload.get("receiver_id") else None),
+            method_name=(str(payload["method_name"]) if payload.get("method_name") else None),
+            transfers_near=bool(payload.get("transfers_near", False)),
+            simulated=bool(payload.get("simulated", True)),
+            asserted_approval_fields=asserted,
+            metadata=(
+                payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+            ),
+        )
+        wrapper = AgentAuthorizationWrapper(
+            self, policy_read=policy_read, access_key=access_key, counterparty=counterparty
+        )
+        return wrapper.evaluate(transaction, approval=approval)
 
     def evaluate_payload(self, payload: dict[str, Any], *, simulated: bool = False) -> GuardDecision:
         return self.evaluate(request_from_payload(payload, simulated=simulated))
@@ -584,6 +815,18 @@ class GuardService:
             "length": len(self.audit),
             "head_digest": self.audit.head_digest,
         }
+        metrics["learning"] = {
+            "enabled": self.learning.enabled,
+            "backend": getattr(self.learning.store, "backend", "in-memory")
+            if self.learning.enabled
+            else "disabled",
+            "safeguards": len(self.learning.list()),
+            "note": (
+                "durable safeguards: a security failure tightens later decisions"
+                if self.learning.enabled
+                else "learning loop disabled: no durable safeguard store is configured"
+            ),
+        }
         return metrics
 
     def incidents(self, *, status: Any = None, limit: int = 100):
@@ -658,6 +901,7 @@ def _build_hold_decision(
                 asset=request.asset,
                 amount=request.amount,
                 destination=request.destination,
+                transaction_digest=request.transaction_digest,
             )
         ),
         risk_level=severity,
@@ -679,6 +923,11 @@ def _worst_decision(controls) -> Decision:
         if candidate.severity > worst.severity:
             worst = candidate
     return worst
+
+
+def _stricter(current: Decision, candidate: Decision) -> Decision:
+    """The stricter of two decisions. Used by the learning loop, never the reverse."""
+    return candidate if candidate.severity > current.severity else current
 
 
 def _worst_severity(findings) -> FindingSeverity:

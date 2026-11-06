@@ -1,0 +1,13 @@
+{
+  "scenario": "blocked",
+  "events": [
+    "wallet:near:signIn",
+    "wallet:near:signIn",
+    "wallet:near:getAccounts",
+    "wallet:near:signIn"
+  ],
+  "connectedAccount": "tsw768d7b5551.testnet",
+  "outputText": "Authorization\nBLOCK\nThe operation was not authorized, so nothing is sent to the wallet. No authorization means nothing to sign.\nFindings: UNAPPROVED_DESTINATION",
+  "walletAsked": 0,
+  "lastWalletRequest": null
+}

@@ -112,8 +112,67 @@ def validate_startup(
             "with at least one credential, or unset TRACESETTLE_REQUIRE_SERVICE_AUTH"
         )
 
+    # The TEE gate fails closed. Asking for enforced attestation without the
+    # machinery to obtain one, or without the execution boundary that would obey
+    # it, would silently drop the guarantee the operator asked for, so it is a
+    # hard error on any binding.
+    from . import config
+
+    if config.NEAR_TEE_REQUIRED:
+        if not config.TEE_ATTESTATION_ENABLED:
+            raise ConfigurationError(
+                "TRACESETTLE_NEAR_TEE_REQUIRED is set but TRACESETTLE_TEE_ATTESTATION is "
+                "not; the gate would have no attestation to enforce. Enable the attestation "
+                "provider, or unset TRACESETTLE_NEAR_TEE_REQUIRED"
+            )
+        if not config.NEAR_EXECUTION_ENABLED:
+            raise ConfigurationError(
+                "TRACESETTLE_NEAR_TEE_REQUIRED is set but TRACESETTLE_NEAR_EXECUTION is not; "
+                "there is no execution boundary to enforce the gate on. Enable the execution "
+                "boundary, or unset TRACESETTLE_NEAR_TEE_REQUIRED"
+            )
+
+    # The enclave signing boundary fails closed. Asking for enclave signing
+    # without an endpoint to reach or an approved measurement to pin would
+    # silently drop the guarantee the operator asked for, so it is a hard error
+    # on any binding.
+    if config.ENCLAVE_REQUIRED:
+        if not config.ENCLAVE_SIGN_URL:
+            raise ConfigurationError(
+                "TRACESETTLE_ENCLAVE_REQUIRED is set but TRACESETTLE_ENCLAVE_SIGN_URL is not; "
+                "there is no enclave signing endpoint to reach. Configure it, or unset "
+                "TRACESETTLE_ENCLAVE_REQUIRED"
+            )
+        if not config.ENCLAVE_APPROVED_MEASUREMENT:
+            raise ConfigurationError(
+                "TRACESETTLE_ENCLAVE_REQUIRED is set but TRACESETTLE_ENCLAVE_APPROVED_MEASUREMENT "
+                "is not; no enclave identity is approved, so provisioning would fail closed "
+                "against every measurement. Pin the approved measurement, or unset "
+                "TRACESETTLE_ENCLAVE_REQUIRED"
+            )
+        if not config.NEAR_EXECUTION_ENABLED:
+            raise ConfigurationError(
+                "TRACESETTLE_ENCLAVE_REQUIRED is set but TRACESETTLE_NEAR_EXECUTION is not; "
+                "there is no execution boundary for the enclave to sign for. Enable the "
+                "execution boundary, or unset TRACESETTLE_ENCLAVE_REQUIRED"
+            )
+
     if not public_binding:
         return profile
+
+    # Client-supplied policy selection is a local-only affordance: it lets a
+    # caller choose the policy it is judged against, which is exactly what the
+    # enforcement boundary must not allow. Refuse rather than warn, so a
+    # public deployment cannot be tricked into it by one environment variable.
+    from . import config
+
+    if config.NEAR_ALLOW_CLIENT_POLICY_SELECTION:
+        raise ConfigurationError(
+            "TRACESETTLE_NEAR_ALLOW_CLIENT_POLICY_SELECTION is set together with a public "
+            "binding (host=%r). Client-supplied policy selection lets a caller choose the "
+            "policy it is evaluated against, so it is loopback-only. Unset it, or bind "
+            "127.0.0.1." % (host,)
+        )
 
     missing: list[str] = []
     if not api_key:

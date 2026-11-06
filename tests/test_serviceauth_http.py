@@ -218,3 +218,63 @@ def test_admin_route_is_not_gated_by_service_credential():
         # route proceeds (404 for an unknown incident, not 401).
         status, _ = _request("POST", base + "/api/guard/incidents/nope/status", {"status": "OPEN"})
     assert status == 404
+
+
+# --- the NEAR agent-evaluate route is a service-facing route ----------------
+#
+# The NEAR wrapper reads a declared service_id, so the same rule must apply: a
+# credential authenticates exactly one identity, and a body that claims another
+# is refused. Without this the NEAR route would be the one gap in the boundary.
+
+NEAR_TX = {
+    "service_id": KEY_A,
+    "operation": "WITHDRAWAL",
+    "chain": "eth",
+    "asset": "USDC",
+    "amount": "1250.50",
+    "destination": APPROVED_DESTINATION,
+    "scope": "INTENTS",
+    "policy_action": "withdraw",
+}
+
+
+def _near_evaluate(base, payload, credential=None):
+    return _request(
+        "POST", base + "/api/guard/near/agent-evaluate", {"transaction": payload}, credential
+    )
+
+
+def test_near_route_without_a_registry_uses_the_declared_identity():
+    with running_server(registry=None) as base:
+        status, body = _near_evaluate(base, NEAR_TX)
+    assert status == 200
+    assert body["outcome"] == "ALLOW"
+
+
+def test_near_route_missing_credential_is_refused():
+    registry = ServiceRegistry()
+    registry.mint(KEY_A)
+    with running_server(registry=registry) as base:
+        status, _ = _near_evaluate(base, NEAR_TX)
+    assert status == 401
+
+
+def test_near_route_correct_credential_is_accepted():
+    registry = ServiceRegistry()
+    _, secret = registry.mint(KEY_A)
+    with running_server(registry=registry) as base:
+        status, body = _near_evaluate(base, NEAR_TX, credential=secret)
+    assert status == 200
+    assert body["outcome"] == "ALLOW"
+
+
+def test_near_route_service_a_cannot_impersonate_service_b():
+    registry = ServiceRegistry()
+    _, secret_a = registry.mint(KEY_A)
+    registry.mint(KEY_B)
+    with running_server(registry=registry) as base:
+        status, body = _near_evaluate(
+            base, dict(NEAR_TX, service_id=KEY_B), credential=secret_a
+        )
+    assert status == 403
+    assert "identity" in body["error"]

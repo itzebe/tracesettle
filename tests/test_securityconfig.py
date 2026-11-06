@@ -155,3 +155,151 @@ def test_public_binding_with_service_auth_and_keys_starts():
 def test_profile_description_contains_no_secret_value():
     profile = _validate("0.0.0.0", api_key="super-secret-key")
     assert "super-secret-key" not in profile.describe()
+
+
+# --- client policy selection is loopback-only ------------------------------
+
+
+def test_public_binding_with_client_policy_selection_is_refused(monkeypatch):
+    """Client-supplied policy selection must never be reachable publicly.
+
+    It lets a caller choose the policy it is evaluated against, which is the
+    enforcement decision itself. A public bind therefore refuses to start.
+    """
+    from tracesettle import config
+
+    monkeypatch.setattr(config, "NEAR_ALLOW_CLIENT_POLICY_SELECTION", True)
+    with pytest.raises(ConfigurationError) as excinfo:
+        _validate("0.0.0.0")
+    message = str(excinfo.value)
+    assert "TRACESETTLE_NEAR_ALLOW_CLIENT_POLICY_SELECTION" in message
+    # The message names the variable, never a value.
+    assert "0.0.0.0" in message
+
+
+def test_loopback_binding_with_client_policy_selection_starts(monkeypatch):
+    from tracesettle import config
+
+    monkeypatch.setattr(config, "NEAR_ALLOW_CLIENT_POLICY_SELECTION", True)
+    profile = _validate("127.0.0.1")
+    assert profile.public_binding is False
+
+
+# --- the TEE gate fails closed ---------------------------------------------
+
+
+def test_tee_gate_without_the_attestation_provider_is_refused(monkeypatch):
+    """Requiring attestation without a way to obtain one must refuse to start.
+
+    Otherwise the operator asks for enforced attestation and silently gets none.
+    """
+    from tracesettle import config
+
+    monkeypatch.setattr(config, "NEAR_TEE_REQUIRED", True)
+    monkeypatch.setattr(config, "TEE_ATTESTATION_ENABLED", False)
+    monkeypatch.setattr(config, "NEAR_EXECUTION_ENABLED", True)
+    with pytest.raises(ConfigurationError) as excinfo:
+        _validate("127.0.0.1")
+    assert "TRACESETTLE_TEE_ATTESTATION" in str(excinfo.value)
+
+
+def test_tee_gate_without_the_execution_boundary_is_refused(monkeypatch):
+    from tracesettle import config
+
+    monkeypatch.setattr(config, "NEAR_TEE_REQUIRED", True)
+    monkeypatch.setattr(config, "TEE_ATTESTATION_ENABLED", True)
+    monkeypatch.setattr(config, "NEAR_EXECUTION_ENABLED", False)
+    with pytest.raises(ConfigurationError) as excinfo:
+        _validate("0.0.0.0")
+    assert "TRACESETTLE_NEAR_EXECUTION" in str(excinfo.value)
+
+
+def test_tee_gate_with_both_dependencies_starts(monkeypatch):
+    from tracesettle import config
+
+    monkeypatch.setattr(config, "NEAR_TEE_REQUIRED", True)
+    monkeypatch.setattr(config, "TEE_ATTESTATION_ENABLED", True)
+    monkeypatch.setattr(config, "NEAR_EXECUTION_ENABLED", True)
+    profile = _validate("127.0.0.1")
+    assert profile.public_binding is False
+
+
+# --- enclave signing gate ---------------------------------------------------
+
+
+def _with_config(monkeypatch, **attrs):
+    from tracesettle import config
+
+    for key, value in attrs.items():
+        monkeypatch.setattr(config, key, value, raising=False)
+
+
+def test_enclave_required_without_a_sign_url_is_refused(monkeypatch):
+    _with_config(
+        monkeypatch,
+        ENCLAVE_REQUIRED=True,
+        ENCLAVE_SIGN_URL=None,
+        ENCLAVE_APPROVED_MEASUREMENT="mr_config_id=aa",
+        NEAR_EXECUTION_ENABLED=True,
+    )
+    with pytest.raises(ConfigurationError) as exc:
+        _validate("127.0.0.1")
+    assert "TRACESETTLE_ENCLAVE_SIGN_URL" in str(exc.value)
+
+
+def test_enclave_required_without_a_measurement_pin_is_refused(monkeypatch):
+    _with_config(
+        monkeypatch,
+        ENCLAVE_REQUIRED=True,
+        ENCLAVE_SIGN_URL="https://enclave.invalid/sign",
+        ENCLAVE_APPROVED_MEASUREMENT=None,
+        NEAR_EXECUTION_ENABLED=True,
+    )
+    with pytest.raises(ConfigurationError) as exc:
+        _validate("127.0.0.1")
+    assert "TRACESETTLE_ENCLAVE_APPROVED_MEASUREMENT" in str(exc.value)
+
+
+def test_enclave_required_without_execution_is_refused(monkeypatch):
+    _with_config(
+        monkeypatch,
+        ENCLAVE_REQUIRED=True,
+        ENCLAVE_SIGN_URL="https://enclave.invalid/sign",
+        ENCLAVE_APPROVED_MEASUREMENT="mr_config_id=aa",
+        NEAR_EXECUTION_ENABLED=False,
+    )
+    with pytest.raises(ConfigurationError) as exc:
+        _validate("127.0.0.1")
+    assert "TRACESETTLE_NEAR_EXECUTION" in str(exc.value)
+
+
+def test_enclave_required_with_full_configuration_starts(monkeypatch):
+    _with_config(
+        monkeypatch,
+        ENCLAVE_REQUIRED=True,
+        ENCLAVE_SIGN_URL="https://enclave.invalid/sign",
+        ENCLAVE_APPROVED_MEASUREMENT="mr_config_id=aa",
+        NEAR_EXECUTION_ENABLED=True,
+    )
+    profile = _validate("127.0.0.1")
+    assert profile.public_binding is False
+
+
+def test_approved_measurement_parses_field_value_pairs():
+    from tracesettle.config import parse_approved_measurement
+
+    assert parse_approved_measurement(None) == {}
+    assert parse_approved_measurement("") == {}
+    assert parse_approved_measurement("mr_config_id=AABB, rt_mr3=CC") == {
+        "mr_config_id": "aabb",
+        "rt_mr3": "cc",
+    }
+
+
+def test_approved_measurement_rejects_a_malformed_entry():
+    from tracesettle.config import parse_approved_measurement
+
+    with pytest.raises(ValueError):
+        parse_approved_measurement("mr_config_id")
+    with pytest.raises(ValueError):
+        parse_approved_measurement("=aabb")

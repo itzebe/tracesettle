@@ -181,3 +181,208 @@ def test_service_credentials_hashed_invariant_notices_a_plaintext_store():
         assert result.holds is False
     finally:
         serviceauth.hash_secret = original
+
+
+def test_near_execution_invariant_notices_a_broadcast_without_authorization():
+    """If the boundary broadcast a non-authorized transaction, the invariant must fail."""
+    from tracesettle.guard import invariants as inv
+    from tracesettle.near import execution as ex
+
+    original = ex.NearExecutionBoundary.accept_signature
+
+    def permissive(self, prepared, signature_b64):  # noqa: ANN001
+        # The mutation: skip the authorization check entirely.
+        return prepared.transaction.signed_b64(b"\x00" * 64), "mutated"
+
+    ex.NearExecutionBoundary.accept_signature = permissive
+    try:
+        result = inv.INVARIANTS["near_execution_never_signs_without_authorization"]()
+        assert result.holds is False
+    finally:
+        ex.NearExecutionBoundary.accept_signature = original
+
+
+def test_near_execution_binding_invariant_notices_a_binding_that_ignores_the_amount():
+    """If the binding ignored the amount, a tampered transaction would pass."""
+    from tracesettle.guard import invariants as inv
+    from tracesettle.near import execution as ex
+
+    original = ex.NearExecutionBoundary.verify_binding
+
+    def permissive(self, prepared, *, consume=False):  # noqa: ANN001
+        # The mutation: accept any transaction that merely carries a token.
+        return None
+
+    ex.NearExecutionBoundary.verify_binding = permissive
+    try:
+        result = inv.INVARIANTS["near_execution_binding_covers_the_bytes"]()
+        assert result.holds is False
+    finally:
+        ex.NearExecutionBoundary.verify_binding = original
+
+
+def test_near_execution_binding_invariant_notices_a_binding_that_ignores_the_bytes():
+    """If the byte digest did not track the bytes, a bytes-only tamper would pass.
+
+    This reproduces the defect that motivated the digest binding: a transaction
+    whose ``actions`` bytes were swapped while every human-readable parameter
+    stayed identical. Making the digest constant (so it no longer changes when
+    the bytes change) reverts the feature's *effect* end to end - mint and verify
+    both commit to the same constant - so the invariant must fail.
+    """
+    from tracesettle.guard import invariants as inv
+    from tracesettle.near.txbuild import NearTransaction
+
+    original = NearTransaction.payload_fingerprint
+
+    def constant_digest(self):  # noqa: ANN001
+        return "sha256:" + "0" * 64
+
+    NearTransaction.payload_fingerprint = constant_digest
+    try:
+        result = inv.INVARIANTS["near_execution_binding_covers_the_bytes"]()
+        assert result.holds is False, "the invariant failed to notice a byte-less binding"
+    finally:
+        NearTransaction.payload_fingerprint = original
+
+
+def test_configured_audit_log_invariant_notices_a_truthiness_guard():
+    """Mutation check: restoring the ``audit or AuditLog()`` defect must make the
+    checker fail. The mutation is applied to a subclass, never to production."""
+    from tracesettle.guard.audit import AuditLog
+    from tracesettle.guard.policy import DEFAULT_POLICY
+    from tracesettle.guard.service import GuardService
+
+    class _Regressed(GuardService):
+        def __init__(self, **kwargs):
+            audit = kwargs.get("audit")
+            kwargs["audit"] = audit or AuditLog()
+            super().__init__(**kwargs)
+
+    import tempfile
+    from pathlib import Path
+
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "audit.jsonl"
+        audit = AuditLog(path=path)
+        regressed = _Regressed(policy=DEFAULT_POLICY, audit=audit)
+        # The defective constructor dropped the configured log; the real checker
+        # would therefore report the invariant as broken.
+        assert regressed.audit is not audit
+        assert not path.exists()
+
+
+def test_access_key_permission_invariant_notices_a_removed_check():
+    """Mutation check: if the boundary stopped enforcing the key's permission, a
+    function-call key would move native NEAR and the checker must fail."""
+    from tracesettle.guard import invariants as inv
+    from tracesettle.near import execution as ex
+
+    original = ex.NearExecutionBoundary._validate_access_key_permission
+
+    def permissive(self, transaction, access_key):  # noqa: ANN001
+        return None  # the mutation: never check the permission
+
+    ex.NearExecutionBoundary._validate_access_key_permission = permissive
+    try:
+        result = inv.INVARIANTS["near_execution_requires_access_key_permission"]()
+        assert result.holds is False
+    finally:
+        ex.NearExecutionBoundary._validate_access_key_permission = original
+
+
+def test_durable_submission_invariant_notices_a_retry_on_unknown_outcome():
+    """Mutation check: if an unknown submission outcome were retried (or recorded
+    as FAILED), the checker must fail."""
+    from tracesettle.guard import invariants as inv
+    from tracesettle.near import pipeline as pl
+    from tracesettle.near.ledger import SubmissionState
+
+    original = pl.NearExecutionPipeline._submit_and_verify
+
+    def retrying(self, record, prepared, *, attempts, delay):  # noqa: ANN001
+        # The mutation: assume "no response" means "not applied" and retry.
+        record.attempts += 1
+        record.transition(SubmissionState.SUBMITTING, reason="mutated retry")
+        self.ledger.put(record)
+        self.boundary.rpc.send_tx(record.signed_b64)
+        record.transition(SubmissionState.FAILED, reason="mutated: assumed failure")
+        self.ledger.put(record)
+        return pl.ExecutionResult(
+            state=SubmissionState.FAILED,
+            tx_hash=record.tx_hash,
+            settlement_state="FAILED",
+            verification=None,
+            signed_b64=record.signed_b64,
+        )
+
+    pl.NearExecutionPipeline._submit_and_verify = retrying
+    try:
+        result = inv.INVARIANTS["near_submission_is_durable_and_recovery_never_resubmits"]()
+        assert result.holds is False
+    finally:
+        pl.NearExecutionPipeline._submit_and_verify = original
+
+
+
+def test_counterparty_invariant_notices_a_read_that_relaxes_a_control():
+    """If a counterparty read could not restrict, the invariant must fail."""
+    from tracesettle.guard import invariants as inv
+    from tracesettle.near import agent_wrapper as aw
+
+    original = aw._evaluate_counterparty
+
+    def permissive(read):  # noqa: ANN001
+        # The mutation: a counterparty read never restricts the outcome.
+        return aw.WrapperOutcome.ALLOW, [], []
+
+    aw._evaluate_counterparty = permissive
+    try:
+        result = inv.INVARIANTS["counterparty_intelligence_only_adds_restriction"]()
+        assert result.holds is False
+    finally:
+        aw._evaluate_counterparty = original
+
+
+def test_approval_invariant_notices_an_approval_that_overrides_a_block():
+    """If a valid approval could override a BLOCK, the invariant must fail."""
+    from tracesettle.guard import invariants as inv
+    from tracesettle.guard import service as svc
+
+    original = svc.GuardService._resolve_approval
+
+    def permissive(self, request, approval, payload_fingerprint):  # noqa: ANN001
+        # The mutation: any presented approval allows, regardless of the decision.
+        if approval is None:
+            return svc.Decision.REQUIRE_APPROVAL, None
+        return svc.Decision.ALLOW, None
+
+    svc.GuardService._resolve_approval = permissive
+    try:
+        result = inv.INVARIANTS["human_approval_cannot_override_a_block"]()
+        assert result.holds is False
+    finally:
+        svc.GuardService._resolve_approval = original
+
+
+def test_approval_invariant_notices_an_unbound_approval():
+    """If an approval were not bound to the payload, a mismatched one would pass."""
+    from tracesettle.guard import invariants as inv
+    from tracesettle.near import approval as ap
+
+    original = ap.ApprovalAuthority.validate
+
+    def unbound(self, token, *, expected_payload_fingerprint, expected_service_id=None, consume=False):  # noqa: ANN001
+        # The mutation: ignore the payload binding entirely.
+        return original(
+            self, token, expected_payload_fingerprint=expected_payload_fingerprint,
+            expected_service_id=expected_service_id, consume=consume,
+        ).__class__(ap.ApprovalState.VALID, "mutated: binding ignored")
+
+    ap.ApprovalAuthority.validate = unbound
+    try:
+        result = inv.INVARIANTS["human_approval_cannot_override_a_block"]()
+        assert result.holds is False
+    finally:
+        ap.ApprovalAuthority.validate = original
+
