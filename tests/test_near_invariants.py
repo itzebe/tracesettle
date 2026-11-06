@@ -16,7 +16,7 @@ FIXTURE_DIR = pathlib.Path(__file__).resolve().parent.parent / "tracesettle" / "
 
 def test_near_invariants_are_registered():
     near = [name for name in inv.INVARIANTS if name.startswith("near_")]
-    assert len(near) == 15
+    assert len(near) == 16
     assert all(name in inv.INVARIANT_DESCRIPTIONS for name in near)
 
 
@@ -44,6 +44,27 @@ def test_near_key_invariant_notices_a_permissive_key(monkeypatch):
 
     monkeypatch.setattr(keys_mod, "key_supports_operation", lambda *a, **k: (True, "mutated"))
     result = inv.INVARIANTS["near_function_call_key_cannot_transfer_near"]()
+    assert result.holds is False
+
+
+def test_near_unknown_permission_invariant_notices_a_permissive_helper(monkeypatch):
+    """Mutation: if the helper allowed UNKNOWN, the invariant must fail.
+
+    Restoring the old helper behaviour (``UNKNOWN`` treated as unrestricted)
+    reproduces the latent fail-open this mission closes. The invariant must
+    notice that the helper itself no longer fails closed.
+    """
+    from tracesettle.near import access_keys as keys_mod
+
+    original = keys_mod.key_supports_operation
+
+    def permissive(analysis, **kwargs):
+        if analysis.permission.value == "UNKNOWN":
+            return True, "unrecognised permission treated as unrestricted"
+        return original(analysis, **kwargs)
+
+    monkeypatch.setattr(keys_mod, "key_supports_operation", permissive)
+    result = inv.INVARIANTS["near_unknown_permission_denies_at_the_helper"]()
     assert result.holds is False
 
 

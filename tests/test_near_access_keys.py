@@ -170,6 +170,54 @@ def test_function_call_key_does_not_support_add_key():
     assert "only a full-access key" in reason
 
 
+def test_unknown_permission_is_denied_by_the_helper_itself():
+    """The helper must fail closed on UNKNOWN, not rely on its callers.
+
+    Every real caller rejects UNKNOWN before calling ``key_supports_operation``,
+    so a helper that returns ``allowed=True`` is a latent fail-open. This proves
+    the helper denies UNKNOWN directly, for a NEAR-moving operation and for a
+    contract call, and that the reason names the unrecognised permission.
+    """
+    analysis = parse_access_key({"permission": {"SomethingBrandNew": {}}})
+    assert analysis.permission is AccessKeyPermission.UNKNOWN
+
+    allowed, reason = key_supports_operation(analysis, operation="TRANSFER", transfers_near=True)
+    assert allowed is False
+    assert "not recognised" in reason
+
+    allowed, reason = key_supports_operation(
+        analysis,
+        operation="FUNCTION_CALL",
+        receiver_id="wrap.near",
+        method_name="ft_transfer",
+    )
+    assert allowed is False
+    assert "not recognised" in reason
+
+
+def test_malformed_permission_shapes_are_denied_by_the_helper():
+    """Every unrecognised permission shape must be denied, never defaulted permissive."""
+    shapes = [
+        {"permission": {"SomethingNew": {}}},
+        {"permission": 42},
+        {"permission": ["FullAccess"]},
+        {"permission_kind": "SomethingElse"},
+        {},
+    ]
+    for shape in shapes:
+        analysis = parse_access_key(shape)
+        assert analysis.permission is AccessKeyPermission.UNKNOWN, shape
+        for operation, transfers_near in (("TRANSFER", True), ("FUNCTION_CALL", False)):
+            allowed, _ = key_supports_operation(
+                analysis,
+                operation=operation,
+                receiver_id="wrap.near",
+                method_name="ft_transfer",
+                transfers_near=transfers_near,
+            )
+            assert allowed is False, (shape, operation)
+
+
 def test_a_float_allowance_is_rejected():
     with pytest.raises(ValueError):
         parse_access_key(

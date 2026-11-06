@@ -42,7 +42,8 @@ class AccessKeyPermission(str, enum.Enum):
 
     FUNCTION_CALL = "FUNCTION_CALL"
     FULL_ACCESS = "FULL_ACCESS"
-    #: A permission shape we do not recognise. Treated as unrestricted.
+    #: A permission shape we do not recognise. Assumed unrestricted for risk
+    #: reporting, and always denied by :func:`key_supports_operation`.
     UNKNOWN = "UNKNOWN"
 
     @property
@@ -368,7 +369,14 @@ def key_supports_operation(
     if analysis.permission is AccessKeyPermission.FULL_ACCESS:
         return True, "full-access key covers every operation"
     if analysis.permission is AccessKeyPermission.UNKNOWN:
-        return True, "unrecognised permission treated as unrestricted (do not rely on it)"
+        # An unrecognised permission shape cannot be shown to fence anything, so
+        # its scope cannot be established. The helper must fail closed on its own
+        # rather than rely on every caller to reject UNKNOWN first; treating it as
+        # unrestricted here would be a latent fail-open.
+        return False, (
+            "the access-key permission is not recognised, so its scope cannot be "
+            "established; refusing rather than treating it as unrestricted"
+        )
     if transfers_near:
         return False, (
             "a function-call key cannot transfer NEAR or attach NEAR tokens to a call"

@@ -1041,6 +1041,45 @@ def _near_function_call_key_cannot_transfer_near():
     )
 
 
+def _near_unknown_permission_denies_at_the_helper():
+    """The helper itself must deny an UNKNOWN permission, not rely on callers.
+
+    Every real caller rejects UNKNOWN before reaching ``key_supports_operation``,
+    so the helper returning ``allowed=True`` for UNKNOWN was a latent fail-open:
+    a future caller that skipped the pre-check would silently authorize with a
+    key whose scope cannot be established. The helper must fail closed on its
+    own, for both a NEAR-moving and a contract-call operation.
+    """
+    from ..near.access_keys import key_supports_operation, parse_access_key
+
+    unknown_key = parse_access_key({"permission": {"SomethingBrandNew": {}}})
+    if unknown_key.permission.value != "UNKNOWN":
+        return InvariantResult(
+            "near_unknown_permission_denies_at_the_helper",
+            False,
+            "the analyser did not classify an unrecognised permission as UNKNOWN",
+        )
+    for operation, transfers_near in (("TRANSFER", True), ("FUNCTION_CALL", False)):
+        allowed, _ = key_supports_operation(
+            unknown_key,
+            operation=operation,
+            receiver_id="wrap.near",
+            method_name="ft_transfer",
+            transfers_near=transfers_near,
+        )
+        if allowed:
+            return InvariantResult(
+                "near_unknown_permission_denies_at_the_helper",
+                False,
+                f"the helper allowed an UNKNOWN permission for {operation}",
+            )
+    return InvariantResult(
+        "near_unknown_permission_denies_at_the_helper",
+        True,
+        "key_supports_operation denies an UNKNOWN permission on its own",
+    )
+
+
 def _counterparty_intelligence_only_adds_restriction():
     """Counterparty intelligence can only add restriction, never relax a control.
 
@@ -2994,6 +3033,7 @@ INVARIANTS: dict[str, Callable[[], InvariantResult]] = {
     ),
     "near_native_scope_gap_is_always_stated": _near_native_scope_gap_is_always_stated,
     "near_function_call_key_cannot_transfer_near": _near_function_call_key_cannot_transfer_near,
+    "near_unknown_permission_denies_at_the_helper": _near_unknown_permission_denies_at_the_helper,
     "near_unrecognised_access_key_never_allows": _near_unrecognised_access_key_never_allows,
     "near_provider_success_is_never_verified_without_evidence": (
         _near_provider_success_is_never_verified_without_evidence
@@ -3074,6 +3114,7 @@ INVARIANT_DESCRIPTIONS: dict[str, str] = {
     "near_policy_selection_is_not_client_controlled": "A request cannot choose the NEAR Intents policy it is evaluated against; the operator's configuration governs.",
     "near_native_scope_gap_is_always_stated": "A native NEAR/EVM/Solana request is never described as protected by the Intents destinations, budget, timelock, schedule or owner approval.",
     "near_function_call_key_cannot_transfer_near": "A NEAR function-call key is never treated as able to transfer NEAR or attach NEAR tokens to a call.",
+    "near_unknown_permission_denies_at_the_helper": "The access-key scope helper itself denies an unrecognised permission, rather than relying on every caller to reject it first.",
     "near_unrecognised_access_key_never_allows": "An access key whose permission shape is neither FullAccess nor FunctionCall is never treated as safe; the request requires review rather than ALLOW.",
     "near_provider_success_is_never_verified_without_evidence": "A provider success status never yields an independently-verified settlement level without decisive on-chain evidence.",
     "near_partial_settlement_is_never_verified": "A destination that received less than the quote's expected output is classified PARTIAL and is never independently verified.",

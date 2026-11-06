@@ -144,7 +144,7 @@ derives or stores a private key.
 | `FunctionCall` with `method_names` + `allowance` | no | no | LOW |
 | `FunctionCall` with `method_names`, no allowance | no | no | MEDIUM |
 | `FunctionCall` with no `method_names` | no | no | HIGH |
-| unrecognised | treated as unrestricted | — | CRITICAL |
+| unrecognised | denied by `key_supports_operation` | — | CRITICAL |
 
 The documented limitations the code states, because they are the ones people get
 wrong:
@@ -156,7 +156,8 @@ wrong:
 * An omitted `allowance` means **unlimited gas** until the account balance runs
   out; the code warns.
 * A gas key (NEP-611) cannot set an allowance; its prepaid balance is the budget.
-* An unrecognised permission is treated as **unrestricted**, never as safe.
+* An unrecognised permission is **denied** by `key_supports_operation` — the
+  helper fails closed on its own, not only because its callers pre-reject it.
 
 The wrapper applies the key check only to a **native** request, because that is
 what the key signs directly. On the Intents path the wallet provider signs, so

@@ -708,7 +708,8 @@ reports the gap explicitly.
 
 **A NEAR function-call key cannot transfer NEAR** and cannot attach NEAR tokens to
 a call. The wrapper checks the declared key scope before a native request reaches a
-signer, and treats an unrecognised permission as unrestricted, never as safe.
+signer; an unrecognised permission shape is refused, and the scope helper denies it
+on its own rather than relying on every caller to reject it first.
 
 **The signer validates before it spends.** At the signing gate the transaction's
 signature and its authorization binding are checked *before* the single-use
@@ -733,11 +734,12 @@ refusal is provable: the executor is never called unless the outcome was `ALLOW`
 | H | Native tx wrongly assumed protected by an Intents-only policy | policy-scope rejection |
 | I | Provider reports success without independent evidence | `UNKNOWN` / `UNAVAILABLE` |
 
-Fifteen NEAR-specific structural guarantees join the invariant set, each
+Sixteen NEAR-specific structural guarantees join the invariant set, each
 mutation-tested: `near_policy_must_be_in_force`,
 `near_policy_selection_is_not_client_controlled`,
 `near_native_scope_gap_is_always_stated`,
 `near_function_call_key_cannot_transfer_near`,
+`near_unknown_permission_denies_at_the_helper`,
 `near_unrecognised_access_key_never_allows`,
 `near_provider_success_is_never_verified_without_evidence`,
 `near_partial_settlement_is_never_verified`,
@@ -748,7 +750,7 @@ mutation-tested: `near_policy_must_be_in_force`,
 `near_execution_binding_covers_the_bytes`,
 `near_signature_is_verified_before_state_is_consumed`,
 `near_execution_requires_access_key_permission`, and
-`near_submission_is_durable_and_recovery_never_resubmits` (fifteen NEAR-specific
+`near_submission_is_durable_and_recovery_never_resubmits` (sixteen NEAR-specific
 in total). Two further guarantees cover the newer controls and are mutation-tested
 too: `counterparty_intelligence_only_adds_restriction` (a counterparty read can
 never weaken a decision) and `human_approval_cannot_override_a_block` (an approval
@@ -836,7 +838,7 @@ curl -sS -X POST http://127.0.0.1:8080/api/guard/sign \
 curl -sS http://127.0.0.1:8080/api/guard/invariants \
   | python3 -c 'import sys,json;d=json.load(sys.stdin);print("all hold:",d["all_hold"]);[print(" ",i["name"]) for i in d["invariants"]]'
 ```
-→ `all hold: True` and the forty-six invariant names, including the fifteen NEAR
+→ `all hold: True` and the forty-seven invariant names, including the sixteen NEAR
 ones (`near_policy_must_be_in_force`, `near_native_scope_gap_is_always_stated`,
 `near_function_call_key_cannot_transfer_near`,
 `near_unrecognised_access_key_never_allows`,
@@ -1214,7 +1216,7 @@ transaction request ──▶ │ guard/rules.py      7 controls, all run  │
                         │                     validate, then execute │
                         │ guard/audit.py      hash-chained records  │
                         │ guard/monitor.py    counters + incidents  │
-                        │ guard/invariants.py 45 checked guarantees │
+                        │ guard/invariants.py 47 checked guarantees │
                         └────────────────────┬─────────────────────┘
                                              │ ALLOW + authorization
                                              ▼
@@ -1287,7 +1289,7 @@ identical decisions.
 | `tracesettle/guard/safeguards.py` | Durable security safeguards: the learning loop's store (SQLite). |
 | `tracesettle/guard/learning.py` | The learning loop: derive a lesson, apply safeguards (only ever tightening). |
 | `tracesettle/guard/state_pg.py` | Optional PostgreSQL backend: shared nonces, counters, revocations, idempotency. |
-| `tracesettle/guard/invariants.py` | The forty-six structural guarantees, checked by execution. |
+| `tracesettle/guard/invariants.py` | The forty-seven structural guarantees, checked by execution. |
 | `tracesettle/guard/api.py` | Guard HTTP routing and JSON serialization. |
 | `tracesettle/guard/console.py` | The security operations console page. |
 | `docs/TRANSACTION_SECURITY.md` | The security layer in full, including what it does not do. |
@@ -1391,7 +1393,7 @@ variable and all documented in `docs/TRANSACTION_SECURITY.md`:
   replay-nonce store all have explicit caps, so a flood cannot exhaust memory.
   When durable state is configured, spent nonces and the limit counters live in
   SQLite instead, so they survive a restart (see **Durable state** below).
-- **Structural invariants, checked by execution.** Forty-five guarantees at
+- **Structural invariants, checked by execution.** Forty-seven guarantees at
   `GET /api/guard/invariants`, each mutation-tested so a checker that cannot fail
   is treated as a defect.
 - **Honest audit claim.** In-place modification of an audit record is detectable;
