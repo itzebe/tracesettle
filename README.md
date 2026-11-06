@@ -818,11 +818,11 @@ a bare interpreter.
 
 ```sh
 python -m pytest tests/ --collect-only -q   # 1645 tests collected
-python -m pytest tests/ -q                  # 1616 passed, 29 skipped
+python -m pytest tests/ -q                  # 1614 passed, 31 skipped
 ```
-→ `1616 passed, 29 skipped`. The skips are the PostgreSQL integration
+→ `1614 passed, 31 skipped`. The skips are the PostgreSQL integration
 tests; set `TRACESETTLE_TEST_PG_DSN` to a real server to run them
-(**1640 passed, 5 skipped** — the remaining 5 are opt-in *live-infrastructure*
+(**1638 passed, 7 skipped** — the remaining 7 are opt-in *live-infrastructure*
 tests that need real provider credentials, a testnet key, or a TDX enclave
 harness, none of which a zero-budget local run has).
 
@@ -1703,7 +1703,7 @@ immutable commit SHA (not a moving tag), and cancels superseded runs.
 ## Tests
 
 ```sh
-python3 -m pytest tests/ -q          # 1616 passed, 29 skipped (1640 passed, 5 skipped with PostgreSQL)
+python3 -m pytest tests/ -q          # 1614 passed, 31 skipped (1638 passed, 7 skipped with PostgreSQL)
 python3 -m pytest tests/test_guard_authorization.py -q
 python3 -m pytest tests/test_guard_invariants.py -q
 python3 -m pytest tests/test_guard_end_to_end.py -q

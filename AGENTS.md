@@ -2091,8 +2091,10 @@ untouched; runtime stays standard-library only.
   `UNKNOWN` (terminal but unresolved: never a success, never a plain failure).
   Only the two documented success synonyms map to `SUCCESS`; a status outside the
   enum still resolves to `UNKNOWN`.
-- **Tests.** 1640 passed, 5 skipped with PostgreSQL 16 (filesystem-only 1616
-  passed, 29 skipped). New in `tests/test_near_outlayer.py`: the documented-status
+- **Tests.** 1638 passed, 7 skipped with PostgreSQL 16 (filesystem-only 1614
+  passed, 31 skipped). The live OutLayer network checks are opt-in
+  (`TRACESETTLE_TEST_OUTLAYER_LIVE=1`) and skip cleanly when unreachable, so the
+  default suite stays offline. New in `tests/test_near_outlayer.py`: the documented-status
   coverage test (fails if the map drifts from the API), a `completed`-is-not-
   `UNKNOWN` end-to-end test, unknown/`needs_review` never-a-success tests, and
   post-authorization substitution tests for amount, network, service and signer
