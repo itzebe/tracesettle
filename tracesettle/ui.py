@@ -117,7 +117,7 @@ _INDEX_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>TRACESETTLE — NEAR Intents settlement investigator</title>
+<title>TRACESETTLE — Security infrastructure for autonomous payments</title>
 <style>
   :root {
     --bg: #0d1117; --panel: #161b22; --border: #30363d; --fg: #e6edf3;
@@ -173,33 +173,118 @@ _INDEX_HTML = """<!DOCTYPE html>
   a { color: var(--accent); }
   code { background: #0b0f14; padding: 1px 5px; border-radius: 4px; font-size: 12px; }
   footer { color: var(--muted); font-size: 12px; padding: 20px 16px; text-align: center; }
+  .hero { margin-bottom: 20px; }
+  .hero-title { margin: 0 0 4px; font-size: 24px; line-height: 1.25; }
+  .hero-sub { margin: 0 0 10px; font-size: 16px; color: var(--accent); font-weight: 600; }
+  .hero-body { margin: 0; color: var(--muted); font-size: 14px; max-width: 78ch; }
+  .caps { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 14px; margin-bottom: 16px; }
+  .cap { background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 16px; }
+  .cap h3 { margin: 0 0 4px; font-size: 16px; }
+  .cap-lead { margin: 0 0 10px; color: var(--muted); font-size: 13px; }
+  .cap ul { margin: 0; padding-left: 18px; }
+  .cap li { margin-bottom: 6px; font-size: 13px; }
+  .cap-cta { margin: 12px 0 0; font-size: 13px; font-weight: 600; }
+  .demo-cta { background: #1d1a2e; border: 1px solid var(--border); border-left: 3px solid var(--sim);
+    border-radius: 8px; padding: 14px 16px; margin-bottom: 20px; }
+  .demo-cta h3 { margin: 0 0 6px; font-size: 15px; }
+  .demo-cta p { margin: 0; font-size: 13px; color: #d6c9ff; }
+  .investigate { border-top: 1px solid var(--border); padding-top: 18px; }
+  .investigate h3 { margin: 0 0 12px; font-size: 16px; }
+  .skip { position: absolute; left: -999px; top: 0; background: var(--accent); color: #0d1117;
+    padding: 8px 12px; border-radius: 0 0 6px 0; z-index: 20; }
+  .skip:focus { left: 0; }
   @media (max-width: 640px) {
     h1 { font-size: 17px; }
+    .hero-title { font-size: 20px; }
     table { font-size: 12px; }
     .col-secondary { display: none; }
   }
 </style>
 </head>
 <body>
+<a class="skip" href="#main">Skip to main content</a>
 <header>
   <h1>TRACESETTLE</h1>
-  <div class="tag">Read-only cross-chain settlement investigator &middot; NEAR Intents 1Click &middot; v__VERSION__</div>
+  <div class="tag">Security infrastructure for autonomous payments &middot; NEAR &middot; v__VERSION__</div>
 </header>
-<main>
-  <div class="disclaimer" id="disclaimer">__DISCLAIMER__</div>
-  <form id="form" autocomplete="off">
-    <input type="text" id="identifier" name="identifier" maxlength="128"
-      placeholder="Deposit address, intent hash, or NEAR transaction hash" aria-label="Identifier">
-    <button type="submit" id="submit">Investigate</button>
-  </form>
-  <div class="hint">
-    Supported: 1Click <strong>deposit addresses</strong> (full path), <strong>intent hashes</strong>
-    (settlement status only). A transaction hash cannot be reverse-looked-up. No keys required.
-  </div>
-  <div id="output" aria-live="polite"></div>
+<main id="main">
+  <section class="hero">
+    <h2 class="hero-title">Stop unauthorized AI payments before they happen.</h2>
+    <p class="hero-sub">Verify every settlement afterward.</p>
+    <p class="hero-body">TRACESETTLE enforces transaction-level authorization for autonomous
+      agents and independently verifies settlement across supported payment infrastructure.
+      It evaluates what an agent is about to pay, refuses anything outside policy before a
+      signer is reached, and checks the on-chain result rather than trusting a provider's word.</p>
+  </section>
+
+  <section class="caps" aria-label="Capabilities">
+    <article class="cap">
+      <h3>Protect payments</h3>
+      <p class="cap-lead">Pre-signing authorization for agents.</p>
+      <ul>
+        <li>Evaluates the <strong>actual transaction parameters</strong> — recipient, amount,
+          network and payload — not the agent's explanation.</li>
+        <li>Returns an explicit <strong>ALLOW</strong>, <strong>REQUIRE_APPROVAL</strong>,
+          <strong>BLOCK</strong>, <strong>HOLD</strong> or <strong>UNKNOWN</strong> decision.</li>
+        <li>Binds any authorization to the <strong>exact bytes</strong> to be signed, so a
+          substitution after approval is refused.</li>
+        <li>Refuses replay, expiry and reuse; a <strong>BLOCK</strong> never reaches the signer.</li>
+      </ul>
+      <p class="cap-cta"><a href="console#guard">Open the authorization firewall &rarr;</a></p>
+    </article>
+
+    <article class="cap">
+      <h3>Investigate settlement</h3>
+      <p class="cap-lead">Independent, evidence-backed investigation.</p>
+      <ul>
+        <li>Traces a NEAR Intents 1Click swap from a <strong>deposit address</strong> or an
+          <strong>intent hash</strong>.</li>
+        <li>Separates what is <strong>independently verified</strong> from what is merely
+          <strong>reported</strong> by an upstream service.</li>
+        <li>Surfaces contradictions and missing evidence instead of guessing; never treats a
+          provider's <strong>SUCCESS</strong> as proof funds arrived.</li>
+        <li>Read-only: it never signs, submits or moves anything, and needs no keys.</li>
+      </ul>
+      <p class="cap-cta"><a href="#investigate">Investigate a transaction &darr;</a></p>
+    </article>
+  </section>
+
+  <section class="demo-cta" aria-label="Demonstration">
+    <div>
+      <h3>See the firewall block a payment</h3>
+      <p>A deterministic demonstration runs the real authorization boundary, signer and settlement
+        verifier: an agent is manipulated into redirecting a payment, the boundary
+        <strong>BLOCK</strong>s it, and the signer is <strong>never invoked</strong> (proven by a
+        zero call count). A legitimate payment is then authorized, signed and independently
+        verified. <span class="tag">Simulated — nothing is signed for real or broadcast.</span></p>
+    </div>
+    <p class="cap-cta"><a href="console#lab">Open the demonstration &rarr;</a></p>
+  </section>
+
+  <section id="investigate" class="investigate">
+    <h3>Investigate a transaction</h3>
+    <div class="disclaimer" id="disclaimer">__DISCLAIMER__</div>
+    <form id="form" autocomplete="off">
+      <input type="text" id="identifier" name="identifier" maxlength="128"
+        placeholder="Deposit address, intent hash, or NEAR transaction hash" aria-label="Identifier">
+      <button type="submit" id="submit">Investigate</button>
+    </form>
+    <div class="hint">
+      Supported: 1Click <strong>deposit addresses</strong> (full path), <strong>intent hashes</strong>
+      (settlement status only). A transaction hash cannot be reverse-looked-up. No keys required.
+    </div>
+    <div id="output" aria-live="polite"></div>
+  </section>
 </main>
-<footer>TRACESETTLE never signs, submits, or moves anything. Evidence is attributed to its source.
-  &middot; <a href="console">Security Operations Console</a></footer>
+<footer>
+  <p>This public interface is <strong>read-only</strong>: it never signs, submits or moves funds.
+    The authorization firewall protects agent execution through its signer enforcement boundary —
+    see the <a href="console">Security Operations Console</a>.</p>
+  <p class="tag">Evidence is attributed to its source. Simulated demonstrations are labelled as
+    such and never describe a real blockchain transaction.</p>
+</footer>
 <script>
 const out = document.getElementById('output');
 const form = document.getElementById('form');

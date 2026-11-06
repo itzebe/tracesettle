@@ -1891,3 +1891,47 @@ Reviewed the authorization -> execution path adversarially and found one real de
   with `detect-secrets` plus a known-prefix sweep (`ghp_`, `github_pat_`, `sk-`,
   `AKIA`, `xox*-`, `AIza`, PEM private keys). No real credential; all matches are
   test placeholders, public token addresses, or public TDX attestation keys.
+
+## Product identity restoration + end-to-end demo surface (2026-11-06)
+
+The landing page and the package docstring were written when TraceSettle was
+*only* a settlement investigator. The transaction-security product (guard +
+NEAR agent authorization firewall) was added later and was fully implemented and
+reachable at `/console`, but the public landing page never framed it: the only
+pointer was a single footer link, and every piece of landing copy described a
+"read-only investigator". That is a **stale-presentation** defect, not a missing
+feature. It is now corrected; no verification rule was touched.
+
+- **Landing page (`tracesettle/ui.py` `_INDEX_HTML`).** Presents both
+  capabilities — *Protect payments* (the authorization firewall) and *Investigate
+  settlement* (the read-only investigator) — plus a labelled demonstration call
+  to action. It links into `console#guard`, `console#lab` and the in-page
+  investigation form. A skip link and `id="main"` were added (WCAG 2.2 AA); the
+  read-only honesty copy and the "never signs, submits or moves funds" statement
+  are retained. `test_ui.py::test_index_page_renders` still passes unchanged.
+- **`tracesettle/__init__.py`.** The module docstring and `DISCLAIMER` now
+  describe the whole product. The `DISCLAIMER` string is shared with
+  `report.py`, and `test_investigation.py` asserts it still contains
+  `"cannot recover"`, so that phrase is preserved verbatim.
+- **One demo implementation (`tracesettle/near/agent_demo.py`).** The offline
+  end-to-end demonstration (restrictive policy, `build_offline_harness`,
+  `run_agent_payment_demo`) now lives in the package, not only in the CLI. The
+  CLI (`demo/near_agent_demo.py`) imports it (its `--json` output is
+  byte-identical to before), and `guard/api.py` serves it at
+  `GET /api/guard/near/agent-demo`. The console NEAR tab shows it as the
+  **End-to-end demonstration** panel. All three surfaces run the same code.
+- **Provable, not asserted.** The endpoint returns `simulated: true` and
+  `reproduced: true`, with `malicious.decision == "BLOCK"`,
+  `malicious.signer_calls == 0`, `malicious.broadcast_occurred == false`, and
+  `legitimate.decision == "ALLOW"`, `signer_calls == 1`,
+  `settlement_state == "VERIFIED"`. The authorization's `transaction_digest`
+  equals the recomputed `signed_bytes_digest`.
+- **Packaging.** `tracesettle/near/agent_demo.py` is inside the package, so the
+  endpoint answers from a package-only copy (the production image). The
+  package-only route test now includes `/api/guard/near/agent-demo`.
+- **Tests:** 1448 → **1458 passed**, 27 skipped. New `tests/test_product_identity.py`
+  (9: landing-page identity, honesty, accessibility, the demo endpoint over HTTP,
+  auth gating, binding, determinism, dispatch) and
+  `test_guard_ui.py::test_console_near_tab_has_an_end_to_end_demo_panel`.
+  pyflakes clean; compileall OK; the three offline demos remain byte-identical
+  (`demonstrate.py --offline` md5 `4864f13c…`).

@@ -537,6 +537,17 @@ reaches `SETTLED` / `VERIFIED`. The offline transport is the only substitution
 (a network boundary); the boundary, guard, signer, pipeline and verifier are the
 real code. Labelled **SIMULATED**.
 
+The same run is available over HTTP and in the console, from the one
+implementation (`tracesettle/near/agent_demo.py`):
+
+```sh
+curl -sS http://127.0.0.1:8080/api/guard/near/agent-demo | python3 -m json.tool
+```
+→ `{"simulated": true, "reproduced": true, ...}` with
+`malicious.decision == "BLOCK"`, `malicious.signer_calls == 0`, and
+`legitimate.settlement_state == "VERIFIED"`. The console shows it as
+**NEAR Agent Security → End-to-end demonstration**.
+
 **Live testnet run (`--live`).** With a funded `*.testnet` key the same harness
 signs and broadcasts a **real** testnet transaction and reads the on-chain
 record back to verify it. It refuses to point at mainnet and never writes the
@@ -778,24 +789,41 @@ a bare interpreter.
 **1. Run the tests.**
 
 ```sh
-python -m pytest tests/ --collect-only -q   # 1471 tests collected
-python -m pytest tests/ -q                  # 1444 passed, 27 skipped
+python -m pytest tests/ --collect-only -q   # 1485 tests collected
+python -m pytest tests/ -q                  # 1458 passed, 27 skipped
 ```
-→ `1444 passed, 27 skipped`. The skips are the PostgreSQL integration
+→ `1458 passed, 27 skipped`. The skips are the PostgreSQL integration
 tests; set `TRACESETTLE_TEST_PG_DSN` to a real server to run them
-(**1468 passed, 3 skipped** — the remaining 3 are opt-in *live-infrastructure*
+(**1482 passed, 3 skipped** — the remaining 3 are opt-in *live-infrastructure*
 tests that need real provider credentials, a testnet key, or a TDX enclave
 harness, none of which a zero-budget local run has).
 
-**2. Prove the enforcement boundary: a permitted request executes, a suspicious
-one cannot.**
+**2. See the product, then the end-to-end story, from one command.**
 
 ```sh
 python3 -m tracesettle serve --port 8080 &
 ```
 
-Then open `http://127.0.0.1:8080/console`, go to **Transaction Guard**, and run
-the three scenarios. Or drive it with `curl`:
+Open `http://127.0.0.1:8080/`. The landing page presents both capabilities — the
+**authorization firewall** and the **settlement investigator** — and links into
+the security console. To watch the flagship demonstration without a browser:
+
+```sh
+curl -sS http://127.0.0.1:8080/api/guard/near/agent-demo | python3 -m json.tool
+```
+→ an injected redirect to `attacker-receiver.testnet` is `BLOCK`ed with
+`"signer_calls": 0` and `"broadcast_occurred": false`; the approved payment is
+`ALLOW`ed with `"signer_calls": 1`, `"settlement_state": "VERIFIED"`, and the
+authorization's `transaction_digest` equal to the recomputed `signed_bytes_digest`.
+The response carries `"simulated": true`. The same run is the console's **NEAR
+Agent Security → End-to-end demonstration** panel, and
+`python3 demo/near_agent_demo.py` prints it as a narrative.
+
+**3. Prove the enforcement boundary: a permitted request executes, a suspicious
+one cannot.**
+
+With the same server running, open `http://127.0.0.1:8080/console`, go to
+**Transaction Guard**, and run the three scenarios. Or drive it with `curl`:
 
 ```sh
 # a) Legitimate: evaluated, authorized, then executed by the reference signer.
@@ -832,7 +860,7 @@ curl -sS -X POST http://127.0.0.1:8080/api/guard/sign \
 ```
 → `REFUSED MISSING`. The executor was never called.
 
-**3. See the structural guarantees hold on the running build.**
+**4. See the structural guarantees hold on the running build.**
 
 ```sh
 curl -sS http://127.0.0.1:8080/api/guard/invariants \
@@ -846,7 +874,7 @@ ones (`near_policy_must_be_in_force`, `near_native_scope_gap_is_always_stated`,
 `near_partial_settlement_is_never_verified`,
 `near_policy_selection_is_not_client_controlled`).
 
-**4. Investigate a real, known-good swap from the command line.**
+**5. Investigate a real, known-good swap from the command line.**
 
 ```sh
 python3 -m tracesettle investigate 0xB741c00f6D63b6dEd0cCADA1a82bCBADc38A572B
@@ -855,7 +883,7 @@ python3 -m tracesettle investigate 0xB741c00f6D63b6dEd0cCADA1a82bCBADc38A572B
 deposit, bridge deposit credit, NEAR settlement, and destination delivery each
 marked `CONFIRMED` and each linking to its real explorer page.
 
-**5. See conservative handling of an unknown address.**
+**6. See conservative handling of an unknown address.**
 
 ```sh
 python3 -m tracesettle investigate 0x000000000000000000000000000000000000dEaD
@@ -863,7 +891,7 @@ python3 -m tracesettle investigate 0x000000000000000000000000000000000000dEaD
 → outcome `NOT_FOUND`, and the report says plainly that not found is not proof
 the swap failed.
 
-**6. See that a reported-only settlement is not called verified.**
+**7. See that a reported-only settlement is not called verified.**
 
 ```sh
 python3 -m tracesettle investigate 7ypUiXpjHmDoFFzo8nRWvY4BMfcKR5YkF5Cez28N94dG --json
@@ -871,7 +899,7 @@ python3 -m tracesettle investigate 7ypUiXpjHmDoFFzo8nRWvY4BMfcKR5YkF5Cez28N94dG 
 → outcome `SETTLED_REPORTED_ONLY`: the intent hash path can read a service
 statement but cannot reach the whole path, and the report says so.
 
-**7. See how a real reported Bitcoin refund is handled.**
+**8. See how a real reported Bitcoin refund is handled.**
 
 ```sh
 python3 -m tracesettle investigate bc1qjrkwt3v42j4am6csmkaelmpwd9shufl4laxkxm
@@ -899,7 +927,7 @@ refund likewise stays `UNAVAILABLE` (a source problem, not a failed refund). The
 demo states the outcome it actually observed in that run rather than a fixed
 verdict.
 
-**8. Run the web interface.**
+**9. Run the web interface.**
 
 ```sh
 python3 -m tracesettle serve --host 127.0.0.1 --port 8000
@@ -920,7 +948,7 @@ TRACESETTLE_API_KEY=… TRACESETTLE_GUARD_AUTH_KEY=$(python3 -c "import secrets;
 now **refuses to start** (see **Fail-closed startup** below). See **Interface
 hardening** below for the concurrency, rate-limit, and cache settings.
 
-**9. Or run all three settlement cases at once.**
+**10. Or run all three settlement cases at once.**
 
 ```sh
 python3 demo/demonstrate.py
@@ -1297,10 +1325,11 @@ identical decisions.
 | `Dockerfile.vercel` / `vercel.json` | Vercel Hobby deployment via the Container Runtime (see `deploy/production/VERCEL_DEPLOYMENT.md`). |
 | `.github/workflows/ci.yml` | CI: tests, static analysis, Docker build + runtime, demo determinism. |
 | `demo/demonstrate.py` | Read-only walkthrough (live, or `--offline` replay of captures). |
-| `demo/near_agent_demo.py` | End-to-end agent lifecycle (intercept → block/authorize → settle → verify), offline or `--live` on testnet. |
+| `demo/near_agent_demo.py` | End-to-end agent lifecycle (intercept → block/authorize → settle → verify), offline or `--live` on testnet. Shares its implementation with `tracesettle/near/agent_demo.py`. |
+| `tracesettle/near/agent_demo.py` | The one implementation of the offline end-to-end demonstration (policy, harness, `run_agent_payment_demo`); used by the CLI, the `/api/guard/near/agent-demo` endpoint, and the console panel. |
 | `demo/replay_opener.py` | Offline transport that replays `evidence/raw/` through the real code. |
 | `tracesettle/static/near-connect.js` | Vendored `@hot-labs/near-connect` (MIT) wallet connector, served same-origin at `/assets/near-connect.js`. |
-| `tests/` | 1471 tests (27 PostgreSQL tests skip without `TRACESETTLE_TEST_PG_DSN`; 3 further tests are opt-in live tests that skip without a live testnet key, live Agent API credentials, or `TRACESETTLE_ENCLAVE_HARNESS=1`). `evidence/raw/` fixtures are real captures; `tests/fixtures/synthetic/` are clearly labelled synthetic. |
+| `tests/` | 1485 tests (27 PostgreSQL tests skip without `TRACESETTLE_TEST_PG_DSN`; 3 further tests are opt-in live tests that skip without a live testnet key, live Agent API credentials, or `TRACESETTLE_ENCLAVE_HARNESS=1`). `evidence/raw/` fixtures are real captures; `tests/fixtures/synthetic/` are clearly labelled synthetic. |
 | `PHASE1_FEASIBILITY.md` | Phase 1 feasibility and API verification. |
 | `submission/` | Hackathon artifacts: API payload shape, technical summary, demo post draft, publication checklist. |
 | `docs/official/` | NEAR documentation captured during Phase 1. |
@@ -1618,7 +1647,7 @@ immutable commit SHA (not a moving tag), and cancels superseded runs.
 ## Tests
 
 ```sh
-python3 -m pytest tests/ -q          # 1444 passed, 27 skipped (1468 passed, 3 skipped with PostgreSQL)
+python3 -m pytest tests/ -q          # 1458 passed, 27 skipped (1482 passed, 3 skipped with PostgreSQL)
 python3 -m pytest tests/test_guard_authorization.py -q
 python3 -m pytest tests/test_guard_invariants.py -q
 python3 -m pytest tests/test_guard_end_to_end.py -q
@@ -1631,6 +1660,7 @@ python3 -m pytest tests/test_near_agent_wrapper.py tests/test_near_attacks.py -q
 python3 -m pytest tests/test_near_api.py tests/test_near_invariants.py -q
 python3 -m pytest tests/test_near_agent_harness.py -q   # full lifecycle through the real boundary
 python3 -m pytest tests/test_near_acceptance.py -q   # product-level wiring
+python3 -m pytest tests/test_product_identity.py -q  # landing page + demo endpoint
 ```
 
 Test coverage includes successful settlement, a failed intent with a verified
