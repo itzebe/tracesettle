@@ -110,6 +110,14 @@ jobs:
           assert legit["decision"] == "ALLOW", legit["decision"]
           assert legit["signer_calls"] == 1
           assert legit["settlement_state"] == "VERIFIED", legit["settlement_state"]
+          # The authorization must be bound to the exact bytes that are signed:
+          # the bound transaction_digest equals the recomputed signed-bytes digest.
+          binding = legit["authorization_binding"]
+          assert binding["destination"] == legit["proposed_receiver"], binding
+          assert binding["transaction_digest"] == legit["signed_bytes_digest"], (
+              "the authorization is not bound to the exact signed bytes"
+          )
+          assert legit["signed_bytes_digest"].startswith("sha256:")
           print("agent lifecycle demonstration reproduced: block-before-sign + verified settlement")
           PY
 

@@ -173,6 +173,14 @@ def _print_result(result, *, mode: str) -> None:
     _say(f"  broadcast       : {result.broadcast_occurred}")
     if result.tx_hash:
         _say(f"  tx hash         : {result.tx_hash}")
+    if result.signed_bytes_digest:
+        bound = result.authorization_binding.get("transaction_digest", "")
+        tied = " (== authorization binding)" if bound and bound == result.signed_bytes_digest else ""
+        _say(f"  signed bytes    : {result.signed_bytes_digest}{tied}")
+    if result.authorization_binding:
+        dest = result.authorization_binding.get("destination", "")
+        amt = result.authorization_binding.get("amount", "")
+        _say(f"  authorized for  : {amt} -> {dest}")
     if result.submission_state:
         _say(f"  submission      : {result.submission_state}")
     if result.settlement_state:

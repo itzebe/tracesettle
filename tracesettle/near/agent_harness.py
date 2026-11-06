@@ -32,7 +32,7 @@ approval is never read: the guard evaluates the *proposal's parameters*.
 from __future__ import annotations
 
 import dataclasses
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from ..model import SourceStatus
@@ -153,6 +153,14 @@ class HarnessResult:
     submission_state: str
     settlement_state: str
     verification: dict[str, Any] | None
+    #: The canonical parameter set the authorization is bound to (the exact
+    #: fields the guard evaluated and the authorization token commits to),
+    #: including ``transaction_digest``. Empty when nothing was authorized.
+    authorization_binding: dict[str, str] = field(default_factory=dict)
+    #: ``sha256(unsigned_bytes)`` of the final transaction - the same preimage
+    #: NEAR hashes to the transaction hash, recomputed here so the reader can see
+    #: it equals the bound ``transaction_digest``. Empty when nothing was built.
+    signed_bytes_digest: str = ""
     notes: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
@@ -163,6 +171,26 @@ def _proposal_reasons(prepared: PreparedOperation) -> tuple[str, ...]:
     """The human-readable reasons behind a decision, from the real findings."""
     findings = prepared.decision.findings or ()
     return tuple(f"{f.code}: {f.detail}" for f in findings)
+
+
+def _authorization_evidence(prepared: PreparedOperation) -> dict[str, Any]:
+    """The tie between the authorization and the exact bytes that will be signed.
+
+    ``authorization_binding`` is the canonical parameter set the authorization
+    covers (it includes ``transaction_digest``); ``signed_bytes_digest`` is
+    recomputed from the *final* transaction. Equality between the two proves the
+    authorization covers exactly these bytes. The digest is
+    ``sha256(unsigned_bytes)`` - the same preimage NEAR hashes to the transaction
+    hash - so base58-decoding it yields the on-chain ``tx_hash``.
+
+    The opaque, randomly generated ``authorization_id`` is deliberately not
+    included: it is not externally verifiable and would make the offline output
+    non-deterministic. The binding and the digest are the cryptographic tie.
+    """
+    return {
+        "authorization_binding": dict(prepared.binding),
+        "signed_bytes_digest": prepared.transaction.payload_fingerprint(),
+    }
 
 
 class LocalAgentHarness:
@@ -262,6 +290,8 @@ class LocalAgentHarness:
                 submission_state="",
                 settlement_state="",
                 verification=None,
+                authorization_binding=dict(prepared.binding),
+                signed_bytes_digest=prepared.transaction.payload_fingerprint(),
                 notes=("no authorization was issued, so the signer was never invoked",),
             )
 
@@ -292,6 +322,8 @@ class LocalAgentHarness:
                 submission_state="",
                 settlement_state="",
                 verification=None,
+                authorization_binding=dict(prepared.binding),
+                signed_bytes_digest=prepared.transaction.payload_fingerprint(),
                 notes=(f"the signer refused: {exc}",),
             )
 
@@ -312,6 +344,8 @@ class LocalAgentHarness:
             submission_state=result.state,
             settlement_state=result.settlement_state,
             verification=result.verification.to_dict() if result.verification else None,
+            authorization_binding=dict(prepared.binding),
+            signed_bytes_digest=prepared.transaction.payload_fingerprint(),
             notes=(),
         )
 

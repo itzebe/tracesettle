@@ -518,6 +518,16 @@ convincing instruction cannot change the decision. "The signer was never
 reached" is proved as "the counting signer was called zero times" and "the
 transport recorded zero broadcasts", never as prose.
 
+Each scenario's output carries the **authorization binding** — the canonical
+parameter set the authorization covers (`destination`, `amount`, `asset`,
+`chain`, `operation`, `service_id`) and the `transaction_digest` it is bound to —
+together with `signed_bytes_digest`, recomputed from the final transaction. The
+two are equal only because the authorization covers the *exact bytes* that are
+signed. The digest is `sha256(unsigned_bytes)`, which is the preimage NEAR hashes
+to the transaction hash, so base58-encoding it yields the on-chain `tx_hash`: the
+authorization is cryptographically tied to the transaction the chain records, not
+to a summary of it.
+
 ```sh
 python3 demo/near_agent_demo.py            # offline, deterministic, no key
 python3 demo/near_agent_demo.py --json
@@ -539,10 +549,10 @@ TRACESETTLE_DEMO_RECEIVER=<recipient.testnet> \
 python3 demo/near_agent_demo.py --live
 ```
 → **Testnet verified:** the malicious scenario still `BLOCK`s (signer calls
-`0`); the legitimate scenario settles and verifies against the live chain. A
-real run (2026-11-06) moved 0.1 NEAR from `tsdemo916196f7.testnet` to
-`tsrecv2f0f12b8.testnet` (tx
-`HRKsn8s1L6h97aGHBWdkBmg7S8USzMN5aQePgxMc5o3n`), `FINAL` with status
+`0`); the legitimate scenario settles and verifies against the live chain. Real
+runs moved 0.1 NEAR from `tsdemo916196f7.testnet` to `tsrecv2f0f12b8.testnet`
+(tx `HRKsn8s1L6h97aGHBWdkBmg7S8USzMN5aQePgxMc5o3n`, and a later run
+`9CuS2F6PMLXfkbbsWLAv6Fii3VQukWJiQhb4pMsh11mN`), each `FINAL` with status
 `SuccessValue`, re-read from two independent public testnet RPCs
 (`rpc.testnet.near.org`, `rpc.testnet.fastnear.com`). The live run is not
 reproduced in CI (it needs a funded key); the offline run is, and is
@@ -766,12 +776,12 @@ a bare interpreter.
 **1. Run the tests.**
 
 ```sh
-python -m pytest tests/ --collect-only -q   # 1468 tests collected
-python -m pytest tests/ -q                  # 1441 passed, 27 skipped
+python -m pytest tests/ --collect-only -q   # 1471 tests collected
+python -m pytest tests/ -q                  # 1444 passed, 27 skipped
 ```
-→ `1441 passed, 27 skipped`. The skips are the PostgreSQL integration
+→ `1444 passed, 27 skipped`. The skips are the PostgreSQL integration
 tests; set `TRACESETTLE_TEST_PG_DSN` to a real server to run them
-(**1465 passed, 3 skipped** — the remaining 3 are opt-in *live-infrastructure*
+(**1468 passed, 3 skipped** — the remaining 3 are opt-in *live-infrastructure*
 tests that need real provider credentials, a testnet key, or a TDX enclave
 harness, none of which a zero-budget local run has).
 
@@ -1288,7 +1298,7 @@ identical decisions.
 | `demo/near_agent_demo.py` | End-to-end agent lifecycle (intercept → block/authorize → settle → verify), offline or `--live` on testnet. |
 | `demo/replay_opener.py` | Offline transport that replays `evidence/raw/` through the real code. |
 | `tracesettle/static/near-connect.js` | Vendored `@hot-labs/near-connect` (MIT) wallet connector, served same-origin at `/assets/near-connect.js`. |
-| `tests/` | 1468 tests (27 PostgreSQL tests skip without `TRACESETTLE_TEST_PG_DSN`; 3 further tests are opt-in live tests that skip without a live testnet key, live Agent API credentials, or `TRACESETTLE_ENCLAVE_HARNESS=1`). `evidence/raw/` fixtures are real captures; `tests/fixtures/synthetic/` are clearly labelled synthetic. |
+| `tests/` | 1471 tests (27 PostgreSQL tests skip without `TRACESETTLE_TEST_PG_DSN`; 3 further tests are opt-in live tests that skip without a live testnet key, live Agent API credentials, or `TRACESETTLE_ENCLAVE_HARNESS=1`). `evidence/raw/` fixtures are real captures; `tests/fixtures/synthetic/` are clearly labelled synthetic. |
 | `PHASE1_FEASIBILITY.md` | Phase 1 feasibility and API verification. |
 | `submission/` | Hackathon artifacts: API payload shape, technical summary, demo post draft, publication checklist. |
 | `docs/official/` | NEAR documentation captured during Phase 1. |
@@ -1606,7 +1616,7 @@ immutable commit SHA (not a moving tag), and cancels superseded runs.
 ## Tests
 
 ```sh
-python3 -m pytest tests/ -q          # 1441 passed, 27 skipped (1465 passed, 3 skipped with PostgreSQL)
+python3 -m pytest tests/ -q          # 1444 passed, 27 skipped (1468 passed, 3 skipped with PostgreSQL)
 python3 -m pytest tests/test_guard_authorization.py -q
 python3 -m pytest tests/test_guard_invariants.py -q
 python3 -m pytest tests/test_guard_end_to_end.py -q

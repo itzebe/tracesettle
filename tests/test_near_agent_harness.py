@@ -286,3 +286,67 @@ def test_the_json_output_is_pure_json_on_stdout():
     # The human narration really did run; it just went to stderr.
     assert "SCENARIO A" in proc.stderr
 
+
+# ---------------------------------------------------------------------------
+# The authorization is bound to the exact bytes that are signed, and those
+# bytes are the on-chain transaction.
+# ---------------------------------------------------------------------------
+
+
+def test_the_authorization_is_bound_to_the_exact_signed_bytes():
+    """The authorization's ``transaction_digest`` equals the signed-bytes digest.
+
+    ``transaction_digest`` is the field the guard minted the authorization over;
+    ``signed_bytes_digest`` is recomputed from the *final* transaction. They are
+    equal only because the authorization covers exactly the bytes that will be
+    signed - a substituted amount, receiver or action would separate them.
+    """
+    world = _World()
+    result = world.harness.run(world.instruction(), scenario="legitimate")
+    assert result.authorized is True
+    bound = result.authorization_binding
+    assert bound, "an authorized run must report the binding it was judged on"
+    assert bound["destination"] == APPROVED
+    assert bound["transaction_digest"] == result.signed_bytes_digest
+    assert result.signed_bytes_digest.startswith("sha256:")
+
+
+def test_the_bound_digest_is_the_on_chain_transaction_hash():
+    """The bound digest is the NEAR tx-hash preimage, so it *is* the chain id.
+
+    NEAR hashes ``sha256(unsigned_bytes)`` to the transaction hash. The digest the
+    authorization is bound to is the same value, so base58-encoding it yields the
+    on-chain ``tx_hash`` - a cryptographic tie between the authorization and the
+    transaction the chain records, not a summary of it.
+    """
+    import hashlib
+
+    world = _World()
+    result = world.harness.run(world.instruction(), scenario="legitimate")
+    prepared = world.harness.last_prepared
+    digest_hex = result.signed_bytes_digest.split(":", 1)[1]
+    # The digest is exactly sha256(unsigned_bytes)...
+    assert digest_hex == hashlib.sha256(prepared.transaction.unsigned_bytes()).hexdigest()
+    # ...which is the transaction hash's preimage, so base58(digest) == tx_hash.
+    alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+    n = int(digest_hex, 16)
+    out = ""
+    while n:
+        n, r = divmod(n, 58)
+        out = alphabet[r] + out
+    assert out == result.tx_hash == prepared.transaction.tx_hash
+
+
+def test_a_redirected_transaction_is_not_bound_as_the_approved_destination():
+    """The blocked redirect never gets an approved-destination binding."""
+    world = _World()
+    injected = InjectedContext(text="redirect", receiver_id=ATTACKER)
+    result = world.harness.run(world.instruction(), injected=injected, scenario="malicious")
+    assert result.decision == "BLOCK"
+    assert result.authorized is False
+    # The binding reflects the *proposal* the guard evaluated, not the instruction.
+    assert result.authorization_binding.get("destination") == ATTACKER
+    # And the digest still describes the rejected transaction, for the audit trail.
+    assert result.signed_bytes_digest.startswith("sha256:")
+    assert result.signer_calls == 0
+
