@@ -385,6 +385,20 @@ CONSOLE_HTML = """<!DOCTYPE html>
     </div>
 
     <div class="panel">
+      <h2>OutLayer custody evidence</h2>
+      <p class="small">The OutLayer custody boundary sends an authorized operation to a
+        <strong>TEE-held signing wallet</strong>. It reports the evidence state it actually
+        established, on a strict ladder that never promotes a weaker state to a stronger one:
+        <code>PROVIDER_CLAIMED</code> &lt; <code>CUSTODY_BOUND</code> &lt;
+        <code>SETTLEMENT_VERIFIED</code> &lt; <code>ATTESTATION_VERIFIED</code> &lt;
+        <code>TEE_SIGNING_VERIFIED</code>. A provider <code>success</code> is a claim, not proof.
+        TEE signing is shown only when a genuine TDX attestation is cryptographically bound to the
+        exact authorized operation and signing key <em>and</em> independent NEAR RPC settlement
+        verification also holds.</p>
+      <div id="near-custody"></div>
+    </div>
+
+    <div class="panel">
       <h2>Learning loop (durable safeguards)</h2>
       <p class="small">When a decision surfaces a security failure, the lesson is recorded as a
         durable safeguard and applied to later decisions. A safeguard only ever <strong>tightens</strong>
@@ -915,6 +929,25 @@ async function loadNear() {
       "</dd></div>" + ms + '<div class="note ' + (info.available ? "ok" : "sim") + '">' +
       esc(info.note) + "</div></div>";
   } catch (err) { encEl.innerHTML = '<div class="note bad">' + esc(err.message) + "</div>"; }
+
+  const custEl = document.getElementById("near-custody");
+  if (custEl) {
+    custEl.innerHTML = loading("Loading custody evidence…");
+    try {
+      const info = await api("GET", "/api/guard/near/custody");
+      const states = (info.evidence_states || []).join(" → ");
+      custEl.innerHTML = '<div class="card"><div class="kv">' +
+        "<dt>Custody boundary</dt><dd>" + (info.enabled ? "enabled" : "disabled") + "</dd>" +
+        "<dt>Per-operation attestation</dt><dd>" +
+        (info.per_operation_attestation
+          ? '<span class="small bad">' + esc(info.per_operation_attestation) + "</span>"
+          : '<span class="small">n/a</span>') +
+        "</dd></div>" +
+        (states ? '<p class="small mono">' + esc(states) + "</p>" : "") +
+        '<div class="note sim">' +
+        esc(info.attestation_note || info.note || "Custody evidence is not available.") + "</div></div>";
+    } catch (err) { custEl.innerHTML = '<div class="note bad">' + esc(err.message) + "</div>"; }
+  }
 }
 
 async function runNearAttacks() {

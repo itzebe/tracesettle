@@ -388,6 +388,161 @@ def test_approval_invariant_notices_an_unbound_approval():
 
 
 
+def test_custody_authorization_invariant_notices_a_bypassed_gate():
+    """Mutation check: if ``execute`` ran without checking authorization, a
+    non-ALLOW custody operation would reach the provider and the checker must fail."""
+    from tracesettle.guard import invariants as inv
+    from tracesettle.near import outlayer_execution as ox
+    from tracesettle.near.verify import SettlementState, SettlementVerification
+
+    original = ox.OutLayerCustodyBoundary.execute
+
+    def permissive(self, prepared):  # noqa: ANN001
+        # The mutation: send to the provider regardless of the decision.
+        outcome = self.provider.transfer(to=prepared.destination, amount_yocto=prepared.amount_yocto)
+        return ox.CustodyExecution(
+            provider=outcome,
+            tx_hash=outcome.tx_hash,
+            verification=SettlementVerification(state=SettlementState.INSUFFICIENT_EVIDENCE),
+        )
+
+    ox.OutLayerCustodyBoundary.execute = permissive
+    try:
+        result = inv.INVARIANTS["custody_execution_requires_an_authorization"]()
+        assert result.holds is False
+    finally:
+        ox.OutLayerCustodyBoundary.execute = original
+
+
+def test_custody_verification_invariant_notices_a_provider_trusting_verifier():
+    """Mutation check: if a provider success were taken as verified without chain
+    evidence, the checker must fail."""
+    from tracesettle.guard import invariants as inv
+    from tracesettle.near import outlayer_execution as ox
+    from tracesettle.near.verify import SettlementState, SettlementVerification
+
+    original = ox.verify_custody_transaction
+
+    def trusting(**kwargs):  # noqa: ANN003
+        # The mutation: trust the provider claim, never read the chain.
+        return SettlementVerification(state=SettlementState.VERIFIED, source_status="OK")
+
+    ox.verify_custody_transaction = trusting
+    try:
+        result = inv.INVARIANTS["custody_provider_success_is_never_verified_without_chain_evidence"]()
+        assert result.holds is False
+    finally:
+        ox.verify_custody_transaction = original
+
+
+def test_custody_binding_invariant_notices_an_unbound_authorization():
+    """Mutation check: if the binding were not re-validated before the send, a
+    substituted operation would reach the provider and the checker must fail."""
+    from tracesettle.guard import invariants as inv
+    from tracesettle.near import outlayer_execution as ox
+
+    original = ox.OutLayerCustodyBoundary.verify_binding
+
+    def unbound(self, prepared, *, consume=False):  # noqa: ANN001
+        # The mutation: never recompute or compare the digest.
+        return None
+
+    ox.OutLayerCustodyBoundary.verify_binding = unbound
+    try:
+        result = inv.INVARIANTS["custody_authorization_is_bound_to_the_sent_operation"]()
+        assert result.holds is False
+    finally:
+        ox.OutLayerCustodyBoundary.verify_binding = original
+
+
+def test_custody_tee_signing_invariant_notices_a_trusting_evidence_combiner():
+    """Mutation check: if the evidence ladder promoted to TEE_SIGNING_VERIFIED
+    without a bound attestation, the checker must fail.
+
+    The mutation makes ``combine_evidence`` claim TEE signing whenever settlement
+    verified - the exact overstatement the invariant exists to catch.
+    """
+    from tracesettle.guard import invariants as inv
+    from tracesettle.near import custody_attestation as catt
+
+    original = catt.combine_evidence
+
+    def trusting(**kwargs):  # noqa: ANN003
+        # The mutation: settlement alone is enough for a TEE claim.
+        if kwargs.get("settlement_verified"):
+            return catt.CustodyEvidenceState.TEE_SIGNING_VERIFIED
+        return original(**kwargs)
+
+    catt.combine_evidence = trusting
+    try:
+        result = inv.INVARIANTS["custody_tee_signing_requires_bound_attestation_and_settlement"]()
+        assert result.holds is False
+    finally:
+        catt.combine_evidence = original
+
+
+def test_custody_tee_signing_invariant_notices_an_accepting_attestation_verifier():
+    """Mutation check: if an unbound attestation were accepted, the checker must fail."""
+    from tracesettle.guard import invariants as inv
+    from tracesettle.near import custody_attestation as catt
+
+    original = catt.verify_custody_attestation
+
+    def accepting(*args, **kwargs):  # noqa: ANN002, ANN003
+        # The mutation: accept any attestation as fully bound and verified.
+        return catt.CustodyAttestationEvidence(
+            state=catt.CustodyEvidenceState.ATTESTATION_VERIFIED,
+            detail="",
+            quote_present=True,
+            quote_verified=True,
+            operation_bound=True,
+            signing_key_bound=True,
+        )
+
+    catt.verify_custody_attestation = accepting
+    try:
+        result = inv.INVARIANTS["custody_tee_signing_requires_bound_attestation_and_settlement"]()
+        assert result.holds is False
+    finally:
+        catt.verify_custody_attestation = original
+
+
+def test_service_facing_route_invariant_notices_an_ungated_route():
+    """Mutation check: dropping a route from the gate set must fail the invariant.
+
+    The mutation removes ``/api/guard/near/custody/prepare`` from
+    ``SERVICE_FACING_POST_PATHS`` while the dispatch still consults the
+    authenticated identity - exactly the omission that let a caller adopt another
+    service's identity. The invariant derives the consulted set from the API
+    source, so it must notice the route is no longer gated.
+    """
+    from tracesettle.guard import api as gap
+
+    original = gap.SERVICE_FACING_POST_PATHS
+    # The mutation: a service-facing route is no longer gated.
+    gap.SERVICE_FACING_POST_PATHS = frozenset(
+        p for p in original if p != "/api/guard/near/custody/prepare"
+    )
+    try:
+        result = INVARIANTS["service_facing_routes_require_a_credential"]()
+        assert result.holds is False
+    finally:
+        gap.SERVICE_FACING_POST_PATHS = original
+
+
+def test_service_facing_route_invariant_notices_a_removed_transport_gate():
+    """Mutation check: if the transport stopped authenticating these routes, the
+    socket probe must fail even when the gate set is unchanged."""
+    from tracesettle import ui as ui_mod
+
+    original = ui_mod._SERVICE_OPERATION_PATHS
+    # The mutation: the transport no longer treats any route as service-facing.
+    ui_mod._SERVICE_OPERATION_PATHS = frozenset()
+    try:
+        result = INVARIANTS["service_facing_routes_require_a_credential"]()
+        assert result.holds is False
+    finally:
+        ui_mod._SERVICE_OPERATION_PATHS = original
 def test_public_demo_invariant_notices_a_write_route_in_the_allowlist():
     """If a state-changing route were added to the keyless allowlist, it must fail."""
     from tracesettle.guard import invariants as inv
@@ -400,6 +555,28 @@ def test_public_demo_invariant_notices_a_write_route_in_the_allowlist():
         result = inv.INVARIANTS["public_demo_never_exposes_a_state_changing_route"]()
         assert result.holds is False
         assert "sign" in result.detail
+    finally:
+        ui_module.PUBLIC_DEMO_ROUTES = original
+
+
+def test_public_demo_invariant_notices_a_custody_route_in_the_allowlist():
+    """A custody route on the keyless allowlist must fail the invariant.
+
+    The custody boundary sends an authorized operation to a TEE-held signing
+    wallet; exposing it without a key would be a real write surface. This guards
+    the token the invariant exists to catch.
+    """
+    from tracesettle.guard import invariants as inv
+    from tracesettle import ui as ui_module
+
+    original = ui_module.PUBLIC_DEMO_ROUTES
+    ui_module.PUBLIC_DEMO_ROUTES = frozenset(
+        set(original) | {"/api/guard/near/custody/prepare"}
+    )
+    try:
+        result = inv.INVARIANTS["public_demo_never_exposes_a_state_changing_route"]()
+        assert result.holds is False
+        assert "custody" in result.detail
     finally:
         ui_module.PUBLIC_DEMO_ROUTES = original
 

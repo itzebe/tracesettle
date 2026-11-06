@@ -278,3 +278,78 @@ def test_near_route_service_a_cannot_impersonate_service_b():
         )
     assert status == 403
     assert "identity" in body["error"]
+
+
+# --- every service-facing NEAR route must be gated by the credential --------
+#
+# A route that reads a client-declared ``service_id`` is a service-facing route:
+# a credential authenticates exactly one identity, so the route must resolve the
+# caller's identity from the credential and refuse a body that claims another.
+# This is checked for *every* such route, so a newly added route cannot silently
+# reopen the gap the ``agent-evaluate`` tests above closed for one route.
+
+#: The service-facing NEAR POST routes that carry a declared service identity and
+#: therefore must require per-service authentication when a registry is configured.
+_SERVICE_FACING_NEAR_ROUTES = (
+    "/api/guard/near/execution/prepare",
+    "/api/guard/near/wallet/prepare",
+    "/api/guard/near/custody/prepare",
+)
+
+#: A body that satisfies each route's required fields, declaring ``service_id``.
+_SERVICE_FACING_BODIES = {
+    "/api/guard/near/execution/prepare": {
+        "service_id": KEY_A,
+        "account_id": "9575a853fa0f62ed12334306cd5d1a18f6821ef9036601c99822f17d9bb13c38",
+        "public_key": "ed25519:B4RodGLvA3a8wyPQydgJwAUtm6ULkfdia17WP9hPYBGs",
+        "receiver_id": APPROVED_DESTINATION,
+        "asset": "NEAR:NATIVE",
+        "amount": "0.5",
+    },
+    "/api/guard/near/wallet/prepare": {
+        "service_id": KEY_A,
+        "account_id": "tsfund52f8405ad4.testnet",
+        "receiver_id": APPROVED_DESTINATION,
+        "asset": "NEAR:NATIVE",
+        "amount": "0.5",
+    },
+    "/api/guard/near/custody/prepare": {
+        "service_id": KEY_A,
+        "destination": APPROVED_DESTINATION,
+        "amount": "0.5",
+    },
+}
+
+
+def _post_route(base, path, payload, credential=None):
+    return _request("POST", base + path, payload, credential)
+
+
+def test_every_service_facing_near_route_requires_a_credential():
+    """Without a credential, a service-facing NEAR route is refused (401).
+
+    A route that answered instead would let an unauthenticated caller drive the
+    authorization boundary for an arbitrary declared identity.
+    """
+    registry = ServiceRegistry()
+    registry.mint(KEY_A)
+    with running_server(registry=registry) as base:
+        for path in _SERVICE_FACING_NEAR_ROUTES:
+            status, _ = _post_route(base, path, _SERVICE_FACING_BODIES[path])
+            assert status == 401, f"{path} answered {status} with no credential"
+
+
+def test_every_service_facing_near_route_refuses_a_forged_identity():
+    """With a valid credential, a body claiming another service is refused (403).
+
+    The credential authenticates exactly one identity; a route that honoured a
+    different declared ``service_id`` would let one service act as another.
+    """
+    registry = ServiceRegistry()
+    _, secret = registry.mint(KEY_A)
+    registry.mint(KEY_B)
+    with running_server(registry=registry) as base:
+        for path in _SERVICE_FACING_NEAR_ROUTES:
+            forged = dict(_SERVICE_FACING_BODIES[path], service_id=KEY_B)
+            status, _ = _post_route(base, path, forged, credential=secret)
+            assert status == 403, f"{path} honoured a forged identity with {status}"

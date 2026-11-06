@@ -32,7 +32,7 @@ from urllib.parse import parse_qs, urlparse
 
 from . import DISCLAIMER, __version__, config
 from .cache import TtlCache
-from .guard.api import GuardAPI
+from .guard.api import SERVICE_FACING_POST_PATHS, GuardAPI
 from .guard.service import GuardService
 from .guard.console import CONSOLE_HTML
 from .httpclient import HttpClient
@@ -113,15 +113,13 @@ _AUTH_REFUSED = object()
 
 #: The guard POST routes that carry a service identity and therefore require
 #: per-service authentication when a credential registry is configured.
-_SERVICE_OPERATION_PATHS = frozenset(
-    {
-        "/api/guard/evaluate",
-        "/api/guard/sign",
-        "/api/guard/near/agent-evaluate",
-        "/api/guard/near/lifecycle",
-        "/api/guard/near/lifecycle/list",
-    }
-)
+#:
+#: The set lives in :mod:`tracesettle.guard.api` as
+#: :data:`~tracesettle.guard.api.SERVICE_FACING_POST_PATHS`, next to the routing
+#: that consumes the authenticated identity, so the gate and the routes cannot
+#: drift apart. The lifecycle sub-routes (``/lifecycle/<id>``) are matched by
+#: prefix below.
+_SERVICE_OPERATION_PATHS = SERVICE_FACING_POST_PATHS
 
 #: Distinguishes "no registry argument was supplied" (load from configuration)
 #: from an explicit ``None`` (service authentication deliberately disabled).
@@ -1450,6 +1448,51 @@ def _build_near_execution(guard_service: GuardService) -> Any:
     return boundary
 
 
+def _build_custody_boundary(guard_service: GuardService) -> Any:
+    """Build the OutLayer custody boundary, or ``None`` when it is not enabled.
+
+    The custody boundary is the one path that sends an *authorized* operation to
+    a TEE-held signing wallet. It is an explicit operator decision
+    (``TRACESETTLE_OUTLAYER_ENABLED=1`` plus an API key), never a public-bind
+    default, and it requires the NEAR execution boundary to be enabled so an
+    operation is always authorized before it is signed. A missing key, an unknown
+    network, or a wallet id that does not match the key is a hard start-up
+    failure, never a silent fallback.
+
+    The provider's API key is read from configuration only. It is sent as a
+    bearer header to the provider host and is never logged, returned, or placed
+    in an error message.
+    """
+    if not config.OUTLAYER_ENABLED:
+        return None
+    from .near.networks import NetworkError, network_config
+    from .near.outlayer import OutLayerConfig, OutLayerCustodyProvider
+    from .near.outlayer_execution import OutLayerCustodyBoundary
+    from .near.rpc import NearRpc
+
+    provider_config = OutLayerConfig(
+        api_key=config.OUTLAYER_API_KEY,
+        network=config.OUTLAYER_NETWORK,
+        wallet_id=config.OUTLAYER_WALLET_ID,
+        timeout=config.OUTLAYER_TIMEOUT_SECONDS,
+    )
+    try:
+        net_config = network_config(config.NEAR_EXECUTION_NETWORK)
+    except NetworkError as exc:
+        raise RuntimeError(f"TRACESETTLE_NEAR_EXECUTION_NETWORK: {exc}") from exc
+    client = HttpClient(
+        timeout=config.REQUEST_TIMEOUT_SECONDS,
+        max_attempts=config.MAX_ATTEMPTS,
+    )
+    provider = OutLayerCustodyProvider(provider_config, client=client)
+    return OutLayerCustodyBoundary(
+        guard_service,
+        provider,
+        network=net_config.network,
+        rpc=NearRpc(net_config, client=client),
+    )
+
+
 def _build_enclave_boundary() -> Any:
     """Build the enclave signing boundary, or ``None`` when it is not configured.
 
@@ -1606,6 +1649,7 @@ class InvestigationServer(ThreadingHTTPServer):
             near_execution=_build_near_execution(self.guard_service),
             tee_provider=_build_tee_provider(),
             enclave=_build_enclave_boundary(),
+            custody=_build_custody_boundary(self.guard_service),
         )
         self.guard_limiter = guard_limiter or TokenBucketLimiter(
             config.GUARD_RATE_LIMIT_PER_MINUTE, config.GUARD_RATE_LIMIT_BURST

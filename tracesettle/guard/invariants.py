@@ -3005,6 +3005,402 @@ def _provider_policy_reads_fail_closed_and_verify_identity():
     )
 
 
+# --- OutLayer custody execution (the TEE-held signing wallet) -------------
+
+
+class _FakeCustodyProvider:
+    """A custody provider whose ``transfer`` records whether it was ever called.
+
+    It returns a provider success so a caller that skipped the guard would look
+    successful; the checker asserts the provider was never reached, so a
+    regression that removed the authorization gate is caught by execution.
+    """
+
+    def __init__(self, *, account: str, public_key: str, tx_hash: str) -> None:
+        from ..near.outlayer import OutLayerConfig
+
+        self.config = OutLayerConfig(api_key="wk_invariant_only_0000000000000000000000000000000000", network="testnet")
+        self.transfers: list[tuple[str, int]] = []
+        self._account = account
+        self._public_key = public_key
+        self._tx_hash = tx_hash
+
+    def address(self, chain: str = "near"):  # noqa: ANN001
+        from ..near.outlayer import WalletIdentity
+
+        return WalletIdentity(wallet_id="w", network="testnet", account_id=self._account, public_key=self._public_key)
+
+    def transfer(self, *, to, amount_yocto, idempotency_key=None):  # noqa: ANN001
+        from ..near.outlayer import ProviderOutcome, ProviderState
+
+        self.transfers.append((to, amount_yocto))
+        return ProviderOutcome(
+            state=ProviderState.SUCCESS, request_id="r1", tx_hash=self._tx_hash, raw_status="success"
+        )
+
+    def request_status(self, request_id):  # noqa: ANN001
+        raise AssertionError("not expected")
+
+
+class _FakeRpc:
+    """A NEAR RPC that returns a record which verifies the wallet's key binding."""
+
+    def __init__(self, *, verified: bool) -> None:
+        self.verified = verified
+
+    def tx_status(self, tx_hash, sender_account_id):  # noqa: ANN001
+        from ..model import SourceStatus
+        from ..near.rpc import RpcResult
+
+        if not self.verified:
+            return RpcResult(SourceStatus.TIMEOUT, None)
+        return RpcResult(SourceStatus.OK, _custody_rpc_record())
+
+
+#: A real NEAR implicit account and the public key whose bytes it is.
+_CUSTODY_ACCOUNT = "9575a853fa0f62ed12334306cd5d1a18f6821ef9036601c99822f17d9bb13c38"
+_CUSTODY_PUBLIC_KEY = "ed25519:B4RodGLvA3a8wyPQydgJwAUtm6ULkfdia17WP9hPYBGs"
+_CUSTODY_TX = "76mYB4gsgj3ogYCgsqzd5P4ESsLRw2rTecasQZ6kcnmh"
+_CUSTODY_DEST = "tsfund52f8405ad4.testnet"
+
+
+def _custody_rpc_record(*, receiver: str = _CUSTODY_DEST, deposit: str = "500000000000000000000000"):
+    return {
+        "final_execution_status": "FINAL",
+        "status": {"SuccessValue": ""},
+        "transaction": {
+            "hash": _CUSTODY_TX,
+            "signer_id": _CUSTODY_ACCOUNT,
+            "receiver_id": receiver,
+            "public_key": _CUSTODY_PUBLIC_KEY,
+            "actions": [{"Transfer": {"deposit": deposit}}],
+        },
+    }
+
+
+def _custody_boundary(*, approved: str = _CUSTODY_DEST, verified: bool = True):
+    from ..near.networks import network_config
+    from ..near.outlayer_execution import OutLayerCustodyBoundary
+
+    authority = AuthorizationAuthority(
+        key=_INVARIANT_KEY, key_id="invariant-custody", ephemeral=False, replay_store=InMemoryReplayStore()
+    )
+    service = GuardService(policy=_custody_policy(approved), authority=authority)
+    provider = _FakeCustodyProvider(
+        account=_CUSTODY_ACCOUNT, public_key=_CUSTODY_PUBLIC_KEY, tx_hash=_CUSTODY_TX
+    )
+    nc = network_config("testnet")
+    boundary = OutLayerCustodyBoundary(
+        service, provider, network=nc.network, rpc=_FakeRpc(verified=verified), sleep=lambda _: None
+    )
+    return boundary, provider
+
+
+def _custody_policy(approved: str):
+    """A policy for the custody invariant: native NEAR on testnet, one recipient.
+
+    Built inline (not imported from the demo policy, which is scoped to the
+    Intents scenarios) so the invariant exercises the exact operation the custody
+    boundary sends.
+    """
+    from .policy import PolicyConfig, ServicePolicy
+
+    return PolicyConfig(
+        policy_id="custody-invariant",
+        name="OutLayer custody invariant policy",
+        version="1",
+        approved_destinations=frozenset({approved}),
+        services={
+            "treasury-agent": ServicePolicy(
+                service_id="treasury-agent",
+                allowed_operations=frozenset({"WITHDRAWAL"}),
+                allowed_chains=frozenset({"near-testnet"}),
+                allowed_assets=frozenset({"NEAR:NATIVE"}),
+                max_amount_per_transaction=Decimal("1000"),
+                max_amount_per_window=Decimal("5000"),
+                approval_threshold=Decimal("10000"),
+            )
+        },
+        per_transaction_limit=Decimal("1000"),
+        window_seconds=3600,
+        max_requests_per_window=30,
+        max_blocked_per_window=5,
+        approval_threshold=Decimal("10000"),
+        min_approvals=1,
+        max_rejected_authorizations=3,
+        authorization_ttl_seconds=90,
+    )
+
+
+def _custody_execution_requires_an_authorization():
+    from ..near.outlayer_execution import CustodyError
+
+    boundary, provider = _custody_boundary(approved="someone-else.testnet")
+    prepared = boundary.prepare(
+        service_id="treasury-agent", destination=_CUSTODY_DEST, amount_human="0.5"
+    )
+    if prepared.authorized:
+        return InvariantResult(
+            "custody_execution_requires_an_authorization",
+            False,
+            "an unapproved destination was authorized",
+        )
+    try:
+        boundary.execute(prepared)
+    except CustodyError:
+        pass
+    if provider.transfers:
+        return InvariantResult(
+            "custody_execution_requires_an_authorization",
+            False,
+            "the provider was reached for an operation that was not authorized",
+        )
+    return InvariantResult(
+        "custody_execution_requires_an_authorization",
+        True,
+        "a non-ALLOW custody decision never reached the provider",
+    )
+
+
+def _custody_provider_success_is_never_verified_without_chain_evidence():
+    boundary, _ = _custody_boundary(verified=False)
+    prepared = boundary.prepare(
+        service_id="treasury-agent", destination=_CUSTODY_DEST, amount_human="0.5"
+    )
+    if not prepared.authorized:
+        return InvariantResult(
+            "custody_provider_success_is_never_verified_without_chain_evidence",
+            False,
+            "the approved operation was not authorized",
+        )
+    execution = boundary.execute(prepared)
+    if not execution.provider_claimed_success:
+        return InvariantResult(
+            "custody_provider_success_is_never_verified_without_chain_evidence",
+            False,
+            "the provider claim was not recorded",
+        )
+    if execution.settlement_verified:
+        return InvariantResult(
+            "custody_provider_success_is_never_verified_without_chain_evidence",
+            False,
+            "a provider success with no chain evidence was reported verified",
+        )
+    return InvariantResult(
+        "custody_provider_success_is_never_verified_without_chain_evidence",
+        True,
+        "a provider success with no chain evidence stays unverified",
+    )
+
+
+def _custody_authorization_is_bound_to_the_sent_operation():
+    from ..near.outlayer_execution import CustodyError
+
+    boundary, provider = _custody_boundary(verified=True)
+    prepared = boundary.prepare(
+        service_id="treasury-agent", destination=_CUSTODY_DEST, amount_human="0.5"
+    )
+    if not prepared.authorized:
+        return InvariantResult(
+            "custody_authorization_is_bound_to_the_sent_operation",
+            False,
+            "the approved operation was not authorized",
+        )
+    # Substitute the recipient after authorization: the binding must refuse.
+    prepared.destination = "attacker.testnet"
+    try:
+        boundary.execute(prepared)
+    except CustodyError:
+        if provider.transfers:
+            return InvariantResult(
+                "custody_authorization_is_bound_to_the_sent_operation",
+                False,
+                "a substituted operation reached the provider",
+            )
+        return InvariantResult(
+            "custody_authorization_is_bound_to_the_sent_operation",
+            True,
+            "a substituted operation is refused before the provider is reached",
+        )
+    return InvariantResult(
+        "custody_authorization_is_bound_to_the_sent_operation",
+        False,
+        "a substituted operation was executed",
+    )
+
+
+def _custody_tee_signing_requires_bound_attestation_and_settlement():
+    """``TEE_SIGNING_VERIFIED`` is never reached without bound hardware evidence.
+
+    Two probes: (a) a provider claim plus verified settlement but *no* attestation
+    must not be TEE_SIGNING_VERIFIED; (b) an attestation that verifies but is not
+    bound to this operation must be refused and must not lift the state.
+    """
+    from ..near.custody_attestation import (
+        CustodyEvidenceState,
+        combine_evidence,
+        verify_custody_attestation,
+    )
+
+    name = "custody_tee_signing_requires_bound_attestation_and_settlement"
+
+    # (a) settlement + provider claim, no attestation.
+    boundary, _ = _custody_boundary(verified=True)
+    prepared = boundary.prepare(
+        service_id="treasury-agent", destination=_CUSTODY_DEST, amount_human="0.5"
+    )
+    if not prepared.authorized:
+        return InvariantResult(name, False, "the approved operation was not authorized")
+    execution = boundary.execute(prepared)
+    if execution.evidence_state is CustodyEvidenceState.TEE_SIGNING_VERIFIED:
+        return InvariantResult(
+            name, False, "TEE signing was claimed with no per-operation attestation"
+        )
+    if not execution.settlement_verified:
+        return InvariantResult(name, False, "the settlement verification did not run")
+
+    # (b) a quote that does not commit to this operation must be refused.
+    evidence = verify_custody_attestation(
+        {"quote": "ab" * 2000},
+        custody_digest="0" * 64,
+        wallet_public_key=prepared.wallet_public_key,
+        wallet_account=prepared.wallet_account,
+        network=prepared.network.value,
+    )
+    if evidence.tee_attested:
+        return InvariantResult(
+            name, False, "an unbound attestation was accepted as TEE evidence"
+        )
+    state = combine_evidence(
+        provider_claimed_success=True,
+        custody_bound=True,
+        settlement_verified=True,
+        attestation=evidence,
+    )
+    if state is CustodyEvidenceState.TEE_SIGNING_VERIFIED:
+        return InvariantResult(
+            name, False, "an unbound attestation lifted the state to TEE signing"
+        )
+    return InvariantResult(
+        name,
+        True,
+        "TEE signing is never claimed without an attestation bound to the operation",
+    )
+
+
+def _service_facing_routes_require_a_credential() -> InvariantResult:
+    """Every route that consults the authenticated identity is gated by it.
+
+    A route that reads ``authenticated_service_id`` and can refuse on a mismatch
+    is a service-facing route; if the transport does not authenticate it, it
+    arrives with ``None`` and honours whatever identity the body declares, so a
+    caller can act as another service. The checker drives a real socket for each
+    such route with a configured registry and no credential: a route that answers
+    anything other than ``401`` is ungated.
+
+    The set of service-facing routes is derived from the API source, not a second
+    hand-maintained list, so a newly added route that consults the authenticated
+    identity but is omitted from the gate is caught here.
+    """
+    import ast
+    import inspect
+    import pathlib
+    import urllib.error
+    import urllib.request
+
+    from .api import SERVICE_FACING_POST_PATHS, GuardAPI
+
+    name = "service_facing_routes_require_a_credential"
+    source = pathlib.Path(inspect.getsourcefile(GuardAPI)).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+
+    # Every POST path whose dispatch consults ``authenticated_service_id``. The
+    # dispatch is a chain of ``if path == "<route>":`` blocks, so a route is
+    # service-facing when its block body references the authenticated identity.
+    # Prefix routes (``path.startswith(...)``) are matched by the transport's
+    # prefix rule and are excluded here, which is why the test must be an exact
+    # equality comparison against a string constant.
+    consulted: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.If):
+            continue
+        route = None
+        test = node.test
+        if (
+            isinstance(test, ast.Compare)
+            and len(test.ops) == 1
+            and isinstance(test.ops[0], ast.Eq)
+            and isinstance(test.left, ast.Name)
+            and test.left.id == "path"
+            and len(test.comparators) == 1
+            and isinstance(test.comparators[0], ast.Constant)
+            and isinstance(test.comparators[0].value, str)
+            and test.comparators[0].value.startswith("/api/guard/")
+        ):
+            route = test.comparators[0].value
+        if route is None:
+            continue
+        body_dump = ast.dump(ast.Module(body=node.body, type_ignores=[]))
+        if "authenticated_service_id" in body_dump:
+            consulted.add(route)
+
+    ungated = sorted(consulted - SERVICE_FACING_POST_PATHS)
+    if ungated:
+        return InvariantResult(
+            name,
+            False,
+            f"route(s) consult the authenticated identity but are not gated: {ungated}",
+        )
+
+    # Exercise each gated route over a real socket: with a registry configured
+    # and no credential it must refuse with 401 before any work is done.
+    import threading
+
+    from ..serviceauth import ServiceRegistry
+    from ..ui import InvestigationServer
+
+    registry = ServiceRegistry()
+    registry.mint("treasury-agent")
+    server = InvestigationServer(
+        ("127.0.0.1", 0),
+        timeout_seconds=2.0,
+        max_attempts=1,
+        guard_service=_fresh()[0],
+        service_registry=registry,
+    )
+    host, port = server.server_address[:2]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        for path in sorted(SERVICE_FACING_POST_PATHS):
+            request = urllib.request.Request(
+                f"http://{host}:{port}{path}",
+                data=b'{"service_id": "treasury-agent"}',
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=5) as response:
+                    status = response.status
+            except urllib.error.HTTPError as exc:
+                status = exc.code
+            if status != 401:
+                return InvariantResult(
+                    name,
+                    False,
+                    f"{path} answered {status} with a registry configured and no credential",
+                )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+    return InvariantResult(
+        name,
+        True,
+        f"all {len(SERVICE_FACING_POST_PATHS)} service-facing routes refuse a request with no credential (401)",
+    )
+
+
 def _public_demo_never_exposes_a_state_changing_route() -> InvariantResult:
     """The keyless public demonstration can never reach a write or sensitive route.
 
@@ -3015,7 +3411,8 @@ def _public_demo_never_exposes_a_state_changing_route() -> InvariantResult:
 
     * the allowlist contains no route that evaluates, signs, broadcasts, or
       mutates state (``evaluate``, ``sign``, wallet, execution, lifecycle,
-      incidents, audit, metrics, policy, safeguards, TEE, enclave, access-keys);
+      custody, incidents, audit, metrics, policy, safeguards, TEE, enclave,
+      access-keys);
     * with the flag on, every allowlisted route answers ``200`` **without** a key;
     * with the flag on, every sensitive route still answers ``401`` **without** a
       key, so enabling the demonstration cannot widen the surface.
@@ -3029,7 +3426,7 @@ def _public_demo_never_exposes_a_state_changing_route() -> InvariantResult:
     banned_tokens = (
         "evaluate", "sign", "wallet", "execution", "lifecycle",
         "incident", "audit", "metrics", "safeguards", "tee", "enclave",
-        "access-keys", "investigations",
+        "access-keys", "investigations", "custody",
     )
     for path in PUBLIC_DEMO_ROUTES:
         if not path.startswith("/api/guard/"):
@@ -3171,6 +3568,21 @@ INVARIANTS: dict[str, Callable[[], InvariantResult]] = {
         _counterparty_intelligence_only_adds_restriction
     ),
     "human_approval_cannot_override_a_block": _human_approval_cannot_override_a_block,
+    "custody_execution_requires_an_authorization": (
+        _custody_execution_requires_an_authorization
+    ),
+    "custody_provider_success_is_never_verified_without_chain_evidence": (
+        _custody_provider_success_is_never_verified_without_chain_evidence
+    ),
+    "custody_authorization_is_bound_to_the_sent_operation": (
+        _custody_authorization_is_bound_to_the_sent_operation
+    ),
+    "custody_tee_signing_requires_bound_attestation_and_settlement": (
+        _custody_tee_signing_requires_bound_attestation_and_settlement
+    ),
+    "service_facing_routes_require_a_credential": (
+        _service_facing_routes_require_a_credential
+    ),
     "public_demo_never_exposes_a_state_changing_route": (
         _public_demo_never_exposes_a_state_changing_route
     ),
@@ -3225,6 +3637,11 @@ INVARIANT_DESCRIPTIONS: dict[str, str] = {
     "provider_policy_reads_fail_closed_and_verify_identity": "A live provider policy read is refused unless it is authenticated, comes from the pinned provider host and is for the configured agent; a caller can never point the read at its own provider.",
     "counterparty_intelligence_only_adds_restriction": "Counterparty risk intelligence can only ever add restriction: a CLEAR read never softens a control, a REVIEW raises the outcome, and an unreadable signal fails safe.",
     "human_approval_cannot_override_a_block": "A human approval is honoured only for a REQUIRE_APPROVAL decision and only when bound to the exact transaction payload; it can never override a BLOCK, and an approval for a different payload is refused.",
+    "custody_execution_requires_an_authorization": "An OutLayer custody operation reaches the TEE-held signing wallet only when the guard returned ALLOW; a BLOCK, HOLD or REQUIRE_APPROVAL decision never reaches the provider.",
+    "custody_provider_success_is_never_verified_without_chain_evidence": "A custody provider's success status never yields an independently-verified settlement without decisive on-chain evidence from the NEAR RPC.",
+    "custody_authorization_is_bound_to_the_sent_operation": "A custody authorization is bound to the exact operation sent; substituting the recipient, amount, asset, network or service after authorization is refused before the provider is reached.",
+    "custody_tee_signing_requires_bound_attestation_and_settlement": "TEE signing is claimed only when a genuine TDX attestation is cryptographically bound to the exact authorized operation and signing key and independent NEAR RPC settlement verification also holds; a provider success or an unbound quote never reaches TEE_SIGNING_VERIFIED.",
+    "service_facing_routes_require_a_credential": "Every guard route that consults the authenticated service identity is gated by the credential registry: with a registry configured, a request with no credential is refused (401) before any work, so a caller cannot adopt another service's identity by editing a field.",
     "public_demo_never_exposes_a_state_changing_route": "The keyless public demonstration is an exact allowlist of read-only routes; it never evaluates, signs, broadcasts or mutates state, and enabling it does not relax the API-key requirement on any sensitive route.",
 }
 

@@ -1936,6 +1936,59 @@ feature. It is now corrected; no verification rule was touched.
   pyflakes clean; compileall OK; the three offline demos remain byte-identical
   (`demonstrate.py --offline` md5 `4864f13c…`).
 
+## Identity-binding gap on the NEAR execution flow (2026-11-03, PR #12)
+
+A genuine cross-service identity-substitution defect was found in adversarial
+review and fixed on `feat/outlayer-custody-execution`.
+
+- **The defect.** Service authentication runs in the transport
+  (`ui.py::_SERVICE_OPERATION_PATHS`). The set listed only `evaluate`, `sign`,
+  `agent-evaluate` and the two `lifecycle` routes. Every NEAR route added since
+  the OutLayer work - `execution/prepare|attest|enclave-sign|submit`,
+  `wallet/prepare|verify`, `custody/prepare|execute` - was **absent**, so when a
+  `ServiceRegistry` is configured those routes reached `GuardAPI` with
+  `authenticated_service_id=None` and honoured whatever `service_id` the body
+  declared. A caller could adopt another service's identity on the whole NEAR
+  execution flow, and the owner of a prepared operation was a body field.
+  Reproduced over a real socket: `/api/guard/near/custody/prepare` answered `404`
+  (boundary not enabled) regardless of a missing or forged credential, where a
+  gated route answers `401`.
+- **Latent in production today, real the moment the registry is enabled.**
+  Production sets `TRACESETTLE_API_KEY` and the PostgreSQL/guard keys but **no**
+  `TRACESETTLE_SERVICE_CREDENTIALS*`, so `ServiceRegistry` is absent and
+  authentication is disabled. The defect is reachable by any operator who turns
+  on the per-service credentials the product documents.
+- **The fix, one source of truth.** `SERVICE_FACING_POST_PATHS` now lives in
+  `guard/api.py`, next to the routing that consumes the identity, and
+  `ui._SERVICE_OPERATION_PATHS` is that set. All 13 service-facing POST routes
+  are gated.
+- **Two identity checks, deliberately.** `_identity_matches` (strict: a route
+  that carries a declared `service_id` must have one matching the credential)
+  stays on `execution/prepare`, `wallet/prepare`, `custody/prepare`. A new
+  `_identity_ok` covers the routes that act on a `prepare_id` and carry no
+  declared identity (`attest`, `enclave-sign`, `submit`, `wallet/verify`,
+  `custody/execute`): an absent declaration is allowed because the real gate is
+  the owner-scoped store (a foreign `prepare_id` 404s), but a *mismatched*
+  declaration is still refused. Using the strict check on a `prepare_id`-only
+  route would 403 legitimate calls whose body omits the identity.
+- **New invariant (52 total): `service_facing_routes_require_a_credential`.**
+  It parses `guard/api.py` with `ast`, collects every `if path == "<route>":`
+  block whose body references `authenticated_service_id` (exact-equality only,
+  so the `startswith` lifecycle prefix route is excluded by construction), and
+  fails if any such route is not in `SERVICE_FACING_POST_PATHS`. It then drives a
+  real socket for each gated route with a registry configured and no credential,
+  requiring `401`. Two mutation tests guard it: dropping a route from the set,
+  and clearing the transport's gate set.
+- **Tests:** 1554 → **1559 passed**, 27 skipped (1586 collected). New:
+  `test_serviceauth_http.py::test_every_service_facing_near_route_requires_a_credential`
+  and `..._refuses_a_forged_identity` (real sockets, all three `prepare` routes),
+  plus the two mutation tests in `test_guard_invariants.py`. pyflakes clean;
+  compileall OK; the offline demos stay byte-identical; all 9 attack scenarios
+  match expectation.
+- **Lesson.** A route allow-list that must be updated by hand is a coverage
+  gap waiting to happen. Derive the required set from the code that consumes it,
+  and fail closed when a route consults an identity the transport did not
+  authenticate.
 ## Mission 21 — public demonstration readiness + production verification (2026-11-06)
 
 The product was implemented and correct, but a first-time visitor to production
@@ -2004,3 +2057,60 @@ boundary visible **without widening the authenticated surface**.
 - **Not changed:** the settlement engine, every authorization/verification rule,
   and the `SimulatedExecutor` default. No mainnet transaction, no key material in
   any response, no paid infrastructure.
+
+## Mission 22 — OutLayer custody audit, provider-status fidelity, PR #12 completion (2026-11-06)
+
+Adversarial verification of the OutLayer TEE custody integration on
+`feat/outlayer-custody-execution` (PR #12), and the branch's reconciliation with
+master. One real defect found and fixed; the authorization boundary was otherwise
+found intact. No verification rule was weakened; the settlement engine is
+untouched; runtime stays standard-library only.
+
+- **Branch reconciliation.** `master` advanced by three commits (PR #13/#14,
+  head `643bd24`) while the branch was in review. master was merged *into* the
+  feature branch (merge commit `e07afe9`, parents `a79ca99` + `643bd24`) rather
+  than rebased, so both published histories are preserved. Four conflicts, all in
+  append-regions (`AGENTS.md`, `README.md`, `tracesettle/guard/invariants.py`,
+  `tests/test_guard_invariants.py`); each was resolved as a **union**, keeping
+  both sides' new invariant blocks and doc sections. `invariants.py` needed a
+  manual fix of duplicated shared closing parens. No marker remains; pyflakes
+  clean; compileall OK.
+- **Defect: the provider status map was incomplete.** The OutLayer Agent Custody
+  OpenAPI documents `RequestStatus` as
+  `[pending_deposit, processing, success, completed, partially_failed, failed,
+  refunded, pending_approval, approved, rejected, cancelled, needs_review]`, but
+  `_STATUS_MAP` in `tracesettle/near/outlayer.py` omitted `completed`, `approved`,
+  `cancelled` and `needs_review`. A transfer the provider completed and reported
+  as `status: "completed"` was therefore read as `ProviderState.UNKNOWN`: the
+  boundary under-reported a settled transfer and stopped polling it as terminal.
+  It was a **false negative, never a fail-open** — settlement is established only
+  by the independent NEAR RPC check, never by the provider status, so the security
+  property held throughout. Fixed: `completed` -> `SUCCESS` (the provider's own
+  idempotency doc groups `success`/`completed` as the terminal success states),
+  `approved` -> `PROCESSING`, `cancelled` -> `REJECTED`, `needs_review` ->
+  `UNKNOWN` (terminal but unresolved: never a success, never a plain failure).
+  Only the two documented success synonyms map to `SUCCESS`; a status outside the
+  enum still resolves to `UNKNOWN`.
+- **Tests.** 1638 passed, 7 skipped with PostgreSQL 16 (filesystem-only 1614
+  passed, 31 skipped). The live OutLayer network checks are opt-in
+  (`TRACESETTLE_TEST_OUTLAYER_LIVE=1`) and skip cleanly when unreachable, so the
+  default suite stays offline. New in `tests/test_near_outlayer.py`: the documented-status
+  coverage test (fails if the map drifts from the API), a `completed`-is-not-
+  `UNKNOWN` end-to-end test, unknown/`needs_review` never-a-success tests, and
+  post-authorization substitution tests for amount, network, service and signer
+  (each asserts the provider was never contacted). New
+  `tests/test_near_live_outlayer.py`: asserts every adapter endpoint is in the
+  provider's **live** OpenAPI document, that an unauthenticated transfer is
+  refused, and (opt-in, `TRACESETTLE_TEST_OUTLAYER_API_KEY`) that the wallet read
+  resolves through the real adapter. Every new assertion is mutation-checked:
+  removing the `completed` mapping fails four tests.
+- **Invariants:** 53 total (unchanged in count; the four custody invariants hold
+  and are mutation-tested). All 53 verified by execution (`check_all()` -> 0
+  failures) and over HTTP.
+- **Release gates:** pyflakes clean; compileall OK; offline demo byte-identical
+  (md5 `4864f13c…`); near demo byte-identical (`fc2949ef…`); 9/9 attack scenarios
+  pass; packaging 12 pass; Docker image builds, runs non-root (uid 10001), health
+  `200`, `Server: TRACESETTLE`, refuses to start with no credentials (exit 2),
+  and reports the custody boundary disabled by default.
+- **Not done, requires explicit human confirmation:** no mainnet transaction, no
+  key material configured, no paid infrastructure.
