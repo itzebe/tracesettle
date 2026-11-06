@@ -65,6 +65,20 @@ The mission lists `ALLOW`, `WARN / REQUIRE_APPROVAL`, `BLOCK`, `HOLD`,
 `UNKNOWN`. `AGENT_DECISION_OUTCOMES` is exactly that set, and `REQUIRE_APPROVAL`
 is the mission's "WARN".
 
+### The signer validates before it spends
+
+At the signing gate (`NearExecutionBoundary.accept_signature`) the signature is
+decoded and verified against the transaction hash and the signer's public key
+*before* the destructive checks run. The TEE gate and the single-use
+authorization consume happen only after the signature verifies. This ordering is
+deliberate: a malformed or wrong-transaction signature is refused without
+spending the authorization, so a rejected attempt cannot be turned into a denial
+of the legitimate signer's one valid submission. A binding mismatch is likewise
+refused before the nonce is consumed, so a tampered transaction cannot burn the
+authorization either. The property is asserted by the invariant
+`near_signature_is_verified_before_state_is_consumed`, with a mutation test that
+fails if the order is reversed.
+
 ## 3. NEAR Intents policy integration
 
 Source: `docs.agentsonintents.com/integration/agent-api/policies-and-limits`

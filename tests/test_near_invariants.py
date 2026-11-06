@@ -16,7 +16,7 @@ FIXTURE_DIR = pathlib.Path(__file__).resolve().parent.parent / "tracesettle" / "
 
 def test_near_invariants_are_registered():
     near = [name for name in inv.INVARIANTS if name.startswith("near_")]
-    assert len(near) == 14
+    assert len(near) == 15
     assert all(name in inv.INVARIANT_DESCRIPTIONS for name in near)
 
 
@@ -92,6 +92,42 @@ def test_near_settlement_invariant_notices_a_false_verification(monkeypatch):
 
     monkeypatch.setattr(settlement_mod, "settlement_assurance_from_result", permissive)
     result = inv.INVARIANTS["near_provider_success_is_never_verified_without_evidence"]()
+    assert result.holds is False
+
+
+def test_near_consume_order_invariant_notices_a_reversed_order(monkeypatch):
+    """Mutation: if the nonce were consumed before the signature is checked, fail.
+
+    Reverting the ordering (consume the single-use authorization first, verify
+    the signature second) reproduces the original defect: a malformed signature
+    burns the authorization, so the correct signature is then refused as a
+    replay. The invariant must notice.
+    """
+    from tracesettle.near import execution as exec_mod
+
+    def reversed_order(self, prepared, signature_b64):
+        import base64
+
+        from tracesettle.near import ed25519
+        from tracesettle.near.execution import ExecutionError, _public_key_raw
+
+        # The mutation: spend the authorization before validating the signature.
+        self._enforce_tee(prepared, consume_record=True)
+        self.verify_binding(prepared, consume=True)
+        try:
+            raw = base64.b64decode(signature_b64, validate=True)
+        except (ValueError, TypeError) as exc:
+            raise ExecutionError("the signature was not valid base64") from exc
+        if len(raw) != 64:
+            raise ExecutionError("an ed25519 signature must be 64 bytes")
+        if not ed25519.verify(
+            raw, prepared.transaction.tx_hash_bytes, _public_key_raw(prepared.transaction.public_key)
+        ):
+            raise ExecutionError("the signature does not verify")
+        return prepared.transaction.signed_b64(raw), raw
+
+    monkeypatch.setattr(exec_mod.NearExecutionBoundary, "accept_signature", reversed_order)
+    result = inv.INVARIANTS["near_signature_is_verified_before_state_is_consumed"]()
     assert result.holds is False
 
 

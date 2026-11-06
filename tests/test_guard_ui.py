@@ -61,14 +61,14 @@ def running_server(*, api_key: str | None = None, guard_limiter=None, guard_serv
         config.API_KEY = original
 
 
-def _request(method, url, payload=None, key=None):
+def _request(method, url, payload=None, key=None, timeout=5):
     data = None if payload is None else json.dumps(payload).encode()
     headers = {"Content-Type": "application/json"}
     if key is not None:
         headers["X-API-Key"] = key
     req = urllib.request.Request(url, data=data, method=method, headers=headers)
     try:
-        with urllib.request.urlopen(req, timeout=5) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             body = resp.read()
             try:
                 parsed = json.loads(body)
@@ -362,7 +362,11 @@ def test_metrics_endpoint_over_http():
 
 def test_invariants_endpoint_reports_every_guarantee_holds():
     with running_server() as base:
-        status, payload, _ = _request("GET", base + "/api/guard/invariants")
+        # The endpoint runs every structural invariant, including the ones that
+        # verify real TDX quotes and Intel PCS collateral - genuinely expensive
+        # cryptographic work, not a quick lookup. Give it room rather than trim
+        # the guarantees it checks.
+        status, payload, _ = _request("GET", base + "/api/guard/invariants", timeout=30)
     assert status == 200
     assert payload["all_hold"] is True
     names = {i["name"] for i in payload["invariants"]}

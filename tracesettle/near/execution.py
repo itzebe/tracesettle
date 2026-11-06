@@ -924,19 +924,22 @@ class NearExecutionBoundary:
         """Validate a wallet signature against the authorized transaction.
 
         Returns the signed transaction as base64 and the raw signature bytes.
-        Refuses if the operation was not authorized, if the authorization does not
-        cover the final transaction (consuming the single-use nonce on success),
-        or if the signature does not verify against the transaction hash and the
-        signer's public key. A signature that does not belong to *this*
-        transaction is not accepted, so a signature cannot be reused for a
-        different payload.
+        Refuses if the operation was not authorized, if the signature is malformed
+        or does not verify against the transaction hash and the signer's public
+        key, or if the authorization does not cover the final transaction.
+
+        The order is deliberate. The signature is decoded and verified *first* -
+        that is non-destructive, so a malformed or wrong-transaction signature is
+        refused without spending the authorization's single-use nonce, leaving the
+        caller free to sign the correct transaction. Only after the signature
+        verifies do the destructive checks run: the TEE gate (which moves the
+        execution record to ``SIGNING_PENDING``, the only door to signing), then
+        the authorization consume. A binding mismatch is refused *before* the
+        nonce is consumed, so a tampered transaction cannot burn the authorization
+        either.
         """
-        # The TEE gate runs before the authorization nonce is consumed, so a
-        # transaction without a verified, bound attestation cannot even spend the
-        # single-use authorization - let alone reach the network. Consuming the
-        # record moves TEE_VERIFIED -> SIGNING_PENDING, the only door to signing.
-        self._enforce_tee(prepared, consume_record=True)
-        self.verify_binding(prepared, consume=True)
+        # 1. Decode and verify the signature first. These checks touch no
+        #    single-use state, so a bad signature leaves the authorization intact.
         try:
             raw = base64.b64decode(signature_b64, validate=True)
         except (ValueError, TypeError) as exc:
@@ -949,6 +952,13 @@ class NearExecutionBoundary:
             raise ExecutionError(
                 "the signature does not verify against the authorized transaction; refusing"
             )
+
+        # 2. Destructive checks last. The TEE gate runs before the authorization
+        #    nonce is consumed, so a transaction without a verified, bound
+        #    attestation cannot even spend the single-use authorization - let
+        #    alone reach the network.
+        self._enforce_tee(prepared, consume_record=True)
+        self.verify_binding(prepared, consume=True)
         return prepared.transaction.signed_b64(raw), raw
 
     def broadcast(self, prepared: PreparedOperation, signature_b64: str) -> ExecutedOperation:

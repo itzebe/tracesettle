@@ -644,6 +644,14 @@ reports the gap explicitly.
 a call. The wrapper checks the declared key scope before a native request reaches a
 signer, and treats an unrecognised permission as unrestricted, never as safe.
 
+**The signer validates before it spends.** At the signing gate the transaction's
+signature and its authorization binding are checked *before* the single-use
+authorization nonce is consumed. A malformed or wrong-transaction signature is
+refused without burning the authorization, so a rejected attempt cannot be turned
+into a denial of the legitimate signer's one valid submission. This ordering is
+itself a structural invariant (`near_signature_is_verified_before_state_is_consumed`)
+with a mutation test that fails if the order is reversed.
+
 Nine deterministic attack scenarios run against the real controls, and every
 refusal is provable: the executor is never called unless the outcome was `ALLOW`.
 
@@ -659,7 +667,7 @@ refusal is provable: the executor is never called unless the outcome was `ALLOW`
 | H | Native tx wrongly assumed protected by an Intents-only policy | policy-scope rejection |
 | I | Provider reports success without independent evidence | `UNKNOWN` / `UNAVAILABLE` |
 
-Fourteen NEAR-specific structural guarantees join the invariant set, each
+Fifteen NEAR-specific structural guarantees join the invariant set, each
 mutation-tested: `near_policy_must_be_in_force`,
 `near_policy_selection_is_not_client_controlled`,
 `near_native_scope_gap_is_always_stated`,
@@ -672,8 +680,9 @@ mutation-tested: `near_policy_must_be_in_force`,
 `near_chain_is_derived_from_the_origin_asset`,
 `near_execution_never_signs_without_authorization`,
 `near_execution_binding_covers_the_bytes`,
+`near_signature_is_verified_before_state_is_consumed`,
 `near_execution_requires_access_key_permission`, and
-`near_submission_is_durable_and_recovery_never_resubmits` (fourteen NEAR-specific
+`near_submission_is_durable_and_recovery_never_resubmits` (fifteen NEAR-specific
 in total). Two further guarantees cover the newer controls and are mutation-tested
 too: `counterparty_intelligence_only_adds_restriction` (a counterparty read can
 never weaken a decision) and `human_approval_cannot_override_a_block` (an approval
@@ -701,11 +710,14 @@ a bare interpreter.
 **1. Run the tests.**
 
 ```sh
-python -m pytest tests/ --collect-only -q   # 1429 tests collected
-python -m pytest tests/ -q                  # 1401 passed, 28 skipped
+python -m pytest tests/ --collect-only -q   # 1457 tests collected
+python -m pytest tests/ -q                  # 1429 passed, 28 skipped
 ```
-→ `1401 passed, 28 skipped`. The skips are the PostgreSQL integration
-tests; set `TRACESETTLE_TEST_PG_DSN` to a real server to run them (**1429 passed, 0 skipped**).
+→ `1429 passed, 28 skipped`. The skips are the PostgreSQL integration
+tests; set `TRACESETTLE_TEST_PG_DSN` to a real server to run them
+(**1453 passed, 4 skipped** — the remaining 4 are opt-in *live-infrastructure*
+tests that need real provider credentials, a testnet key, or a TDX enclave
+harness, none of which a zero-budget local run has).
 
 **2. Prove the enforcement boundary: a permitted request executes, a suspicious
 one cannot.**
@@ -758,7 +770,7 @@ curl -sS -X POST http://127.0.0.1:8080/api/guard/sign \
 curl -sS http://127.0.0.1:8080/api/guard/invariants \
   | python3 -c 'import sys,json;d=json.load(sys.stdin);print("all hold:",d["all_hold"]);[print(" ",i["name"]) for i in d["invariants"]]'
 ```
-→ `all hold: True` and the forty-five invariant names, including the fourteen NEAR
+→ `all hold: True` and the forty-six invariant names, including the fifteen NEAR
 ones (`near_policy_must_be_in_force`, `near_native_scope_gap_is_always_stated`,
 `near_function_call_key_cannot_transfer_near`,
 `near_unrecognised_access_key_never_allows`,
@@ -1195,7 +1207,7 @@ identical decisions.
 | `tracesettle/guard/safeguards.py` | Durable security safeguards: the learning loop's store (SQLite). |
 | `tracesettle/guard/learning.py` | The learning loop: derive a lesson, apply safeguards (only ever tightening). |
 | `tracesettle/guard/state_pg.py` | Optional PostgreSQL backend: shared nonces, counters, revocations, idempotency. |
-| `tracesettle/guard/invariants.py` | The forty-five structural guarantees, checked by execution. |
+| `tracesettle/guard/invariants.py` | The forty-six structural guarantees, checked by execution. |
 | `tracesettle/guard/api.py` | Guard HTTP routing and JSON serialization. |
 | `tracesettle/guard/console.py` | The security operations console page. |
 | `docs/TRANSACTION_SECURITY.md` | The security layer in full, including what it does not do. |
@@ -1520,7 +1532,7 @@ immutable commit SHA (not a moving tag), and cancels superseded runs.
 ## Tests
 
 ```sh
-python3 -m pytest tests/ -q          # 1401 passed, 28 skipped (1429 passed, 0 skipped with PostgreSQL)
+python3 -m pytest tests/ -q          # 1429 passed, 28 skipped (1453 passed, 4 skipped with PostgreSQL)
 python3 -m pytest tests/test_guard_authorization.py -q
 python3 -m pytest tests/test_guard_invariants.py -q
 python3 -m pytest tests/test_guard_end_to_end.py -q
@@ -1580,7 +1592,7 @@ Intents), a function-call key that cannot transfer NEAR, a full-access key that
 forces review, the five outcomes, determinism, an invalid amount failing safe to
 `UNKNOWN`, a client-supplied approval flag never honoured, and the settlement
 assurance rule that a provider success claim is never independently verified
-without decisive evidence. Each of the fourteen NEAR-specific invariants is mutation-tested.
+without decisive evidence. Each of the fifteen NEAR-specific invariants is mutation-tested.
 
 ## Read-only guarantee
 

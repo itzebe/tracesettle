@@ -1753,6 +1753,150 @@ def _near_execution_binding_covers_the_bytes():
     )
 
 
+def _near_signature_is_verified_before_state_is_consumed():
+    """A rejected signature must not spend the authorization's single-use nonce.
+
+    The signing gate validates the signature *before* it consumes the
+    authorization. If the order were reversed, a single malformed - or
+    wrong-transaction - submission would burn the authorization, so a caller who
+    then presented the correct signature would be refused as a replay. That is a
+    denial of the legitimate path, and it would make "the authorization is
+    single-use" true in the worst way.
+
+    The check drives a real boundary with a real authorization and presents a
+    malformed signature first, then the correct one. Both must be refused/accepted
+    respectively: the malformed signature refused, and the correct signature -
+    still spendable - accepted. A reversed order fails the second step.
+    """
+    from ..near.execution import ExecutionError, NearExecutionBoundary
+    from ..near.networks import NETWORKS, NearNetwork
+    from ..near import ed25519
+    import base64 as _base64
+
+    class _Rpc:
+        def __init__(self):
+            self.broadcasts: list[str] = []
+
+        def status(self):
+            from ..near.rpc import RpcResult
+            from ..model import SourceStatus
+
+            return RpcResult(
+                SourceStatus.OK,
+                {"chain_id": config.chain_id, "genesis_hash": config.genesis_hash},
+            )
+
+        def block_hash(self, *, finality="final"):
+            from ..near.rpc import RpcResult
+            from ..model import SourceStatus
+
+            return RpcResult(
+                SourceStatus.OK,
+                {"hash": "9Gq9bHtf6SKUuWLbzgPMVedA3BtYbYVwb5NVUrQyzoE9", "height": 1},
+            )
+
+        def view_access_key(self, account_id, public_key):
+            from ..near.rpc import RpcResult
+            from ..model import SourceStatus
+
+            return RpcResult(SourceStatus.OK, {"nonce": 1, "permission": "FullAccess"})
+
+        def call_function(self, account_id, method_name, args=None, *, finality="final"):
+            from ..near.rpc import RpcResult
+            from ..model import SourceStatus
+
+            return RpcResult(SourceStatus.OK, {"decimals": 24})
+
+        def send_tx(self, signed_transaction_b64, *, wait_until="INCLUDED_FINAL"):
+            self.broadcasts.append(signed_transaction_b64)
+            from ..near.rpc import RpcResult
+            from ..model import SourceStatus
+
+            return RpcResult(SourceStatus.OK, {})
+
+        def tx_status(self, tx_hash, sender_account_id):
+            from ..near.rpc import RpcResult
+            from ..model import SourceStatus
+
+            return RpcResult(SourceStatus.OK, {})
+
+    from .policy import PolicyConfig, ServicePolicy
+
+    seed = bytes(range(32))
+    signer = "agent.testnet"
+    receiver = "approved.testnet"
+    config = NETWORKS[NearNetwork.TESTNET]
+    policy = PolicyConfig(
+        policy_id="near-consume-order-invariant",
+        name="near consume order invariant",
+        version="1",
+        approved_destinations=frozenset({receiver}),
+        services={
+            "svc": ServicePolicy(
+                service_id="svc",
+                allowed_operations=frozenset({"WITHDRAWAL"}),
+                allowed_chains=frozenset({"near-testnet"}),
+                allowed_assets=frozenset({"NEAR:NATIVE"}),
+                max_amount_per_transaction=Decimal("100"),
+                approval_threshold=Decimal("1000"),
+            )
+        },
+        per_transaction_limit=Decimal("100"),
+        approval_threshold=Decimal("1000"),
+        allow_unlisted_destinations=False,
+    )
+    guard = GuardService(
+        policy=policy,
+        authority=AuthorizationAuthority(
+            key=_INVARIANT_KEY, key_id="i", ephemeral=False, replay_store=InMemoryReplayStore()
+        ),
+    )
+    boundary = NearExecutionBoundary(guard, config, rpc=_Rpc())
+    pub = "ed25519:" + _b58(ed25519.public_key(seed))
+    prepared = boundary.prepare(
+        service_id="svc",
+        account_id=signer,
+        public_key=pub,
+        receiver_id=receiver,
+        asset_identifier="near:native",
+        amount_human="1",
+    )
+    if not prepared.authorized:
+        return InvariantResult(
+            "near_signature_is_verified_before_state_is_consumed",
+            False,
+            "the invariant's own authorized prepare did not authorize",
+        )
+
+    # A malformed signature must be refused without consuming the authorization.
+    try:
+        boundary.accept_signature(prepared, "not-base64!!")
+        return InvariantResult(
+            "near_signature_is_verified_before_state_is_consumed",
+            False,
+            "a malformed signature was accepted",
+        )
+    except ExecutionError:
+        pass
+
+    # The correct signature must STILL be spendable - the nonce was not burned.
+    good = _base64.b64encode(ed25519.sign(prepared.transaction.tx_hash_bytes, seed)).decode()
+    try:
+        boundary.accept_signature(prepared, good)
+    except ExecutionError as exc:
+        return InvariantResult(
+            "near_signature_is_verified_before_state_is_consumed",
+            False,
+            "a refused signature consumed the authorization, so the correct one was "
+            f"rejected: {exc}",
+        )
+    return InvariantResult(
+        "near_signature_is_verified_before_state_is_consumed",
+        True,
+        "a rejected signature leaves the single-use authorization intact",
+    )
+
+
 def _tee_fixture_quote() -> tuple[bytes, bytes, bytes, bytes, list]:
     """Load the captured genuine NEAR AI Cloud attestation shipped with the package.
 
@@ -2866,6 +3010,9 @@ INVARIANTS: dict[str, Callable[[], InvariantResult]] = {
         _near_execution_never_signs_without_a_valid_authorization
     ),
     "near_execution_binding_covers_the_bytes": _near_execution_binding_covers_the_bytes,
+    "near_signature_is_verified_before_state_is_consumed": (
+        _near_signature_is_verified_before_state_is_consumed
+    ),
     "tee_attestation_verification_is_genuine": _tee_attestation_verification_is_genuine,
     "tee_attestation_is_bound_to_the_decision_nonce": (
         _tee_attestation_is_bound_to_the_decision_nonce
@@ -2935,6 +3082,7 @@ INVARIANT_DESCRIPTIONS: dict[str, str] = {
     "near_chain_is_derived_from_the_origin_asset": "The chain the guard evaluates is derived from the origin asset, and an explicit chain that disagrees with it is refused; a caller cannot steer a chain-scoped policy to the wrong chain.",
     "near_execution_never_signs_without_authorization": "The NEAR execution boundary never signs or broadcasts a transaction that did not receive an authorization.",
     "near_execution_binding_covers_the_bytes": "The authorization is bound to the exact bytes that would be broadcast; changing the amount after authorization is refused.",
+    "near_signature_is_verified_before_state_is_consumed": "A malformed or wrong-transaction signature is refused without spending the authorization's single-use nonce, so the legitimate signer can still use it.",
     "tee_attestation_verification_is_genuine": "A genuine Intel TDX quote verifies against the pinned Intel SGX Root CA, and a tampered quote is refused.",
     "tee_attestation_is_bound_to_the_decision_nonce": "A TDX quote obtained for one decision nonce does not verify for another, so an attestation cannot be replayed.",
     "tee_collateral_verifies_against_the_pinned_root": "Intel PCS collateral (signed TCB Info, PCK CRL and QE Identity) verifies against the pinned Intel root and a tampered document is refused, so revocation and TCB freshness are checked rather than assumed.",
