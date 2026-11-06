@@ -128,10 +128,10 @@ def _load_key() -> bytes | None:
     try:
         seed = bytes.fromhex(raw)
     except ValueError:
-        print("TRACESETTLE_DEMO_TESTNET_KEY must be 64 hex characters (a 32-byte seed).")
+        _say("TRACESETTLE_DEMO_TESTNET_KEY must be 64 hex characters (a 32-byte seed).")
         raise SystemExit(2)
     if len(seed) != 32:
-        print("TRACESETTLE_DEMO_TESTNET_KEY must decode to exactly 32 bytes.")
+        _say("TRACESETTLE_DEMO_TESTNET_KEY must decode to exactly 32 bytes.")
         raise SystemExit(2)
     return seed
 
@@ -147,28 +147,38 @@ def _b58(raw: bytes) -> str:
     return "1" * pad + (out or "")
 
 
+#: Where human-readable narration goes. With ``--json`` the JSON document is the
+#: only thing on stdout, so a machine reader can parse it directly; the narration
+#: moves to stderr.
+_HUMAN_OUT = sys.stdout
+
+
+def _say(*parts) -> None:
+    _HUMAN_OUT.write(" ".join(str(p) for p in parts) + "\n")
+
+
 def _print_result(result, *, mode: str) -> None:
-    print(f"  mode            : {mode}")
-    print(f"  instruction     : {result.instruction}")
+    _say(f"  mode            : {mode}")
+    _say(f"  instruction     : {result.instruction}")
     if result.injected_context:
-        print(f"  injected context: {result.injected_context}")
-        print(f"  redirected      : {result.redirected}")
-    print(f"  proposed        : {result.proposed_amount} NEAR -> {result.proposed_receiver}")
-    print(f"  decision        : {result.decision}  (authorized: {result.authorized})")
+        _say(f"  injected context: {result.injected_context}")
+        _say(f"  redirected      : {result.redirected}")
+    _say(f"  proposed        : {result.proposed_amount} NEAR -> {result.proposed_receiver}")
+    _say(f"  decision        : {result.decision}  (authorized: {result.authorized})")
     if result.reasons:
         for reason in result.reasons:
-            print(f"    - {reason}")
-    print(f"  signer calls    : {result.signer_calls}")
-    print(f"  signed          : {result.signed}")
-    print(f"  broadcast       : {result.broadcast_occurred}")
+            _say(f"    - {reason}")
+    _say(f"  signer calls    : {result.signer_calls}")
+    _say(f"  signed          : {result.signed}")
+    _say(f"  broadcast       : {result.broadcast_occurred}")
     if result.tx_hash:
-        print(f"  tx hash         : {result.tx_hash}")
+        _say(f"  tx hash         : {result.tx_hash}")
     if result.submission_state:
-        print(f"  submission      : {result.submission_state}")
+        _say(f"  submission      : {result.submission_state}")
     if result.settlement_state:
-        print(f"  settlement      : {result.settlement_state}")
+        _say(f"  settlement      : {result.settlement_state}")
     for note in result.notes:
-        print(f"  note            : {note}")
+        _say(f"  note            : {note}")
 
 
 def _malicious_scenario(harness: LocalAgentHarness, approved: str, *, attempts, delay):
@@ -208,9 +218,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", action="store_true", help="machine-readable output")
     args = parser.parse_args(argv)
 
+    if args.json:
+        # Keep stdout pure JSON so a machine reader can parse it directly.
+        global _HUMAN_OUT
+        _HUMAN_OUT = sys.stderr
+
     network = network_config("testnet")
     if network.network is not NearNetwork.TESTNET:
-        print("This demonstration only runs on testnet.")
+        _say("This demonstration only runs on testnet.")
         return 2
 
     seed = _load_key()
@@ -219,9 +234,9 @@ def main(argv: list[str] | None = None) -> int:
 
     live = args.live
     if live and (seed is None or not account or not receiver):
-        print("--live requires TRACESETTLE_DEMO_TESTNET_KEY, TRACESETTLE_DEMO_ACCOUNT and")
-        print("TRACESETTLE_DEMO_RECEIVER (all testnet). Falling back is refused: re-run")
-        print("without --live for the offline demonstration.")
+        _say("--live requires TRACESETTLE_DEMO_TESTNET_KEY, TRACESETTLE_DEMO_ACCOUNT and")
+        _say("TRACESETTLE_DEMO_RECEIVER (all testnet). Falling back is refused: re-run")
+        _say("without --live for the offline demonstration.")
         return 2
     if not live:
         # Offline mode uses a deterministic account/receiver so the run is
@@ -230,7 +245,7 @@ def main(argv: list[str] | None = None) -> int:
         receiver = receiver or "demo-receiver.testnet"
 
     if not account.endswith(".testnet") or not receiver.endswith(".testnet"):
-        print("Both the account and the receiver must be *.testnet accounts.")
+        _say("Both the account and the receiver must be *.testnet accounts.")
         return 2
 
     guard = GuardService(
@@ -276,28 +291,28 @@ def main(argv: list[str] | None = None) -> int:
         # fabricated success.
         rpc.record_provider = lambda: harness.last_prepared
 
-    print("=" * 78)
-    print("TRACESETTLE x NEAR - agent lifecycle demonstration")
-    print("=" * 78)
-    print(f"network   : {network.network.value} (genesis {network.genesis_hash[:12]}...)")
-    print(f"account   : {account}")
-    print(f"approved  : {receiver}")
-    print(f"attacker  : {ATTACKER_RECEIVER}  (synthetic, not approved)")
-    print()
+    _say("=" * 78)
+    _say("TRACESETTLE x NEAR - agent lifecycle demonstration")
+    _say("=" * 78)
+    _say(f"network   : {network.network.value} (genesis {network.genesis_hash[:12]}...)")
+    _say(f"account   : {account}")
+    _say(f"approved  : {receiver}")
+    _say(f"attacker  : {ATTACKER_RECEIVER}  (synthetic, not approved)")
+    _say()
 
-    print("-" * 78)
-    print("SCENARIO A - malicious payment (prompt-injected redirect)")
-    print("-" * 78)
+    _say("-" * 78)
+    _say("SCENARIO A - malicious payment (prompt-injected redirect)")
+    _say("-" * 78)
     malicious = _malicious_scenario(harness, receiver, attempts=attempts, delay=delay)
     _print_result(malicious, mode=mode)
-    print()
+    _say()
 
-    print("-" * 78)
-    print("SCENARIO B - legitimate payment (approved receiver)")
-    print("-" * 78)
+    _say("-" * 78)
+    _say("SCENARIO B - legitimate payment (approved receiver)")
+    _say("-" * 78)
     legitimate = _legitimate_scenario(harness, receiver, attempts=attempts, delay=delay)
     _print_result(legitimate, mode=mode)
-    print()
+    _say()
 
     ok = (
         malicious.decision == "BLOCK"
@@ -308,8 +323,8 @@ def main(argv: list[str] | None = None) -> int:
         and legitimate.signed
         and legitimate.settlement_state == "VERIFIED"
     )
-    print("=" * 78)
-    print(
+    _say("=" * 78)
+    _say(
         "RESULT: "
         + (
             "the malicious payment was blocked before signing and the legitimate "
@@ -318,7 +333,7 @@ def main(argv: list[str] | None = None) -> int:
             else "the run did NOT reproduce the expected outcomes; see the rows above."
         )
     )
-    print("=" * 78)
+    _say("=" * 78)
 
     if args.json:
         print(

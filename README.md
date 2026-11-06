@@ -766,12 +766,12 @@ a bare interpreter.
 **1. Run the tests.**
 
 ```sh
-python -m pytest tests/ --collect-only -q   # 1467 tests collected
-python -m pytest tests/ -q                  # 1440 passed, 27 skipped
+python -m pytest tests/ --collect-only -q   # 1468 tests collected
+python -m pytest tests/ -q                  # 1441 passed, 27 skipped
 ```
-→ `1440 passed, 27 skipped`. The skips are the PostgreSQL integration
+→ `1441 passed, 27 skipped`. The skips are the PostgreSQL integration
 tests; set `TRACESETTLE_TEST_PG_DSN` to a real server to run them
-(**1464 passed, 3 skipped** — the remaining 3 are opt-in *live-infrastructure*
+(**1465 passed, 3 skipped** — the remaining 3 are opt-in *live-infrastructure*
 tests that need real provider credentials, a testnet key, or a TDX enclave
 harness, none of which a zero-budget local run has).
 
@@ -1288,7 +1288,7 @@ identical decisions.
 | `demo/near_agent_demo.py` | End-to-end agent lifecycle (intercept → block/authorize → settle → verify), offline or `--live` on testnet. |
 | `demo/replay_opener.py` | Offline transport that replays `evidence/raw/` through the real code. |
 | `tracesettle/static/near-connect.js` | Vendored `@hot-labs/near-connect` (MIT) wallet connector, served same-origin at `/assets/near-connect.js`. |
-| `tests/` | 1467 tests (27 PostgreSQL tests skip without `TRACESETTLE_TEST_PG_DSN`; 3 further tests are opt-in live tests that skip without a live testnet key, live Agent API credentials, or `TRACESETTLE_ENCLAVE_HARNESS=1`). `evidence/raw/` fixtures are real captures; `tests/fixtures/synthetic/` are clearly labelled synthetic. |
+| `tests/` | 1468 tests (27 PostgreSQL tests skip without `TRACESETTLE_TEST_PG_DSN`; 3 further tests are opt-in live tests that skip without a live testnet key, live Agent API credentials, or `TRACESETTLE_ENCLAVE_HARNESS=1`). `evidence/raw/` fixtures are real captures; `tests/fixtures/synthetic/` are clearly labelled synthetic. |
 | `PHASE1_FEASIBILITY.md` | Phase 1 feasibility and API verification. |
 | `submission/` | Hackathon artifacts: API payload shape, technical summary, demo post draft, publication checklist. |
 | `docs/official/` | NEAR documentation captured during Phase 1. |
@@ -1606,7 +1606,7 @@ immutable commit SHA (not a moving tag), and cancels superseded runs.
 ## Tests
 
 ```sh
-python3 -m pytest tests/ -q          # 1440 passed, 27 skipped (1464 passed, 3 skipped with PostgreSQL)
+python3 -m pytest tests/ -q          # 1441 passed, 27 skipped (1465 passed, 3 skipped with PostgreSQL)
 python3 -m pytest tests/test_guard_authorization.py -q
 python3 -m pytest tests/test_guard_invariants.py -q
 python3 -m pytest tests/test_guard_end_to_end.py -q

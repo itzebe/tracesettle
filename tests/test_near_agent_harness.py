@@ -257,3 +257,32 @@ def test_offline_demo_is_deterministic():
     b = _World().harness.run(_World().instruction())
     assert a.tx_hash == b.tx_hash
     assert a.settlement_state == b.settlement_state == "VERIFIED"
+
+
+def test_the_json_output_is_pure_json_on_stdout():
+    """`--json` must emit only the JSON document on stdout.
+
+    The CI gate parses stdout directly, so any human-readable narration leaking
+    onto stdout (a banner, a "RESULT:" line) would break a machine reader. The
+    narration belongs on stderr.
+    """
+    import json
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    demo = Path(__file__).resolve().parent.parent / "demo" / "near_agent_demo.py"
+    proc = subprocess.run(
+        [sys.executable, str(demo), "--json"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    data = json.loads(proc.stdout)  # must parse as JSON, with nothing else
+    assert data["malicious"]["decision"] == "BLOCK"
+    assert data["malicious"]["signer_calls"] == 0
+    assert data["legitimate"]["settlement_state"] == "VERIFIED"
+    # The human narration really did run; it just went to stderr.
+    assert "SCENARIO A" in proc.stderr
+
