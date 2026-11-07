@@ -2239,3 +2239,25 @@ other. Runtime stays standard-library only; no authorization rule was weakened.
 - **Not live-verified:** no Agent API credential is configured in the zero-budget
   environment, so the live read path is integration-tested only. This is stated
   in the README rather than implied to be production-proven.
+
+### Release verification — provider-policy gate (2026-11-06)
+
+- **PR #20** (`feat/custody-provider-policy-gate`) squash-merged to `master` as
+  **`2242e54e0844`**. All five checks green on the PR head `f326067` (Tests and
+  static analysis; PostgreSQL shared-state integration; Docker build and runtime;
+  Vercel; Vercel container image); combined commit status `success`.
+- **Production deployment** `tracesettle-qspuaiko6-…` at commit **`2242e54e0844`**
+  (alias `tracesettle-navy.vercel.app`), state `READY`.
+- **Live verification (2026-11-06):** `/`, `/demo`, `/console`, `/evaluate` and
+  `/api/health` all `200`; `/api/guard/invariants` still `401` (correctly gated);
+  `/api/guard/near/agent-demo` returns `simulated: true, reproduced: true`,
+  malicious `BLOCK` with `signer_calls: 0`, legitimate `ALLOW` with
+  `signer_calls: 1` and `settlement_state: VERIFIED`;
+  `/api/guard/near/settlement-check` returns `VERIFIED`, `mainnet: false`. The
+  `/demo` six-scene narrative was driven in a real browser against production and
+  rendered real values (scene 3 `signer invocations 0`, scene 4 digests agree
+  `yes`, scene 6 tx `3wQ7UDmQzCTtqyxnBMaQ35SfxioQJUp3rnLyEPX6nuQd` `VERIFIED`).
+  Both deployed inline scripts parse under `node --check` (the console
+  syntax-error class this change fixed).
+- **Not live-verified:** the provider-policy live read (no Agent API credential).
+  Stated as a limitation, never as production-proven.
