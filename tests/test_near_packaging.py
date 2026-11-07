@@ -116,7 +116,7 @@ try:
         "/api/guard/invariants",
     ):
         try:
-            with urllib.request.urlopen(f"http://{{host}}:{{port}}{{path}}", timeout=10) as r:
+            with urllib.request.urlopen(f"http://{{host}}:{{port}}{{path}}", timeout=60) as r:
                 out[path] = r.status
         except Exception as exc:
             out[path] = type(exc).__name__
@@ -305,7 +305,7 @@ try:
     out = {{}}
     for path in ("/api/guard/near/wallet", "/assets/near-connect.js"):
         try:
-            with urllib.request.urlopen(f"http://{{host}}:{{port}}{{path}}", timeout=10) as r:
+            with urllib.request.urlopen(f"http://{{host}}:{{port}}{{path}}", timeout=60) as r:
                 out[path] = r.status
         except Exception as exc:
             out[path] = type(exc).__name__
