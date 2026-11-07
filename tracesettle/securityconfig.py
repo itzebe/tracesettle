@@ -179,6 +179,19 @@ def validate_startup(
                 "there is no execution boundary to authorize an operation before it is "
                 "signed. Enable the execution boundary, or unset TRACESETTLE_OUTLAYER_ENABLED"
             )
+        # The independent NEAR provider policy is a second layer, separate from
+        # OutLayer's own wallet policy. When the operator requires it but no Agent
+        # API is configured, every custody operation would fail closed - the
+        # feature would be silently dead. Refuse at start-up instead, naming the
+        # variable, rather than run a boundary that can never authorize.
+        if config.OUTLAYER_REQUIRE_PROVIDER_POLICY and not config.NEAR_AGENT_API_URL:
+            raise ConfigurationError(
+                "TRACESETTLE_OUTLAYER_ENABLED requires the independent NEAR provider policy, "
+                "but TRACESETTLE_NEAR_AGENT_API_URL is not set, so the policy could never be "
+                "read and every operation would fail closed. Set the Agent API base URL and "
+                "key, or set TRACESETTLE_OUTLAYER_REQUIRE_PROVIDER_POLICY=0 to run without "
+                "the provider-policy layer"
+            )
 
     if not public_binding:
         return profile

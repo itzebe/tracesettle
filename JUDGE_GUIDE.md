@@ -80,7 +80,7 @@ machine-readable contract is at `/api/agent/openapi.json` and the scope at
 | Transaction-bound authorization | `tracesettle/guard/authorization.py` |
 | The signer that refuses before executing | `tracesettle/guard/signer.py` |
 | NEAR settlement verification | `tracesettle/near/verify.py` |
-| Structural invariants (55) | `tracesettle/guard/invariants.py` |
+| Structural invariants (56) | `tracesettle/guard/invariants.py` |
 
 ## What the ten scenarios prove
 
@@ -119,7 +119,7 @@ python3 -m tracesettle serve --host 127.0.0.1 --port 8000 &
 curl -s localhost:8000/api/guard/invariants | python3 -m json.tool | tail -5
 ```
 
-55 structural invariants are asserted by execution, not by prose. Each one is mutation-tested: a
+56 structural invariants are asserted by execution, not by prose. Each one is mutation-tested: a
 checker that cannot fail is treated as a defect. You can also read the statements next to the results.
 
 ## Run the full test suite

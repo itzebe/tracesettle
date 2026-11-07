@@ -216,9 +216,27 @@ Where each capability stands:
   operation's digest and wallet key) before it is accepted. The guarantee is
   structural: `custody_tee_signing_requires_bound_attestation_and_settlement`
   holds, and is mutation-tested against both a trusting evidence ladder and an
-  accepting verifier. Live provider-*policy* integration for custody remains
-  **unverified** — no OutLayer API key is configured, so the routes report
-  themselves disabled and refuse.
+  accepting verifier. Live OutLayer provider-*wallet-policy* integration for
+  custody remains **unverified** — no OutLayer API key is configured, so the
+  routes report themselves disabled and refuse.
+- **Independent provider-policy gate for custody — a second, separate layer.**
+  A custody operation is gated by **two** independent policies: TraceSettle's own
+  operator policy (the seven guard controls) *and* the agent's NEAR Intents
+  **provider** policy read from the Agent API
+  (`tracesettle/near/provider_policy_gate.py`). The two are not substitutes:
+  OutLayer's wallet policy governs what its custody wallet will sign, while the
+  Agent API policy is what the agent's operator authorized the agent to do. The
+  gate runs after the guard and can only **tighten** the decision; a policy that
+  is not `APPLIED`, not provider-synced, stale, frozen, unreadable, malformed, or
+  that does not enable `native.near.transfer` resolves to `HOLD`/`BLOCK`, and any
+  authorization the guard issued is discarded so no token reaches a signer. It is
+  required by default (`TRACESETTLE_OUTLAYER_REQUIRE_PROVIDER_POLICY=1`) and a
+  required policy with no Agent API is a **hard start-up refusal**, never a
+  silently dead boundary. The guarantee
+  `custody_provider_policy_only_tightens` is mutation-tested (neutralising the
+  combine step makes it fail). Implemented and integration-tested end to end
+  through the real boundary; **not live-verified** against a real Agent API
+  because no provider credential is configured in the zero-budget environment.
 - **Wallet-mediated flow:** Testnet verified — the authorize → prepare → verify
   path was exercised against real NEAR testnet: a funded `*.testnet` account
   signed the exact wallet request the server returned, the harness broadcast it,
@@ -817,12 +835,12 @@ a bare interpreter.
 **1. Run the tests.**
 
 ```sh
-python -m pytest tests/ --collect-only -q   # 1731 tests collected
-python -m pytest tests/ -q                  # 1700 passed, 31 skipped
+python -m pytest tests/ --collect-only -q   # 1751 tests collected
+python -m pytest tests/ -q                  # 1720 passed, 31 skipped
 ```
-→ `1700 passed, 31 skipped`. The skips are the PostgreSQL integration
+→ `1720 passed, 31 skipped`. The skips are the PostgreSQL integration
 tests; set `TRACESETTLE_TEST_PG_DSN` to a real server to run them
-(**1724 passed, 7 skipped** — the remaining 7 are opt-in *live-infrastructure*
+(**1744 passed, 7 skipped** — the remaining 7 are opt-in *live-infrastructure*
 tests that need real provider credentials, a testnet key, or a TDX enclave
 harness, none of which a zero-budget local run has).
 
@@ -1334,7 +1352,7 @@ transaction request ──▶ │ guard/rules.py      7 controls, all run  │
                         │                     validate, then execute │
                         │ guard/audit.py      hash-chained records  │
                         │ guard/monitor.py    counters + incidents  │
-                        │ guard/invariants.py 55 checked guarantees │
+                        │ guard/invariants.py 56 checked guarantees │
                         └────────────────────┬─────────────────────┘
                                              │ ALLOW + authorization
                                              ▼
@@ -1439,7 +1457,8 @@ tracesettle/near/          NEAR agent protection: policy scope, access-key
                           (create → authorize → quote → approve → deposit →
                           settle), TEE research, the enclave signing boundary,
                           and the opt-in OutLayer custody boundary (outlayer.py,
-                          outlayer_execution.py, custody_attestation.py)
+                          outlayer_execution.py, custody_attestation.py,
+                          provider_policy_gate.py)
 
 ## Runtime dependencies
 
@@ -1756,7 +1775,7 @@ immutable commit SHA (not a moving tag), and cancels superseded runs.
 ## Tests
 
 ```sh
-python3 -m pytest tests/ -q          # 1700 passed, 31 skipped (1724 passed, 7 skipped with PostgreSQL)
+python3 -m pytest tests/ -q          # 1720 passed, 31 skipped (1744 passed, 7 skipped with PostgreSQL)
 python3 -m pytest tests/test_guard_authorization.py -q
 python3 -m pytest tests/test_guard_invariants.py -q
 python3 -m pytest tests/test_guard_end_to_end.py -q

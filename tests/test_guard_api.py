@@ -449,6 +449,12 @@ def test_custody_prepare_returns_a_prepare_id():
     )
     assert response.status == 200
     assert response.payload["prepare_id"].startswith("prep_")
+    # The provider-policy provenance travels with the prepared operation, so an
+    # operator can see the second policy layer's verdict and its source.
+    assert "provider_policy" in response.payload
+    assert response.payload["provider_policy"] is None or (
+        "outcome" in response.payload["provider_policy"]
+    )
 
 
 def test_custody_execute_rejects_an_unknown_prepare_id():
