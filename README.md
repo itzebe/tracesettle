@@ -817,12 +817,12 @@ a bare interpreter.
 **1. Run the tests.**
 
 ```sh
-python -m pytest tests/ --collect-only -q   # 1645 tests collected
-python -m pytest tests/ -q                  # 1614 passed, 31 skipped
+python -m pytest tests/ --collect-only -q   # 1705 tests collected
+python -m pytest tests/ -q                  # 1674 passed, 31 skipped
 ```
-→ `1614 passed, 31 skipped`. The skips are the PostgreSQL integration
+→ `1674 passed, 31 skipped`. The skips are the PostgreSQL integration
 tests; set `TRACESETTLE_TEST_PG_DSN` to a real server to run them
-(**1638 passed, 7 skipped** — the remaining 7 are opt-in *live-infrastructure*
+(**1698 passed, 7 skipped** — the remaining 7 are opt-in *live-infrastructure*
 tests that need real provider credentials, a testnet key, or a TDX enclave
 harness, none of which a zero-budget local run has).
 
@@ -862,6 +862,21 @@ default**; every write route, the live policy document, metrics, incidents, audi
 the wallet/execution routes and `/api/investigate` keep the API-key requirement,
 and the demonstration routes stay per-IP rate-limited. It does not relax the
 fail-closed start-up check: a public bind still requires credentials.
+
+**2c. Verify the boundary yourself, with no key and no network.**
+
+```sh
+python3 -m tracesettle judge
+```
+→ ten independent scenarios run against the real authorization boundary, signer,
+replay store, approval authority and settlement verifier. Nine are controlled
+simulations; each prints its decision, whether the signer was reached, and whether
+anything was broadcast. The tenth reads a real, already-final NEAR **testnet**
+transaction and reports `UNAVAILABLE` when the host has no outbound network —
+honest behaviour, never a verdict. Add `--json` for a machine-readable report; the
+command exits non-zero only on a real defect, not on an environmental limitation.
+The same matrix is served at `/api/guard/judge/scenarios`, and the browser view is
+`/evaluate` (with the guide at `/JUDGE_GUIDE`), both under the same opt-in flag.
 
 **3. Prove the enforcement boundary: a permitted request executes, a suspicious
 one cannot.**
@@ -910,7 +925,7 @@ curl -sS -X POST http://127.0.0.1:8080/api/guard/sign \
 curl -sS http://127.0.0.1:8080/api/guard/invariants \
   | python3 -c 'import sys,json;d=json.load(sys.stdin);print("all hold:",d["all_hold"]);[print(" ",i["name"]) for i in d["invariants"]]'
 ```
-→ `all hold: True` and the fifty-three invariant names, including the sixteen NEAR
+→ `all hold: True` and the fifty-four invariant names, including the sixteen NEAR
 ones (`near_policy_must_be_in_force`, `near_native_scope_gap_is_always_stated`,
 `near_function_call_key_cannot_transfer_near`,
 `near_unrecognised_access_key_never_allows`,
@@ -1344,11 +1359,14 @@ identical decisions.
 | `tracesettle/intents_store.py` | Durable NEAR Intents lifecycle store (SQLite). |
 | `tracesettle/report.py` | Report generation. |
 | `tracesettle/ui.py` | Standard-library web interface, guard routes, console. |
+| `tracesettle/evaluate.py` | Public, keyless independent-evaluation page (`/evaluate`) and the shared doc-page shell. |
+| `tracesettle/judge.py` | The independent evaluation scenario matrix, run offline or served at `/api/guard/judge/scenarios`. |
+| `tracesettle/markdown.py` | Minimal Markdown renderer used for `/JUDGE_GUIDE`. |
 | `tracesettle/ratelimit.py` | Token buckets for per-IP and per-host limits. |
 | `tracesettle/cache.py` | Bounded TTL cache with single-flight. |
 | `tracesettle/serviceauth.py` | Per-service credential registry (hashed secrets, constant-time). |
 | `tracesettle/securityconfig.py` | Fail-closed startup validation for the network interface. |
-| `tracesettle/__main__.py` | CLI (`investigate`, `serve`, `credentials`). |
+| `tracesettle/__main__.py` | CLI (`investigate`, `serve`, `credentials`, `judge`). |
 | `tracesettle/guard/model.py` | Transaction request, policy, decision, finding, authorization models. |
 | `tracesettle/guard/policy.py` | Default policy and JSON override loading. |
 | `tracesettle/guard/rules.py` | The seven deterministic controls. |
@@ -1361,7 +1379,7 @@ identical decisions.
 | `tracesettle/guard/safeguards.py` | Durable security safeguards: the learning loop's store (SQLite). |
 | `tracesettle/guard/learning.py` | The learning loop: derive a lesson, apply safeguards (only ever tightening). |
 | `tracesettle/guard/state_pg.py` | Optional PostgreSQL backend: shared nonces, counters, revocations, idempotency. |
-| `tracesettle/guard/invariants.py` | The fifty-three structural guarantees, checked by execution. |
+| `tracesettle/guard/invariants.py` | The fifty-four structural guarantees, checked by execution. |
 | `tracesettle/guard/api.py` | Guard HTTP routing and JSON serialization. |
 | `tracesettle/guard/console.py` | The security operations console page. |
 | `docs/TRANSACTION_SECURITY.md` | The security layer in full, including what it does not do. |
@@ -1373,7 +1391,9 @@ identical decisions.
 | `tracesettle/near/agent_demo.py` | The one implementation of the offline end-to-end demonstration (policy, harness, `run_agent_payment_demo`); used by the CLI, the `/api/guard/near/agent-demo` endpoint, and the console panel. |
 | `demo/replay_opener.py` | Offline transport that replays `evidence/raw/` through the real code. |
 | `tracesettle/static/near-connect.js` | Vendored `@hot-labs/near-connect` (MIT) wallet connector, served same-origin at `/assets/near-connect.js`. |
-| `tests/` | 1586 tests (27 PostgreSQL tests skip without `TRACESETTLE_TEST_PG_DSN`; 3 further tests are opt-in live tests that skip without a live testnet key, live Agent API credentials, or `TRACESETTLE_ENCLAVE_HARNESS=1`). `evidence/raw/` fixtures are real captures; `tests/fixtures/synthetic/` are clearly labelled synthetic. |
+| `tests/` | 1705 tests (27 PostgreSQL tests skip without `TRACESETTLE_TEST_PG_DSN`; further tests are opt-in live tests that skip without a live testnet key, live Agent API credentials, or `TRACESETTLE_ENCLAVE_HARNESS=1`). `evidence/raw/` fixtures are real captures; `tests/fixtures/synthetic/` are clearly labelled synthetic. |
+| `JUDGE_GUIDE.md` | The independent evaluation guide, rendered at `/JUDGE_GUIDE`. |
+| `docs/API.md` | The complete HTTP surface: routes, auth, request/response shape. |
 | `PHASE1_FEASIBILITY.md` | Phase 1 feasibility and API verification. |
 | `submission/` | Hackathon artifacts: API payload shape, technical summary, demo post draft, publication checklist. |
 | `docs/official/` | NEAR documentation captured during Phase 1. |
@@ -1703,7 +1723,7 @@ immutable commit SHA (not a moving tag), and cancels superseded runs.
 ## Tests
 
 ```sh
-python3 -m pytest tests/ -q          # 1614 passed, 31 skipped (1638 passed, 7 skipped with PostgreSQL)
+python3 -m pytest tests/ -q          # 1674 passed, 31 skipped (1698 passed, 7 skipped with PostgreSQL)
 python3 -m pytest tests/test_guard_authorization.py -q
 python3 -m pytest tests/test_guard_invariants.py -q
 python3 -m pytest tests/test_guard_end_to_end.py -q

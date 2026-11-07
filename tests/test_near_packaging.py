@@ -26,10 +26,19 @@ PACKAGE_ROOT = REPO_ROOT / "tracesettle"
 
 
 def _package_only_copy(tmp_path: Path) -> Path:
-    """A copy of the repository as the production image sees it."""
+    """A copy of the repository as the production image sees it.
+
+    The image copies ``tracesettle/`` plus the two documents a reader needs
+    (``README.md`` and ``JUDGE_GUIDE.md``). Everything else is excluded by
+    ``.dockerignore``.
+    """
     dest = tmp_path / "app"
     dest.mkdir()
     shutil.copytree(PACKAGE_ROOT, dest / "tracesettle", dirs_exist_ok=True)
+    for name in ("README.md", "JUDGE_GUIDE.md"):
+        source = REPO_ROOT / name
+        if source.is_file():
+            shutil.copy(source, dest / name)
     return dest
 
 
@@ -363,3 +372,79 @@ def test_custody_tee_invariant_runs_from_a_package_only_copy(tmp_path):
     )
     assert out.returncode == 0, out.stderr
     assert json.loads(out.stdout.strip().splitlines()[-1])["holds"] is True
+
+
+def test_judge_scenarios_run_from_a_package_only_copy(tmp_path):
+    """The judge matrix must run from the shipped package, with no test tree.
+
+    The evaluation path is what an independent reviewer runs, so it must not
+    depend on anything the production image excludes.
+    """
+    root = _package_only_copy(tmp_path)
+    script = (
+        "import sys, json;"
+        f"sys.path.insert(0, {str(root)!r});"
+        "from tracesettle import judge;"
+        "r = judge.to_report();"
+        "print(json.dumps({'enforcement_passed': r['summary']['enforcement_passed'],"
+        "'enforcement_total': r['summary']['enforcement_total'],"
+        "'broadcast': r['summary']['broadcast_occurred']}))"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, timeout=180
+    )
+    assert out.returncode == 0, out.stderr
+    result = json.loads(out.stdout.strip().splitlines()[-1])
+    assert result["enforcement_total"] == 9
+    assert result["enforcement_passed"] == 9
+    assert result["broadcast"] is False
+
+
+def test_judge_routes_answer_from_a_package_only_copy(tmp_path):
+    """``/evaluate``, ``/JUDGE_GUIDE`` and the judge endpoint must answer."""
+    root = _package_only_copy(tmp_path)
+    script = f"""
+import sys, threading, json, urllib.request
+sys.path.insert(0, {str(root)!r})
+from tracesettle import config
+config.PUBLIC_DEMO_ENABLED = True
+from tracesettle.ui import InvestigationServer
+
+server = InvestigationServer(("127.0.0.1", 0), timeout_seconds=5.0, max_attempts=1)
+host, port = server.server_address[:2]
+t = threading.Thread(target=server.serve_forever, daemon=True)
+t.start()
+try:
+    out = {{}}
+    for path in ("/evaluate", "/JUDGE_GUIDE", "/api/guard/judge/scenarios"):
+        try:
+            with urllib.request.urlopen(f"http://{{host}}:{{port}}{{path}}", timeout=15) as r:
+                out[path] = r.status
+        except Exception as exc:
+            out[path] = type(exc).__name__
+    print("RESULT:" + json.dumps(out))
+finally:
+    server.shutdown()
+    server.server_close()
+    t.join(timeout=5)
+"""
+    out = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, timeout=240
+    )
+    assert out.returncode == 0, out.stderr
+    line = [ln for ln in out.stdout.splitlines() if ln.startswith("RESULT:")][-1]
+    results = json.loads(line[len("RESULT:") :])
+    assert results == {
+        "/evaluate": 200,
+        "/JUDGE_GUIDE": 200,
+        "/api/guard/judge/scenarios": 200,
+    }, results
+
+
+def test_judge_guide_is_shipped_in_the_image():
+    """The guide is read from the repository root, so the image must copy it."""
+    guide = REPO_ROOT / "JUDGE_GUIDE.md"
+    assert guide.is_file()
+    for dockerfile in ("Dockerfile", "Dockerfile.vercel"):
+        text = (REPO_ROOT / dockerfile).read_text(encoding="utf-8")
+        assert "COPY JUDGE_GUIDE.md" in text, f"{dockerfile} does not ship the judge guide"

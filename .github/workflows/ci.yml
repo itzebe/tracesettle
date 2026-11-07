@@ -121,6 +121,38 @@ jobs:
           print("agent lifecycle demonstration reproduced: block-before-sign + verified settlement")
           PY
 
+      - name: Independent evaluation scenarios (judge path)
+        run: |
+          set -eu
+          # The offline judge path is the one an independent evaluator runs. It
+          # must be deterministic, and every enforcement scenario must behave as
+          # specified. The live settlement check may report UNAVAILABLE on a
+          # runner with no network (and could vary between runs if the network is
+          # flaky), so determinism is required only of the enforcement half.
+          python -m tracesettle judge --json > /tmp/judge-1.json
+          python -m tracesettle judge --json > /tmp/judge-2.json
+          python - <<'PY'
+          import json
+
+          def enforcement(path):
+              with open(path) as handle:
+                  report = json.load(handle)
+              summary = report["summary"]
+              assert summary["enforcement_passed"] == summary["enforcement_total"], summary
+              assert summary["broadcast_occurred"] is False, summary
+              sims = [s for s in report["scenarios"] if not s["real"]]
+              for scenario in sims:
+                  assert scenario["passed"], scenario
+              return summary["enforcement_passed"], sims
+
+          count_1, sims_1 = enforcement("/tmp/judge-1.json")
+          count_2, sims_2 = enforcement("/tmp/judge-2.json")
+          if sims_1 != sims_2:
+              print("enforcement scenario results are not deterministic")
+              raise SystemExit(1)
+          print(f"{count_1} enforcement scenarios matched expectation, deterministically")
+          PY
+
       - name: Confirm no runtime third-party imports
         run: |
           set -eu

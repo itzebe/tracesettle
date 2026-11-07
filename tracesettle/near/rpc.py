@@ -56,9 +56,19 @@ class RpcResult:
 class NearRpc:
     """A NEAR RPC client bound to one resolved, identity-checked network."""
 
-    def __init__(self, config: NetworkConfig, client: HttpClient | None = None) -> None:
+    def __init__(
+        self,
+        config: NetworkConfig,
+        client: HttpClient | None = None,
+        *,
+        max_endpoints: int | None = None,
+    ) -> None:
         self.config = config
         self.client = client or HttpClient()
+        #: Optional bound on how many endpoints a single call may try. ``None``
+        #: means "all of them". A caller that must answer a public request in
+        #: bounded time sets this so an outage cannot stall the route.
+        self.max_endpoints = max_endpoints
 
     # -- low level ---------------------------------------------------------
 
@@ -67,10 +77,21 @@ class NearRpc:
         for url in (self.config.rpc_url, *self.config.rpc_fallbacks):
             if url and url not in seen:
                 seen.append(url)
+        if self.max_endpoints is not None:
+            return seen[: self.max_endpoints]
         return seen
 
     def _call(self, method: str, params: Any) -> RpcResult:
-        """Call one method, trying fallbacks only on a definitive NOT_FOUND."""
+        """Call one method, trying fallbacks only on a definitive NOT_FOUND.
+
+        A node may report a definitive miss either as a transport status
+        (``NOT_FOUND``) or inside an HTTP 200 as a JSON-RPC error object whose
+        classification is ``NOT_FOUND`` (a pruned transaction). Both paths must
+        continue to the next endpoint, because a different node may still hold
+        the archive. An outage (timeout, rate limit, malformed, server error)
+        stops the fan-out: with the source down we cannot tell "absent" from
+        "unknown", and hammering the other endpoints only adds load.
+        """
         payload = {"jsonrpc": "2.0", "id": "tracesettle", "method": method, "params": params}
         last = RpcResult(SourceStatus.NETWORK_ERROR, error="no endpoint tried")
         for url in self._endpoints():
@@ -80,7 +101,11 @@ class NearRpc:
                 if not isinstance(body, dict):
                     return RpcResult(SourceStatus.MALFORMED, error="RPC body was not an object", endpoint=url)
                 if "error" in body:
-                    return self._classify_rpc_error(body["error"], url)
+                    classified = self._classify_rpc_error(body["error"], url)
+                    if classified.status is not SourceStatus.NOT_FOUND:
+                        return classified
+                    last = classified
+                    continue
                 if "result" not in body:
                     return RpcResult(SourceStatus.MALFORMED, error="RPC body had no result", endpoint=url)
                 return RpcResult(SourceStatus.OK, data=body["result"], endpoint=url)
@@ -92,27 +117,47 @@ class NearRpc:
 
     @staticmethod
     def _classify_rpc_error(error: Any, url: str) -> RpcResult:
-        """Map a JSON-RPC error object to a status, keeping "absent" vs "down"."""
+        """Map a JSON-RPC error object to a status, keeping "absent" vs "down".
+
+        The public nodes wrap a definitive miss in a generic envelope: a pruned
+        transaction returns ``{"name": "HANDLER_ERROR", "cause": {"name":
+        "UNKNOWN_TRANSACTION"}, "data": "Transaction … doesn't exist"}``. The
+        outer ``name`` is always ``HANDLER_ERROR``, so the tokens that carry the
+        real meaning live in the *cause*, the *data* string and the cause's
+        ``info`` values. Every one of those is folded into the search blob; if
+        only the outer name were read, a pruned transaction would be classified
+        ``MALFORMED`` and the fallback endpoints would never be tried.
+        """
         name = ""
-        message = ""
+        parts: list[str] = []
         if isinstance(error, dict):
             name = str(error.get("name") or "")
-            message = str(error.get("message") or "")
+            parts.append(name)
+            parts.append(str(error.get("message") or ""))
+            parts.append(str(error.get("data") or ""))
             cause = error.get("cause")
-            if isinstance(cause, dict) and cause.get("name"):
-                name = name or str(cause["name"])
-        blob = f"{name} {message}".lower()
-        if "unknown_transaction" in blob or "does not exist" in blob or "unknown_block" in blob:
-            return RpcResult(SourceStatus.NOT_FOUND, error=name or message, endpoint=url)
-        if "unknown_account" in blob or "account" in blob and "does not exist" in blob:
-            return RpcResult(SourceStatus.NOT_FOUND, error=name or message, endpoint=url)
+            if isinstance(cause, dict):
+                parts.append(str(cause.get("name") or ""))
+                info = cause.get("info")
+                if isinstance(info, dict):
+                    parts.extend(str(value) for value in info.values())
+        blob = " ".join(parts).lower()
+        if (
+            "unknown_transaction" in blob
+            or "does not exist" in blob
+            or "doesn't exist" in blob
+            or "unknown_block" in blob
+        ):
+            return RpcResult(SourceStatus.NOT_FOUND, error=name or blob.strip(), endpoint=url)
+        if "unknown_account" in blob:
+            return RpcResult(SourceStatus.NOT_FOUND, error=name or blob.strip(), endpoint=url)
         if "timeout" in blob or "time out" in blob:
-            return RpcResult(SourceStatus.TIMEOUT, error=name or message, endpoint=url)
+            return RpcResult(SourceStatus.TIMEOUT, error=name or blob.strip(), endpoint=url)
         if "rate" in blob and "limit" in blob:
-            return RpcResult(SourceStatus.RATE_LIMITED, error=name or message, endpoint=url)
+            return RpcResult(SourceStatus.RATE_LIMITED, error=name or blob.strip(), endpoint=url)
         # Any other structured error is a malformed/unexpected response: never
         # treated as success, and never as "absent" either.
-        return RpcResult(SourceStatus.MALFORMED, error=name or message or "rpc error", endpoint=url)
+        return RpcResult(SourceStatus.MALFORMED, error=name or blob.strip() or "rpc error", endpoint=url)
 
     # -- typed helpers -----------------------------------------------------
 

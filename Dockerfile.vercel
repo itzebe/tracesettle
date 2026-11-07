@@ -36,6 +36,9 @@ WORKDIR /app
 # keeps tests, docs, and evidence out of the build context.
 COPY tracesettle/ ./tracesettle/
 COPY README.md ./
+# The judge guide is served at /JUDGE_GUIDE, rendered at request time from this
+# single source file.
+COPY JUDGE_GUIDE.md ./
 
 # Create an unprivileged user and drop to it. With durable guard state in
 # PostgreSQL the tool writes nothing to the filesystem; the audit log is left

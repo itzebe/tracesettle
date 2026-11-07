@@ -17,6 +17,9 @@ WORKDIR /app
 # Only the package and the metadata a reader needs are copied in.
 COPY tracesettle/ ./tracesettle/
 COPY README.md ./
+# The judge guide is served at /JUDGE_GUIDE, rendered at request time from this
+# single source file.
+COPY JUDGE_GUIDE.md ./
 
 # Create an unprivileged user and drop to it. With durable guard state unset the
 # tool writes nothing to the filesystem; to enable durable state, mount a volume
