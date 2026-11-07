@@ -3426,6 +3426,187 @@ def _custody_tee_signing_requires_bound_attestation_and_settlement():
     )
 
 
+def _near_execution_enforces_the_provider_policy():
+    """The NEAR execution boundary must enforce the independent provider policy.
+
+    The provider (Agent API) policy is a second policy, distinct from the
+    operator's, and it can only ever tighten a decision. Two probes, so the check
+    is not a blanket refusal:
+
+    (a) a policy that is *not in force* turns an otherwise-authorized transfer
+        into a non-ALLOW decision, no authorization is issued, and a broadcast
+        attempt is refused with nothing submitted to the RPC;
+    (b) a policy that *is* in force and enables the native transfer still
+        authorizes, so the layer is not merely blocking everything.
+
+    A boundary that ignored the provider policy would authorize in (a) and fail
+    here, so the invariant is mutation-sensitive.
+    """
+    from ..near.execution import ExecutionError, NearExecutionBoundary
+    from ..near.networks import NETWORKS, NearNetwork
+    from ..near.policy import PolicyAdapter
+    from ..near.provider_policy_gate import ProviderPolicyGate
+    from .policy import PolicyConfig, ServicePolicy
+    from ..near import ed25519
+
+    name = "near_execution_enforces_the_provider_policy"
+
+    class _RecordingRpc:
+        def __init__(self, config):
+            self.config = config
+            self.broadcasts: list[str] = []
+
+        def status(self):
+            from ..model import SourceStatus
+            from ..near.rpc import RpcResult
+
+            return RpcResult(
+                SourceStatus.OK,
+                {"chain_id": self.config.chain_id, "genesis_hash": self.config.genesis_hash},
+            )
+
+        def block_hash(self, *, finality="final"):
+            from ..model import SourceStatus
+            from ..near.rpc import RpcResult
+
+            return RpcResult(
+                SourceStatus.OK,
+                {"hash": "9Gq9bHtf6SKUuWLbzgPMVedA3BtYbYVwb5NVUrQyzoE9", "height": 1},
+            )
+
+        def view_access_key(self, account_id, public_key):
+            from ..model import SourceStatus
+            from ..near.rpc import RpcResult
+
+            return RpcResult(SourceStatus.OK, {"nonce": 1, "permission": "FullAccess"})
+
+        def call_function(self, account_id, method_name, args=None, *, finality="final"):
+            from ..model import SourceStatus
+            from ..near.rpc import RpcResult
+
+            return RpcResult(SourceStatus.OK, {"decimals": 24})
+
+        def send_tx(self, signed_transaction_b64, *, wait_until="INCLUDED_FINAL"):
+            self.broadcasts.append(signed_transaction_b64)
+            from ..model import SourceStatus
+            from ..near.rpc import RpcResult
+
+            return RpcResult(SourceStatus.OK, {})
+
+        def tx_status(self, tx_hash, sender_account_id):
+            from ..model import SourceStatus
+            from ..near.rpc import RpcResult
+
+            return RpcResult(SourceStatus.OK, {})
+
+    class _FixedAdapter:
+        def __init__(self, body):
+            self._read = PolicyAdapter.from_fixture(body)
+            self.base_url = "https://provider.invalid"
+
+        def read_policy(self, agent_id):  # noqa: ARG002 - fixed read
+            return self._read
+
+    def _body(status="APPLIED", transfer=True):
+        return {
+            "agent_id": "treasury-agent",
+            "revision": 3,
+            "status": status,
+            "provider_policy_synced": True,
+            "frozen": False,
+            "native": {"near": {"sign_message": False, "transfer": transfer, "call": False}},
+        }
+
+    seed = bytes(range(32))
+    signer = "agent.testnet"
+    approved = "approved.testnet"
+    config = NETWORKS[NearNetwork.TESTNET]
+    policy = PolicyConfig(
+        policy_id="near-provider-policy-invariant",
+        name="near provider policy invariant",
+        version="1",
+        approved_destinations=frozenset({approved}),
+        services={
+            "svc": ServicePolicy(
+                service_id="svc",
+                allowed_operations=frozenset({"WITHDRAWAL"}),
+                allowed_chains=frozenset({"near-testnet"}),
+                allowed_assets=frozenset({"NEAR:NATIVE"}),
+                max_amount_per_transaction=Decimal("100"),
+                approval_threshold=Decimal("1000"),
+            )
+        },
+        per_transaction_limit=Decimal("100"),
+        approval_threshold=Decimal("1000"),
+        allow_unlisted_destinations=False,
+    )
+    guard = GuardService(
+        policy=policy,
+        authority=AuthorizationAuthority(
+            key=_INVARIANT_KEY, key_id="i", ephemeral=False, replay_store=InMemoryReplayStore()
+        ),
+    )
+    pub = "ed25519:" + _b58(ed25519.public_key(seed))
+
+    def _boundary(body):
+        rpc = _RecordingRpc(config)
+        boundary = NearExecutionBoundary(guard, config, rpc=rpc)
+        boundary._policy_adapter = _FixedAdapter(body)
+        boundary._provider_policy_agent_id = "treasury-agent"
+        boundary._policy_gate = ProviderPolicyGate(
+            boundary._policy_adapter, agent_id="treasury-agent", require=True, native_chain="near"
+        )
+        return boundary, rpc
+
+    def _prepare(boundary):
+        return boundary.prepare(
+            service_id="svc",
+            account_id=signer,
+            public_key=pub,
+            receiver_id=approved,  # operator policy allows this destination
+            asset_identifier="near:native",
+            amount_human="1",
+        )
+
+    # (a) a policy that is not in force must not authorize, and must not broadcast.
+    boundary, rpc = _boundary(_body(status="REQUESTED"))
+    prepared = _prepare(boundary)
+    if prepared.authorized:
+        return InvariantResult(
+            name,
+            False,
+            "a provider policy that is not in force still authorized the transfer",
+        )
+    import base64 as _base64
+
+    sig = _base64.b64encode(ed25519.sign(prepared.transaction.tx_hash_bytes, seed)).decode()
+    try:
+        boundary.broadcast(prepared, sig)
+    except ExecutionError:
+        pass
+    if rpc.broadcasts:
+        return InvariantResult(
+            name,
+            False,
+            "a transfer blocked by the provider policy was still broadcast",
+        )
+
+    # (b) a policy in force that enables the transfer must still authorize.
+    boundary, _ = _boundary(_body(status="APPLIED", transfer=True))
+    ok = _prepare(boundary)
+    if not ok.authorized:
+        return InvariantResult(
+            name,
+            False,
+            "an in-force provider policy that enables the transfer was refused",
+        )
+    return InvariantResult(
+        name,
+        True,
+        "the provider policy is enforced on the execution boundary and can only tighten it",
+    )
+
+
 def _custody_provider_policy_only_tightens():
     """The provider-policy layer can only tighten the guard's decision.
 
@@ -4023,6 +4204,9 @@ INVARIANTS: dict[str, Callable[[], InvariantResult]] = {
         _custody_tee_signing_requires_bound_attestation_and_settlement
     ),
     "custody_provider_policy_only_tightens": _custody_provider_policy_only_tightens,
+    "near_execution_enforces_the_provider_policy": (
+        _near_execution_enforces_the_provider_policy
+    ),
     "service_facing_routes_require_a_credential": (
         _service_facing_routes_require_a_credential
     ),
@@ -4088,6 +4272,7 @@ INVARIANT_DESCRIPTIONS: dict[str, str] = {
     "custody_authorization_is_bound_to_the_sent_operation": "A custody authorization is bound to the exact operation sent; substituting the recipient, amount, asset, network or service after authorization is refused before the provider is reached.",
     "custody_tee_signing_requires_bound_attestation_and_settlement": "TEE signing is claimed only when a genuine TDX attestation is cryptographically bound to the exact authorized operation and signing key and independent NEAR RPC settlement verification also holds; a provider success or an unbound quote never reaches TEE_SIGNING_VERIFIED.",
     "custody_provider_policy_only_tightens": "The independent NEAR provider (Agent API) policy gates a custody operation and can only tighten the guard's decision: a policy that is not in force, is stale, unreadable, frozen, or does not enable the native transfer blocks execution before the provider is reached, and an in-force policy that enables the transfer still authorizes.",
+    "near_execution_enforces_the_provider_policy": "The NEAR execution boundary enforces the independent provider (Agent API) policy and it can only tighten the operator decision: a policy that is not in force (or unreadable, stale, frozen, or for another agent) refuses authorization and nothing reaches the RPC, while an in-force policy that enables the native transfer still authorizes.",
     "service_facing_routes_require_a_credential": "Every guard route that consults the authenticated service identity is gated by the credential registry: with a registry configured, a request with no credential is refused (401) before any work, so a caller cannot adopt another service's identity by editing a field.",
     "public_demo_never_exposes_a_state_changing_route": "The keyless public demonstration is an exact allowlist of read-only routes; it never evaluates, signs, broadcasts or mutates state, and enabling it does not relax the API-key requirement on any sensitive route.",
     "agent_surface_is_sandbox_scoped": "The agent integration is sandbox-scoped: a sandbox credential resolves to a sandbox- identity, the sandbox policy registers no operator service, a cross-service request is refused, and the approval secret is separate from the API credential.",

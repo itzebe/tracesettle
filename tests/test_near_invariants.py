@@ -16,7 +16,7 @@ FIXTURE_DIR = pathlib.Path(__file__).resolve().parent.parent / "tracesettle" / "
 
 def test_near_invariants_are_registered():
     near = [name for name in inv.INVARIANTS if name.startswith("near_")]
-    assert len(near) == 16
+    assert len(near) == 17
     assert all(name in inv.INVARIANT_DESCRIPTIONS for name in near)
 
 
@@ -464,6 +464,25 @@ def test_new_invariants_are_registered():
         "enclave_signing_key_is_isolated_from_the_host",
         "tee_attestation_freshness_is_enforced",
         "provider_policy_reads_fail_closed_and_verify_identity",
+        "near_execution_enforces_the_provider_policy",
     ):
         assert name in inv.INVARIANTS
         assert name in inv.INVARIANT_DESCRIPTIONS
+
+
+def test_near_execution_provider_policy_invariant_notices_an_ignored_layer(monkeypatch):
+    """Mutation: if the boundary ignored the provider policy, the invariant must fail.
+
+    Neutralising ``_apply_provider_policy`` reproduces a boundary that consults
+    only the operator policy, so a not-in-force provider policy no longer blocks.
+    The invariant must notice that the second layer was dropped.
+    """
+    from tracesettle.near import execution as exec_mod
+
+    monkeypatch.setattr(
+        exec_mod.NearExecutionBoundary,
+        "_apply_provider_policy",
+        lambda self, decision: (decision, None),
+    )
+    result = inv.INVARIANTS["near_execution_enforces_the_provider_policy"]()
+    assert result.holds is False

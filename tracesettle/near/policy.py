@@ -730,3 +730,47 @@ def load_fixture(path: str) -> PolicyRead:
     with open(path, "r", encoding="utf-8") as handle:
         raw = json.load(handle)
     return PolicyAdapter.from_fixture(raw, detail=f"policy fixture loaded from {path}")
+
+
+class FixturePolicyAdapter:
+    """An adapter that always returns one fixed, labelled fixture read.
+
+    Used when the operator pins a local fixture instead of a live Agent API URL
+    (offline reproduction). It has the same ``read_policy`` shape as
+    :class:`PolicyAdapter` so a caller - including the provider-policy gate -
+    cannot tell the two apart, but the read it returns is marked
+    ``local_fixture=True`` and it never contacts a provider.
+    """
+
+    def __init__(self, read: PolicyRead) -> None:
+        self._read = read
+        #: Present so a caller can report the source honestly; a fixture has none.
+        self.base_url: str | None = None
+
+    def read_policy(self, agent_id: str) -> PolicyRead:  # noqa: ARG002 - fixed fixture
+        return self._read
+
+
+def adapter_from_config(config: Any, http_client: Any = None) -> Any:
+    """Build a policy adapter from server configuration, or ``None``.
+
+    Precedence matches the guard's own resolution: the operator's pinned fixture
+    first (offline reproduction), then a live Agent API URL. When neither is
+    configured the result is ``None``, so the provider-policy layer is reported
+    as *not applied* rather than invented. The API key is read only here and is
+    never logged or returned.
+    """
+    fixture = getattr(config, "NEAR_POLICY_FIXTURE", None)
+    if fixture:
+        return FixturePolicyAdapter(load_fixture(fixture))
+    base_url = getattr(config, "NEAR_AGENT_API_URL", None)
+    if base_url:
+        return PolicyAdapter(
+            base_url=base_url,
+            api_key=getattr(config, "NEAR_AGENT_API_KEY", None),
+            http_client=http_client,
+            expected_host=getattr(config, "NEAR_AGENT_API_EXPECTED_HOST", None),
+            expected_agent_id=getattr(config, "NEAR_AGENT_ID", None),
+            max_age_seconds=getattr(config, "NEAR_AGENT_POLICY_MAX_AGE_SECONDS", 0),
+        )
+    return None

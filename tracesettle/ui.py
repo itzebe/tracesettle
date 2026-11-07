@@ -1563,6 +1563,19 @@ def _build_lifecycle(guard_service: GuardService, *, upstream_cache: TtlCache | 
     return NearIntentsLifecycle(guard_service=guard_service, http_client=client, store=store)
 
 
+def _near_policy_adapter(http_client: Any = None) -> Any:
+    """Build the provider-policy adapter from server configuration, or ``None``.
+
+    Shared by the guard API and the NEAR execution boundary so a policy read is
+    resolved identically wherever it is enforced: the operator's pinned fixture
+    first, then a live Agent API URL. ``None`` means the layer is not configured,
+    which the caller reports honestly rather than inventing a policy.
+    """
+    from .near.policy import adapter_from_config
+
+    return adapter_from_config(config, http_client)
+
+
 def _build_near_execution(guard_service: GuardService) -> Any:
     """Build the NEAR execution boundary, or ``None`` when it is not enabled.
 
@@ -1625,6 +1638,9 @@ def _build_near_execution(guard_service: GuardService) -> Any:
         rpc=NearRpc(net_config, client=client),
         tee_authorizer=tee_authorizer,
         tee_provider=tee_provider,
+        policy_adapter=_near_policy_adapter(client),
+        provider_policy_agent_id=config.NEAR_AGENT_ID,
+        require_provider_policy=config.NEAR_REQUIRE_PROVIDER_POLICY,
     )
     # The durable pipeline wraps the boundary for the broadcast route: it records
     # every submission before it is sent (so an unknown outcome is resolved from

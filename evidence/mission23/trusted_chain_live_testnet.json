@@ -1,0 +1,27 @@
+{
+  "_provenance": "live",
+  "_note": "Real NEAR testnet execution through the trusted chain (authorization -> provider-policy gate -> TEE attestation -> sign -> broadcast -> independent verification). Captured 2026-11-06.",
+  "network": "testnet",
+  "genesis_fragment": "FWJ9kR6KFWoy...",
+  "amount_near": "0.01",
+  "amount_yocto": "10000000000000000000000",
+  "tx_hash": "3hWGsApcpJETnBT2ht4BrVE7FXhbSkmXNVHRJ8t6KKYM",
+  "explorer": "https://testnet.nearblocks.io/txns/3hWGsApcpJETnBT2ht4BrVE7FXhbSkmXNVHRJ8t6KKYM",
+  "signer": "ts-m22-0e4a21.testnet",
+  "receiver": "ts-m22-recv-5616a5.testnet",
+  "decision": "ALLOW",
+  "settlement_state": "VERIFIED",
+  "checks": {
+    "tx_hash_matches": true,
+    "signer_matches": true,
+    "receiver_matches": true,
+    "nonce_matches": true,
+    "final": "FINAL",
+    "execution_success": "success",
+    "transfer_amount_matches": true
+  },
+  "independent_reread": [
+    {"rpc": "https://rpc.testnet.near.org", "status": "SuccessValue", "final_execution_status": "FINAL"},
+    {"rpc": "https://rpc.testnet.fastnear.com", "status": "SuccessValue", "final_execution_status": "FINAL"}
+  ]
+}

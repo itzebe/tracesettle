@@ -592,6 +592,22 @@ def test_console_near_tab_has_a_learning_loop_panel():
     assert "never overrides the operator" in html
 
 
+def test_console_near_tab_shows_the_trusted_signing_chain():
+    """The chain from agent intent to a signature must be visible and honest."""
+    with running_server() as base:
+        _, body, _ = _request("GET", base + "/console")
+    html = _html(body)
+    assert "Trusted signing chain" in html
+    assert "/api/guard/near/execution" in html
+    # It states the links and that each can only tighten the decision.
+    assert "provider policy" in html.lower()
+    assert "hardware-attested signing boundary" in html.lower()
+    assert "settlement verification" in html.lower()
+    assert "tighten" in html.lower()
+    # It never fabricates a protection badge for an unconfigured link.
+    assert "not configured" in html
+
+
 def test_console_near_demo_destinations_match_the_real_default_policy():
     """The console's one-click demo must use a destination the real policy approves.
 
