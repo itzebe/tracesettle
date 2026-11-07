@@ -41,7 +41,36 @@ expected result, what actually happened, whether the signer was reached, and the
 The raw JSON is at `/api/guard/judge/scenarios`. The full HTTP surface is documented in
 `docs/API.md` in the repository.
 
-### 3. Read the code
+### 3. Connect your own agent
+
+The deployed site exposes a scoped, keyless **sandbox integration** so an agent
+you already operate can have a proposed payment independently evaluated:
+
+```bash
+# 1. Issue a short-lived credential. No key, no account, no wallet.
+curl -sS -X POST https://<deployment>/api/agent/connect \
+  -H 'Content-Type: application/json' -d '{"label":"my-agent"}'
+# -> { "service_id": "sandbox-my-agent", "api_credential": "...",
+#      "approval_secret": "...", "ttl_seconds": 3600, ... }
+
+# 2. Submit a payment intent. The decision is the real boundary's.
+curl -sS -X POST https://<deployment>/api/agent/evaluate \
+  -H 'X-Sandbox-Credential: <api_credential>' -H 'Content-Type: application/json' \
+  -d '{"transaction":{"operation":"WITHDRAWAL","chain":"base","asset":"USDC",
+       "amount":"50","destination":"0x1111111111111111111111111111111111111111"}}'
+# -> { "decision": "ALLOW", "authorizes_signing": true, "authorization": {...} }
+```
+
+The credential is scoped to a **fixed sandbox policy**: an approved destination is
+`ALLOW`, an unapproved one is `BLOCK` (with no authorization, so the signer is
+never reached), and an amount over the threshold is `REQUIRE_APPROVAL`. The
+credential cannot name an operator service, cannot sign a real transaction and
+cannot broadcast; execution is the simulated executor and says so. The
+machine-readable contract is at `/api/agent/openapi.json` and the scope at
+`/api/agent/config`. On the public site, the **Connect your own agent** button on
+`/evaluate` runs this same sequence in the browser.
+
+### 4. Read the code
 
 | Concern | File |
 | --- | --- |
@@ -51,7 +80,7 @@ The raw JSON is at `/api/guard/judge/scenarios`. The full HTTP surface is docume
 | Transaction-bound authorization | `tracesettle/guard/authorization.py` |
 | The signer that refuses before executing | `tracesettle/guard/signer.py` |
 | NEAR settlement verification | `tracesettle/near/verify.py` |
-| Structural invariants (54) | `tracesettle/guard/invariants.py` |
+| Structural invariants (55) | `tracesettle/guard/invariants.py` |
 
 ## What the ten scenarios prove
 
@@ -90,7 +119,7 @@ python3 -m tracesettle serve --host 127.0.0.1 --port 8000 &
 curl -s localhost:8000/api/guard/invariants | python3 -m json.tool | tail -5
 ```
 
-54 structural invariants are asserted by execution, not by prose. Each one is mutation-tested: a
+55 structural invariants are asserted by execution, not by prose. Each one is mutation-tested: a
 checker that cannot fail is treated as a defect. You can also read the statements next to the results.
 
 ## Run the full test suite

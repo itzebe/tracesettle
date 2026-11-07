@@ -63,6 +63,34 @@ subset of them. The state-changing NEAR routes (`.../agent-evaluate`,
 `.../execution/*`, `.../wallet/*`, `.../lifecycle*`, `.../custody/prepare`,
 `.../custody/execute`) always require a key or a service credential.
 
+## The agent integration
+
+A scoped, keyless sandbox integration lets an external agent (or an independent
+judge) submit payment intents to the real enforcement boundary. It is served only
+when `TRACESETTLE_PUBLIC_DEMO=1`; otherwise every `/api/agent/*` route is `404`.
+
+| Method | Path | Auth | Returns |
+| --- | --- | --- | --- |
+| POST | `/api/agent/connect` | none (rate-limited) | A short-lived sandbox credential |
+| POST | `/api/agent/evaluate` | sandbox credential | The enforcement decision (+ an authorization for `ALLOW`) |
+| POST | `/api/agent/execute` | sandbox credential | The signer result and the executor call count |
+| POST | `/api/agent/approval` | sandbox credential **+** approval secret | A payload-bound approval |
+| GET | `/api/agent/evidence` | sandbox credential | This credential's own decisions and receipts |
+| POST | `/api/agent/revoke` | sandbox credential | Revokes the credential |
+| GET | `/api/agent/settlement` | none | The reference NEAR testnet settlement read |
+| GET | `/api/agent/config` | none | Scope, limits and the honest-scope note |
+| GET | `/api/agent/openapi.json` | none | The OpenAPI 3.1 contract |
+
+The credential is presented in the `X-Sandbox-Credential` header. It resolves to a
+`sandbox-<label>` identity and can only ever reach the **sandbox policy** — a
+fixed set of approved destinations with a low per-transaction limit and an
+approval threshold. A request that names any other `service_id` is refused `403`.
+The approval secret is **separate** from the API credential, so an agent cannot
+self-approve. The credential is durable (backed by the guard-state store, so it
+survives a restart), expiring, revocable, and rate-limited per client IP and per
+credential. Execution uses the simulated executor: nothing is signed or
+broadcast, and every response states this.
+
 ## The evaluation matrix
 
 ```sh

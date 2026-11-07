@@ -31,6 +31,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from . import DISCLAIMER, __version__, config
+from .agentapi import AgentAPI
 from .cache import TtlCache
 from .guard.api import SERVICE_FACING_POST_PATHS, GuardAPI
 from .guard.service import GuardService
@@ -105,6 +106,25 @@ PUBLIC_DEMO_ROUTES = frozenset(
         "/api/guard/near/behaviours",
         "/api/guard/near/prompt-injection",
         "/api/guard/near/settlement-check",
+    }
+)
+
+#: The agent-facing sandbox integration routes. Keyless (when the public
+#: demonstration is enabled) but gated by a short-lived sandbox credential, so an
+#: independent judge can connect an agent without the operator's API key. Kept
+#: separate from :data:`PUBLIC_DEMO_ROUTES` so the guard-route invariant that
+#: asserts the keyless guard routes are read-only keeps its exact meaning.
+AGENT_ROUTES = frozenset(
+    {
+        "/api/agent/connect",
+        "/api/agent/evaluate",
+        "/api/agent/execute",
+        "/api/agent/approval",
+        "/api/agent/evidence",
+        "/api/agent/revoke",
+        "/api/agent/settlement",
+        "/api/agent/config",
+        "/api/agent/openapi.json",
     }
 )
 
@@ -955,7 +975,20 @@ class Handler(BaseHTTPRequestHandler):
         keyless_demo = (
             config.PUBLIC_DEMO_ENABLED and path is not None and path in PUBLIC_DEMO_ROUTES
         )
-        if not keyless_demo and not self._authorized():
+        # The agent-facing sandbox routes are also keyless when the demonstration
+        # is enabled. They are gated by a short-lived sandbox credential inside
+        # :class:`~tracesettle.agentapi.AgentAPI` (or, for ``connect``, by the
+        # per-client rate limit charged above). The credential can only ever
+        # reach the sandbox policy; it cannot name an operator service or reach a
+        # signer without a valid authorization. They are kept out of
+        # ``PUBLIC_DEMO_ROUTES`` so the guard-route invariant keeps its exact
+        # meaning.
+        keyless_agent = (
+            config.PUBLIC_DEMO_ENABLED
+            and path is not None
+            and path in AGENT_ROUTES
+        )
+        if not keyless_demo and not keyless_agent and not self._authorized():
             self._json(401, {"error": "unauthorized"}, {"WWW-Authenticate": "X-API-Key"})
             return False
         return True
@@ -1028,6 +1061,61 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- routes -------------------------------------------------------------
 
+    def _agent_headers(self) -> dict[str, str]:
+        return {
+            "X-Sandbox-Credential": self.headers.get("X-Sandbox-Credential") or "",
+            "X-Approval-Secret": self.headers.get("X-Approval-Secret") or "",
+        }
+
+    def _handle_agent_get(self, path: str) -> None:
+        """Serve a read-only agent route. Public demo must be enabled."""
+        api = getattr(self.server, "agent_api", None)  # type: ignore[attr-defined]
+        if api is None:
+            self._json(404, {"error": "not found"})
+            return
+        if not self._guard_allowed(path):
+            return
+        parsed = urlparse(self.path)
+        params = {k: v[0] for k, v in parse_qs(parsed.query).items()}
+        response = api.get(path, params, self._agent_headers())
+        self._json(response.status, response.payload, response.headers)
+
+    def _handle_agent_post(self, parsed: Any, path: str) -> None:
+        """Serve a write agent route: rate limit, then dispatch.
+
+        Authentication is by the sandbox credential header, resolved inside the
+        API against the durable store, so there is no separate key gate here.
+        """
+        api = getattr(self.server, "agent_api", None)  # type: ignore[attr-defined]
+        if api is None:
+            self._json(404, {"error": "not found"})
+            return
+        if not self._guard_allowed(path):
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            self._json(400, {"error": "invalid Content-Length"})
+            return
+        if length > config.GUARD_MAX_BODY_BYTES:
+            self._json(413, {"error": "request body too large"})
+            return
+        body: Any = {}
+        if length > 0:
+            try:
+                raw = self.rfile.read(length)
+            except (TimeoutError, OSError):
+                self._json(408, {"error": "request body read timed out"})
+                return
+            try:
+                body = json.loads(raw.decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                self._json(400, {"error": "request body must be valid JSON"})
+                return
+        params = {k: v[0] for k, v in parse_qs(parsed.query).items()}
+        response = api.post(path, params, body, self._agent_headers())
+        self._json(response.status, response.payload, response.headers)
+
     def _index_page(self) -> bytes:
         """Render the landing page, pointing at whichever demonstration exists.
 
@@ -1042,6 +1130,7 @@ class Handler(BaseHTTPRequestHandler):
             site_nav = (
                 '<a href="demo">Demo</a>'
                 '<a href="evaluate">Evaluate</a>'
+                '<a href="evaluate#connect">Connect an agent</a>'
                 '<a href="JUDGE_GUIDE">Judge guide</a>'
                 '<a href="console">Console</a>'
             )
@@ -1129,6 +1218,8 @@ class Handler(BaseHTTPRequestHandler):
             self._serve_static(path)
         elif path == "/api/health":
             self._json(200, {"status": "ok", "tool": "TRACESETTLE", "version": __version__, "read_only": True})
+        elif path.startswith("/api/agent/"):
+            self._handle_agent_get(path)
         elif path.startswith("/api/guard/"):
             # Guard reads expose operational state, not user data, but they are
             # still gated by the same API key as the investigate endpoint when
@@ -1152,6 +1243,9 @@ class Handler(BaseHTTPRequestHandler):
         path = parsed.path
         if path.startswith("/api/guard/"):
             self._handle_guard_post(parsed, path)
+            return
+        if path.startswith("/api/agent/"):
+            self._handle_agent_post(parsed, path)
             return
         if path != "/api/investigate":
             self._json(404, {"error": "not found"})
@@ -1340,6 +1434,28 @@ def _build_guard_service() -> GuardService:
         approval_authority=_build_approval_authority(),
         counterparty_reader=_build_counterparty_reader(),
     )
+
+
+def _build_agent_api(guard_service: GuardService) -> AgentAPI:
+    """Build the agent-facing sandbox integration API.
+
+    It reuses the guard's durable state store (so sandbox credentials survive a
+    restart and are shared across instances) and exposes the reference NEAR
+    testnet settlement check as its read-only settlement reader. The sandbox
+    authority derives per-credential authorization and approval keys from a
+    server-side master key that the client never sees.
+    """
+    from .guard.sandbox import SandboxAuthority
+
+    state_store = getattr(guard_service, "state_store", None)
+    authority = SandboxAuthority(state_store)
+
+    def _settlement_reader() -> Any:
+        from .near.settlement_check import verify_reference_settlement
+
+        return verify_reference_settlement()
+
+    return AgentAPI(authority, settlement_reader=_settlement_reader)
 
 
 def _build_approval_authority() -> Any:
@@ -1736,6 +1852,12 @@ class InvestigationServer(ThreadingHTTPServer):
         )
         self.guard_limiter = guard_limiter or TokenBucketLimiter(
             config.GUARD_RATE_LIMIT_PER_MINUTE, config.GUARD_RATE_LIMIT_BURST
+        )
+        # The agent-facing sandbox integration. Built only when the operator
+        # opted into the public demonstration; otherwise the routes 404, so an
+        # operator deployment never exposes an agent surface it did not ask for.
+        self.agent_api = (
+            _build_agent_api(self.guard_service) if config.PUBLIC_DEMO_ENABLED else None
         )
         # Per-service credential registry. When no argument is supplied it is
         # loaded from configuration; an explicit ``None`` disables service

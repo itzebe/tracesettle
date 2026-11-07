@@ -274,6 +274,25 @@ def test_landing_page_links_to_evaluate_when_the_demo_is_enabled():
     assert "Test TRACESETTLE" in body
 
 
+def test_evaluate_page_offers_the_agent_integration_when_the_demo_is_enabled():
+    """The connect-an-agent section points at the real sandbox surface."""
+    with running_server(public_demo=True) as base:
+        _, body, _ = _get(base + "/evaluate")
+    assert "Connect your own agent" in body
+    assert 'id="connect-run"' in body
+    assert "api/agent/connect" in body
+    assert "api/agent/evaluate" in body
+    assert "api/agent/openapi.json" in body
+    # It must not claim to sign or broadcast.
+    assert "Nothing is broadcast" in body
+
+
+def test_landing_nav_links_to_connect_an_agent_when_the_demo_is_enabled():
+    with running_server(public_demo=True) as base:
+        _, body, _ = _get(base + "/")
+    assert "evaluate#connect" in body
+
+
 # --- the Markdown renderer --------------------------------------------------
 
 

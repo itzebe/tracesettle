@@ -3570,6 +3570,122 @@ def _hostile_input_never_crashes_the_guard() -> InvariantResult:
     )
 
 
+def _agent_surface_is_sandbox_scoped() -> InvariantResult:
+    """The agent integration can only ever reach the sandbox policy.
+
+    An external agent (and an independent judge) drives TRACESETTLE through
+    ``/api/agent/*``. That surface must be incapable of acting on an operator
+    service: a sandbox credential resolves to a ``sandbox-`` identity, the
+    sandbox policy registers only that identity, and a request naming any other
+    service is refused. This checks, by exercising the real objects:
+
+    * every agent route is under ``/api/agent/`` and none is in the guard's
+      keyless read-only allowlist (so the guard invariant keeps its meaning);
+    * a credential's identity is prefixed ``sandbox-`` and the sandbox policy
+      registers no operator service;
+    * a request that names another service is refused ``403``;
+    * a sandbox credential cannot reach the operator guard service (its decisions
+      carry only the sandbox policy id);
+    * the approval secret is distinct from the API credential, so an agent cannot
+      self-approve.
+
+    A mutation that let a sandbox credential name an operator service, or that
+    keyed the approval authority on the API credential, would fail this check.
+    """
+    from ..agentapi import AgentAPI
+    from ..guard.sandbox import SandboxAuthority, sandbox_service_id
+    from ..ui import AGENT_ROUTES, PUBLIC_DEMO_ROUTES
+
+    name = "agent_surface_is_sandbox_scoped"
+
+    for path in AGENT_ROUTES:
+        if not path.startswith("/api/agent/"):
+            return InvariantResult(name, False, f"{path} is not an /api/agent route")
+        if path in PUBLIC_DEMO_ROUTES:
+            return InvariantResult(
+                name, False, f"{path} is also on the keyless guard allowlist"
+            )
+
+    authority = SandboxAuthority(None)
+    credential = authority.mint(label="invariant-probe")
+    service_id = credential.service_id
+    if not service_id.startswith("sandbox-"):
+        return InvariantResult(name, False, f"identity {service_id!r} is not sandbox-prefixed")
+    if sandbox_service_id("x") != "sandbox-x":
+        return InvariantResult(name, False, "sandbox_service_id does not prefix with sandbox-")
+
+    service = authority.build_service(credential.credential_id, service_id)
+    policy = service.service.policy
+    if set(policy.services) != {service_id}:
+        return InvariantResult(
+            name, False, f"the sandbox policy registers {sorted(policy.services)}, not only {service_id}"
+        )
+    if any(s.startswith("sandbox-") is False for s in policy.services):
+        return InvariantResult(name, False, "the sandbox policy registers a non-sandbox service")
+
+    # A request naming another service must be refused by the API.
+    api = AgentAPI(authority)
+    response = api.post(
+        "/api/agent/evaluate",
+        {},
+        {
+            "service_id": "treasury-agent",
+            "operation": "WITHDRAWAL",
+            "chain": "base",
+            "asset": "USDC",
+            "amount": "1",
+            "destination": "0x1111111111111111111111111111111111111111",
+        },
+        {"X-Sandbox-Credential": credential.secret},
+    )
+    if response.status != 403:
+        return InvariantResult(
+            name, False, f"a cross-service request answered {response.status}, not 403"
+        )
+
+    # A same-service request must be decided by the sandbox policy only.
+    ok = api.post(
+        "/api/agent/evaluate",
+        {},
+        {
+            "service_id": service_id,
+            "operation": "WITHDRAWAL",
+            "chain": "base",
+            "asset": "USDC",
+            "amount": "1",
+            "destination": "0x1111111111111111111111111111111111111111",
+        },
+        {"X-Sandbox-Credential": credential.secret},
+    )
+    if ok.status != 200:
+        return InvariantResult(name, False, f"a sandbox request answered {ok.status}")
+    request_identity = (ok.payload.get("request") or {}).get("service_id")
+    if request_identity != service_id:
+        # The decision must be evaluated against the sandbox identity, never an
+        # operator one.
+        return InvariantResult(
+            name,
+            False,
+            f"the decision was evaluated for {request_identity!r}, not the sandbox identity",
+        )
+
+    # The approval secret must be distinct from the API credential.
+    if authority.resolve_approval(credential.credential_id, credential.secret):
+        return InvariantResult(
+            name, False, "the API credential was accepted as the approval secret"
+        )
+    if not authority.resolve_approval(credential.credential_id, credential.approval_secret):
+        return InvariantResult(name, False, "the approval secret was not accepted")
+
+    return InvariantResult(
+        name,
+        True,
+        f"the {len(AGENT_ROUTES)} agent routes are sandbox-scoped: a credential resolves to a "
+        "sandbox- identity, the sandbox policy registers no operator service, a cross-service "
+        "request is refused, and the approval secret is separate from the API credential",
+    )
+
+
 INVARIANTS: dict[str, Callable[[], InvariantResult]] = {
     "non_allow_never_authorizes": _non_allow_never_authorizes,
     "refusal_never_reaches_the_executor": _refusal_never_reaches_the_executor,
@@ -3670,6 +3786,7 @@ INVARIANTS: dict[str, Callable[[], InvariantResult]] = {
     "public_demo_never_exposes_a_state_changing_route": (
         _public_demo_never_exposes_a_state_changing_route
     ),
+    "agent_surface_is_sandbox_scoped": _agent_surface_is_sandbox_scoped,
     "hostile_input_never_crashes_the_guard": _hostile_input_never_crashes_the_guard,
 }
 
@@ -3728,6 +3845,7 @@ INVARIANT_DESCRIPTIONS: dict[str, str] = {
     "custody_tee_signing_requires_bound_attestation_and_settlement": "TEE signing is claimed only when a genuine TDX attestation is cryptographically bound to the exact authorized operation and signing key and independent NEAR RPC settlement verification also holds; a provider success or an unbound quote never reaches TEE_SIGNING_VERIFIED.",
     "service_facing_routes_require_a_credential": "Every guard route that consults the authenticated service identity is gated by the credential registry: with a registry configured, a request with no credential is refused (401) before any work, so a caller cannot adopt another service's identity by editing a field.",
     "public_demo_never_exposes_a_state_changing_route": "The keyless public demonstration is an exact allowlist of read-only routes; it never evaluates, signs, broadcasts or mutates state, and enabling it does not relax the API-key requirement on any sensitive route.",
+    "agent_surface_is_sandbox_scoped": "The agent integration is sandbox-scoped: a sandbox credential resolves to a sandbox- identity, the sandbox policy registers no operator service, a cross-service request is refused, and the approval secret is separate from the API credential.",
     "hostile_input_never_crashes_the_guard": "A malformed request is always a decision or a typed refusal, never an unhandled exception: a non-token authorization, an absurd amount exponent and a non-string destination each fail closed.",
 }
 
