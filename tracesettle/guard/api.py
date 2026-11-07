@@ -864,6 +864,11 @@ class GuardAPI:
                         "verified attestation a precondition of signing."
                     ),
                 },
+                "provider_policy_gate": (
+                    self.near_execution.provider_policy_info()
+                    if hasattr(self.near_execution, "provider_policy_info")
+                    else {"applied": False, "note": "not reported by this boundary"}
+                ),
                 "note": (
                     "TraceSettle builds the transaction and independently verifies "
                     "settlement. It never holds a private key: the wallet signs."
@@ -1675,29 +1680,24 @@ class GuardAPI:
         a permissive one and turn a BLOCK into an ALLOW.
         """
         from .. import config
-        from ..near.policy import PolicyAdapter, load_fixture
+        from ..near.policy import adapter_from_config, load_fixture
 
         allow_client_selection = bool(config.NEAR_ALLOW_CLIENT_POLICY_SELECTION)
 
         fixture = body.get("policy_fixture") if allow_client_selection else None
         if isinstance(fixture, str) and fixture.strip():
             return load_fixture(fixture.strip())
-        if config.NEAR_POLICY_FIXTURE:
-            return load_fixture(config.NEAR_POLICY_FIXTURE)
-        if config.NEAR_AGENT_API_URL:
-            adapter = PolicyAdapter(
-                base_url=config.NEAR_AGENT_API_URL,
-                api_key=config.NEAR_AGENT_API_KEY,
-                http_client=self.service.http_client,
-                expected_host=config.NEAR_AGENT_API_EXPECTED_HOST,
-                expected_agent_id=config.NEAR_AGENT_ID,
-                max_age_seconds=config.NEAR_AGENT_POLICY_MAX_AGE_SECONDS,
-            )
-            agent_id = (
-                body.get("agent_id") if allow_client_selection else None
-            ) or config.NEAR_AGENT_ID
-            return adapter.read_policy(str(agent_id))
-        return None
+        # Server-side resolution is shared with the execution boundary, so a
+        # policy is read the same way wherever it is enforced (operator fixture
+        # first, then a live Agent API URL). A request may name an agent id only
+        # under the explicit client-selection affordance.
+        adapter = adapter_from_config(config, self.service.http_client)
+        if adapter is None:
+            return None
+        agent_id = (
+            body.get("agent_id") if allow_client_selection else None
+        ) or config.NEAR_AGENT_ID
+        return adapter.read_policy(str(agent_id))
 
     @staticmethod
     def _near_access_key(body: Any) -> Any:

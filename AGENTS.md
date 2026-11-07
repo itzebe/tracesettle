@@ -2317,3 +2317,51 @@ the provider-policy gate are untouched; runtime stays standard-library only.
 - **Still credential-blocked (not code gaps):** the live Agent API provider-policy
   read (needs a paid/real `X-API-Key`) and a live OutLayer custody transfer (needs
   a `wk_` key). Both are reported as limitations, never as production-proven.
+
+## Trusted execution chain: provider policy enforced on the main NEAR boundary (2026-11-06)
+
+Mission 23 closed the last gap in the "trusted execution chain": the independent
+provider (NEAR Intents Agent API) policy was enforced only on the OutLayer custody
+path, not on the native NEAR execution boundary that the wallet flow uses. It is
+now enforced on both, and the whole chain is surfaced on the console.
+
+- **Provider-policy gate now fronts `NearExecutionBoundary`.** `prepare()` and
+  `prepare_wallet_operation()` run the gate after the guard and fold its verdict
+  with `combine_provider_policy`, so the layer can only ever **tighten** the
+  decision and a non-ALLOW gate result discards any authorization. A policy that
+  is not `APPLIED`, not provider-synced, stale, frozen, unreadable, malformed,
+  for another agent, or that does not enable `native.near.transfer` refuses
+  authorization and nothing reaches the signer. A **required** layer with no
+  adapter is a hard `ExecutionError`, never a silent pass.
+- **Shared config-driven adapter.** `near/policy.py` gained
+  `adapter_from_config()`, `load_fixture()`, `PolicyAdapter.from_fixture()`, so the
+  guard API and the execution boundary resolve the provider policy the same way
+  (no circular import). `ui._build_near_execution()` wires the adapter from
+  `NEAR_AGENT_API_URL`/`_API_KEY`/`_AGENT_ID`.
+- **Prepared operations carry the layer's provenance.** `PreparedOperation`
+  gained `execution_id`; `PreparedWalletOperation` gained `provider_policy` (and
+  `to_dict`). `GET /api/guard/near/execution` reports a `provider_policy_gate`
+  block (`applied`, `agent_id`, `note`) — honest `applied: false` when unset.
+- **Console.** The NEAR tab gains a **Trusted signing chain** panel that reports
+  each link (authorization, provider policy, hardware-attested signing boundary,
+  settlement verification) and its real configured state, never a fabricated
+  protection badge.
+- **New invariant (58 total):** `near_execution_enforces_the_provider_policy`.
+  Two probes (a not-in-force policy must block and never broadcast; an in-force
+  policy that enables the transfer must still authorize), so it is not a blanket
+  refusal. Mutation-tested: neutralising `_apply_provider_policy` fails it.
+- **New tests:** `tests/test_near_provider_policy_enforcement.py` (12),
+  3 API tests in `tests/test_near_execution_api.py`, the invariant + mutation test
+  in `tests/test_near_invariants.py`, and a console test in `tests/test_guard_ui.py`.
+- **Counts:** **1755 passed, 30 skipped** filesystem-only (1785 collected);
+  pyflakes clean; compileall OK; offline demo byte-identical (md5 `4864f13c…`);
+  near demo byte-identical (md5 `fc2949ef…`); 58/58 invariants hold.
+- **Live-verified this session:** a real 0.01 NEAR **testnet** transfer through
+  the real pipeline (`3hWGsApcpJETnBT2ht4BrVE7FXhbSkmXNVHRJ8t6KKYM`,
+  `ts-m22-0e4a21.testnet` -> `ts-m22-recv-5616a5.testnet`), settlement `VERIFIED`
+  with all seven checks ok, re-read `FINAL`/`SuccessValue` from two independent
+  public testnet RPCs (`rpc.testnet.near.org`, `rpc.testnet.fastnear.com`).
+  Captured at `evidence/mission23/trusted_chain_live_testnet.json`.
+- **Still credential-blocked (not code gaps):** a *successful* live Agent API
+  provider-policy read needs a real `X-API-Key`; without it the adapter reports
+  `UNCONFIGURED` and the operator policy governs. Reported as a limitation.

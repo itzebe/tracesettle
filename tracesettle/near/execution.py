@@ -55,6 +55,7 @@ from .access_keys import (
 )
 from .assets import AssetError, NearAsset, from_base_units, resolve_asset, to_base_units, verify_decimals
 from .networks import NetworkConfig, NetworkError, NearNetwork, parse_network, verify_network_identity
+from .provider_policy_gate import ProviderPolicyDecision, combine_provider_policy
 from .rpc import NearRpc
 from .tee_execution import (
     ExecutionState,
@@ -122,6 +123,8 @@ class PreparedOperation:
     tee_nonce: str | None = None
     #: The verified attestation binding, once it has been established.
     tee_binding: Any = None
+    #: The independent provider-policy verdict, when the second layer is applied.
+    provider_policy: Any = None
 
     @property
     def authorized(self) -> bool:
@@ -138,6 +141,9 @@ class PreparedOperation:
             "execution_id": self.execution_id,
             "tee_nonce": self.tee_nonce,
             "tee_binding": self.tee_binding.to_dict() if self.tee_binding is not None else None,
+            "provider_policy": (
+                self.provider_policy.to_dict() if self.provider_policy is not None else None
+            ),
         }
 
 
@@ -183,6 +189,8 @@ class PreparedWalletOperation:
     authorization: Any = None
     authorization_id: str | None = None
     binding: dict[str, str] = field(default_factory=dict)
+    #: The independent provider-policy verdict, when the second layer is applied.
+    provider_policy: Any = None
 
     @property
     def authorized(self) -> bool:
@@ -204,6 +212,9 @@ class PreparedWalletOperation:
             "authorization_id": self.authorization_id,
             "binding": dict(self.binding),
             "wallet_request": self.wallet_request,
+            "provider_policy": (
+                self.provider_policy.to_dict() if self.provider_policy is not None else None
+            ),
         }
 
 
@@ -345,6 +356,9 @@ class NearExecutionBoundary:
         rpc: NearRpc | None = None,
         tee_authorizer: Any = None,
         tee_provider: Any = None,
+        policy_adapter: Any = None,
+        provider_policy_agent_id: str = "",
+        require_provider_policy: bool = False,
     ) -> None:
         self.guard = guard
         self.config = config
@@ -355,6 +369,81 @@ class NearExecutionBoundary:
         # (``TRACESETTLE_NEAR_TEE_REQUIRED=1``).
         self.tee_authorizer = tee_authorizer
         self.tee_provider = tee_provider
+        # The independent provider-policy layer (NEAR Intents Agent API). It is a
+        # second policy the agent's operator holds, distinct from this server's
+        # operator policy, and it can only ever *tighten* a decision. When an
+        # adapter and an agent id are supplied the gate reads the live policy and
+        # every failure to establish it (unreadable, stale, not applied, frozen,
+        # wrong agent) resolves to HOLD/BLOCK - never to an authorization. With
+        # ``require_provider_policy`` set but no adapter, authorization refuses
+        # outright rather than silently dropping the second layer.
+        self._policy_adapter = policy_adapter
+        self._provider_policy_agent_id = provider_policy_agent_id
+        self._require_provider_policy = bool(require_provider_policy)
+        self._policy_gate = None
+        if policy_adapter is not None and provider_policy_agent_id:
+            from .provider_policy_gate import ProviderPolicyGate
+
+            self._policy_gate = ProviderPolicyGate(
+                policy_adapter,
+                agent_id=provider_policy_agent_id,
+                require=self._require_provider_policy,
+                native_chain="near",
+            )
+
+    def provider_policy_info(self) -> dict[str, Any]:
+        """Report whether the provider-policy layer is applied, honestly.
+
+        ``applied`` is true only when a gate exists (adapter + agent id). A layer
+        that is required but not constructed is reported as not applied and the
+        boundary refuses to authorize, so the state is never mistaken for
+        protection.
+        """
+        if self._policy_gate is not None:
+            return {
+                "applied": True,
+                "agent_id": self._provider_policy_agent_id,
+                "required": self._require_provider_policy,
+                "source": "live" if getattr(self._policy_adapter, "base_url", None) else "fixture",
+                "note": (
+                    "The independent NEAR Intents provider (Agent API) policy is read and must "
+                    "be in force before an operation is authorized; it can only tighten the "
+                    "operator decision."
+                ),
+            }
+        return {
+            "applied": False,
+            "required": self._require_provider_policy,
+            "note": (
+                "The independent provider policy is REQUIRED but no policy adapter or agent id "
+                "is configured, so authorization is refused. Set "
+                "TRACESETTLE_NEAR_AGENT_API_URL/_KEY and TRACESETTLE_NEAR_AGENT_ID."
+                if self._require_provider_policy
+                else (
+                    "No provider-policy adapter is configured, so the independent NEAR provider "
+                    "policy is NOT consulted; the operator policy alone decides."
+                )
+            ),
+        }
+
+    def _apply_provider_policy(self, decision: GuardDecision) -> tuple[GuardDecision, Any]:
+        """Fold the provider-policy layer into a guard decision, never loosening it.
+
+        A configured gate reads the provider policy and can only tighten the
+        outcome; its verdict is returned so the caller can persist the provenance.
+        When the layer is required but not constructed, authorization is refused
+        with an explicit error rather than silently falling back to the operator
+        policy alone.
+        """
+        if self._policy_gate is None:
+            if self._require_provider_policy:
+                raise ExecutionError(
+                    "the independent NEAR provider policy is required but no policy adapter or "
+                    "agent id is configured; refusing to authorize without the second policy layer"
+                )
+            return decision, None
+        gate_decision: ProviderPolicyDecision = self._policy_gate.evaluate()
+        return combine_provider_policy(decision, gate_decision), gate_decision
 
     @property
     def tee_required(self) -> bool:
@@ -654,6 +743,11 @@ class NearExecutionBoundary:
             transaction_digest=tx.payload_fingerprint(),
         )
         decision = self.guard.evaluate(request)
+        # The independent provider-policy layer. It runs after the guard and can
+        # only tighten the outcome; a policy that is not in force, unreadable,
+        # stale, frozen, or for another agent yields HOLD/BLOCK and discards any
+        # authorization the guard issued, so no token can reach a signer.
+        decision, provider_policy = self._apply_provider_policy(decision)
 
         authorization = None
         authorization_id = None
@@ -670,6 +764,7 @@ class NearExecutionBoundary:
             # The binding is recomputed from the *final* transaction, so it is
             # exactly the parameter set a signature will be checked against.
             binding=tx.guard_canonical_fields(),
+            provider_policy=provider_policy,
         )
         # When the TEE gate is on, an authorized operation gets an execution
         # record immediately, so the attestation has an exact digest to bind to.
@@ -764,6 +859,10 @@ class NearExecutionBoundary:
             simulated=simulated,
         )
         decision = self.guard.evaluate(request)
+        # The independent provider-policy layer: it can only tighten the outcome,
+        # and a policy that is not in force / unreadable / stale / frozen discards
+        # any authorization the guard issued.
+        decision, provider_policy = self._apply_provider_policy(decision)
         authorization = None
         authorization_id = None
         if decision.decision is Decision.ALLOW and decision.authorization is not None:
@@ -783,6 +882,7 @@ class NearExecutionBoundary:
             wallet_request=wallet_request,
             authorization=authorization,
             authorization_id=authorization_id,
+            provider_policy=provider_policy,
         )
         prepared.binding = self.wallet_binding_fields(prepared)
         return prepared

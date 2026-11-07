@@ -356,6 +356,18 @@ CONSOLE_HTML = """<!DOCTYPE html>
     </div>
 
     <div class="panel">
+      <h2>Trusted signing chain</h2>
+      <p class="small">The chain that stands between an agent's payment intent and a signature:
+        an exact-transaction <strong>authorization</strong>, an independent
+        <strong>provider policy</strong> (the NEAR Intents Agent API policy the agent's operator
+        holds), a <strong>hardware-attested signing boundary</strong>, and independent
+        <strong>settlement verification</strong>. Each link can only <em>tighten</em> the decision
+        before it, and any link that cannot be established fails closed. This panel reports which
+        links are actually configured on this deployment — never a fabricated protection badge.</p>
+      <div id="near-chain"></div>
+    </div>
+
+    <div class="panel">
       <h2>Verifiable execution (Intel TDX attestation)</h2>
       <p class="small">The NEAR AI Cloud gateway runs inside an Intel TDX confidential VM. TraceSettle
         fetches the gateway's <strong>real</strong> hardware quote and verifies it locally against the
@@ -842,6 +854,7 @@ async function loadNear() {
   keysEl.innerHTML = loading("Loading access-key analysis…");
   attacksEl.innerHTML = "";
   loadWallet();
+  loadTrustedChain();
   try {
     const scope = await api("GET", "/api/guard/near/policy-scope");
     const rows = Object.keys(scope.scope).map((name) => {
@@ -1010,6 +1023,45 @@ async function runAgentDemo() {
       '<div class="grid two">' +
       card("Injected redirect (attacker)", data.malicious) +
       card("Approved payment", data.legitimate) + "</div>";
+  } catch (err) { el.innerHTML = '<div class="note bad">' + esc(err.message) + "</div>"; }
+}
+
+async function loadTrustedChain() {
+  const el = document.getElementById("near-chain");
+  if (!el) return;
+  el.innerHTML = loading("Loading the trusted signing chain…");
+  const link = (label, applied, note) =>
+    '<tr><td>' + esc(label) + '</td><td>' +
+    (applied ? '<span class="small ok">configured</span>'
+             : '<span class="small sim">not configured</span>') +
+    '</td><td class="small">' + esc(note) + "</td></tr>";
+  try {
+    const exec = await api("GET", "/api/guard/near/execution");
+    if (!exec.enabled) {
+      el.innerHTML = '<div class="note sim">' + esc(exec.note ||
+        "The NEAR execution boundary is disabled on this deployment.") + "</div>";
+      return;
+    }
+    const tee = exec.tee_gate || {};
+    const pp = exec.provider_policy_gate || {};
+    const rows =
+      link("Authorization (exact transaction binding)", true,
+        "Every operation is evaluated against the operator policy and bound to the exact bytes; " +
+        "a substituted recipient, amount or action is refused.") +
+      link("Provider policy (independent Agent API layer)", pp.applied, pp.note || "—") +
+      link("Hardware-attested signing boundary", tee.enabled,
+        tee.enabled
+          ? (tee.required
+              ? "Required: a verified Intel TDX attestation bound to the transaction must exist " +
+                "before a signature is accepted."
+              : "Configured but not required; a signature does not need an attestation.")
+          : (tee.note || "No TEE gate configured.")) +
+      link("Independent settlement verification", true,
+        "After broadcast the on-chain record is read back and checked against the authorized " +
+        "intent; a provider success alone never yields VERIFIED.");
+    el.innerHTML = '<table class="table"><thead><tr><th>Link</th><th>State</th>' +
+      "<th>What it does</th></tr></thead><tbody>" + rows + "</tbody></table>" +
+      '<div class="note sim">' + esc(exec.note || "") + "</div>";
   } catch (err) { el.innerHTML = '<div class="note bad">' + esc(err.message) + "</div>"; }
 }
 

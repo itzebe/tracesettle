@@ -69,6 +69,46 @@ def test_info_reports_the_boundary_holds_no_key():
     assert info.payload["network"]["network"] == "testnet"
 
 
+def test_info_reports_the_provider_policy_gate_honestly():
+    """With no adapter configured, the layer is reported not applied, never implied."""
+    api, _, _ = _api()
+    info = api.dispatch("GET", "/api/guard/near/execution", {}, None)
+    gate = info.payload["provider_policy_gate"]
+    assert gate["applied"] is False
+    assert "note" in gate
+
+
+def test_info_reports_the_provider_policy_gate_when_configured():
+    from tracesettle.near.policy import PolicyAdapter
+    from tracesettle.near.provider_policy_gate import ProviderPolicyGate
+
+    api, _, _ = _api()
+
+    class _Fixed:
+        base_url = "https://provider.invalid"
+
+        def read_policy(self, agent_id):  # noqa: ARG002
+            return PolicyAdapter.from_fixture(
+                {
+                    "agent_id": "treasury-agent",
+                    "revision": 1,
+                    "status": "APPLIED",
+                    "provider_policy_synced": True,
+                    "native": {"near": {"transfer": True}},
+                }
+            )
+
+    api.near_execution._policy_adapter = _Fixed()
+    api.near_execution._provider_policy_agent_id = "treasury-agent"
+    api.near_execution._policy_gate = ProviderPolicyGate(
+        api.near_execution._policy_adapter, agent_id="treasury-agent", native_chain="near"
+    )
+    info = api.dispatch("GET", "/api/guard/near/execution", {}, None)
+    gate = info.payload["provider_policy_gate"]
+    assert gate["applied"] is True
+    assert gate["agent_id"] == "treasury-agent"
+
+
 def test_prepare_then_submit_reaches_verified():
     api, rpc, _ = _api()
     prepared = _post(api, "/api/guard/near/execution/prepare", _prepare_body())

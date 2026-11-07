@@ -442,6 +442,17 @@ NEAR_TEE_REQUIRED = (
     in {"1", "true", "yes", "on"}
 )
 
+#: Whether the independent NEAR Intents provider (Agent API) policy must be in
+#: force before the execution boundary will authorize an operation. Off by
+#: default (the loopback default keeps the operator policy alone); when on, a
+#: policy that cannot be read, is stale, is not applied, or is frozen refuses
+#: authorization. A required layer with no adapter is a hard refusal, never a
+#: silent fallback to the operator policy alone.
+NEAR_REQUIRE_PROVIDER_POLICY = (
+    os.environ.get("TRACESETTLE_NEAR_REQUIRE_PROVIDER_POLICY", "").strip().lower()
+    in {"1", "true", "yes", "on"}
+)
+
 #: The TD report measurement fingerprint (``sha256`` of the canonical measurement
 #: fields) the TEE gate requires. Empty means the measurement is recorded and
 #: reported as ``UNPINNED`` rather than claimed; a non-empty value pins it, and a
