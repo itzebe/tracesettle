@@ -793,3 +793,20 @@ def test_console_states_the_custody_evidence_ladder_honestly():
     ):
         assert state in html, state
     assert "a claim, not proof" in html
+
+
+def test_console_states_the_tee_signing_boundary_honestly():
+    """The TEE signing panel must present the real checks and never a fabricated
+    protection badge: the route is paid and off by default, and a signature is
+    labelled TEE-signed only when every attestation claim holds."""
+    with running_server() as base:
+        _, body, _ = _request("GET", base + "/console")
+    html = _html(body)
+    assert "TEE signing boundary (OutLayer Signing Keys)" in html
+    assert "near-tee-signing" in html
+    assert "exact NEAR transaction digest" in html
+    assert "paid per-execution" in html
+    # The panel names the checks, so it is not a vague claim.
+    assert "approved measurement and build" in html
+    assert "exact-digest signature" in html
+    assert "never falls back to a software key" in html

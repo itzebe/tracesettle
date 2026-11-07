@@ -811,3 +811,107 @@ def test_agent_surface_invariant_notices_a_self_approving_credential(monkeypatch
         assert "approval secret" in result.detail
     finally:
         monkeypatch.undo()
+
+
+def test_tee_signing_invariant_notices_a_boundary_that_ignores_authorization(monkeypatch):
+    """If the boundary signed without checking the decision, the invariant must fail.
+
+    The mutation: make ``TeeSigningBoundary._authorization`` return a plausible
+    authorization for *any* decision, so a BLOCK would reach the provider.
+    """
+    from tracesettle.guard import invariants as inv
+    from tracesettle.near.tee_signing import boundary as boundary_module
+
+    def leaky_authorization(self, transaction, *, decision, authorization_record):
+        return {
+            "id": "forged",
+            "digest": "sha256:" + "00" * 32,
+            "expiry": "2999-01-01T00:00:00+00:00",
+            "policy_version": "v1",
+        }
+
+    monkeypatch.setattr(
+        boundary_module.TeeSigningBoundary, "_authorization", leaky_authorization
+    )
+    try:
+        result = inv.INVARIANTS[
+            "near_tee_signing_requires_an_authorization_and_a_verified_signature"
+        ]()
+        assert result.holds is False
+    finally:
+        monkeypatch.undo()
+
+
+def test_tee_signing_invariant_notices_a_boundary_that_skips_the_digest_check(monkeypatch):
+    """If the boundary accepted a record for a different transaction, it must fail.
+
+    The mutation: drop the digest comparison in ``_authorization``, so a record
+    bound to another transaction (the invariant's probe (c)) would be accepted
+    and the provider would sign bytes the authorization never covered.
+    """
+    from tracesettle.guard import invariants as inv
+    from tracesettle.near.tee_signing import boundary as boundary_module
+
+    def loose_authorization(self, transaction, *, decision, authorization_record):
+        outcome = str(getattr(decision, "outcome", "") or "").upper()
+        if outcome not in ("ALLOW", "APPROVED") or authorization_record is None:
+            raise boundary_module.TeeSigningRefusal("not authorized")
+        if authorization_record.get("expired"):
+            raise boundary_module.TeeSigningRefusal("expired")
+        # The bug: the digest comparison is gone.
+        return {
+            "id": str(authorization_record.get("authorization_id") or ""),
+            "digest": str(authorization_record.get("execution_digest") or ""),
+            "expiry": str(authorization_record.get("expires_at") or ""),
+            "policy_version": str(authorization_record.get("policy_version") or "unknown"),
+        }
+
+    monkeypatch.setattr(
+        boundary_module.TeeSigningBoundary, "_authorization", loose_authorization
+    )
+    try:
+        result = inv.INVARIANTS[
+            "near_tee_signing_requires_an_authorization_and_a_verified_signature"
+        ]()
+        assert result.holds is False
+        assert "another transaction" in result.detail
+    finally:
+        monkeypatch.undo()
+
+
+def test_tee_signing_tee_claim_invariant_notices_a_promoting_ladder(monkeypatch):
+    """If a non-verifying attestation reached TEE_SIGNING_VERIFIED, it must fail.
+
+    The mutation: make the attestation verifier always report success, so the
+    ladder would promote without evidence.
+    """
+    from tracesettle.guard import invariants as inv
+    from tracesettle.near.tee_signing import boundary as boundary_module
+
+    class _AlwaysVerified:
+        verified = True
+        failures: list = []
+        measurement = {"mr_td": "aa" * 48}
+        nonce = ""
+        claims: list = []
+        quote_verified = True
+        measurement_name = "x"
+        build_hash = "x"
+        input_hash = "x"
+        output_hash = "x"
+
+        def to_dict(self):
+            return {"verified": True}
+
+    monkeypatch.setattr(
+        boundary_module.TeeSigningBoundary,
+        "_verify_attestation",
+        lambda self, request, result, attestation, public_raw: _AlwaysVerified(),
+    )
+    try:
+        result = inv.INVARIANTS["near_tee_signing_never_claims_tee_without_attestation_evidence"]()
+        # The invariant's second probe supplies an attestation; a promoting
+        # ladder would make the state TEE_SIGNING_VERIFIED and fail the check.
+        assert result.holds is False
+    finally:
+        monkeypatch.undo()

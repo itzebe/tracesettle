@@ -91,6 +91,34 @@ def _demo_policy(receiver: str) -> PolicyConfig:
     )
 
 
+def _build_tee_signing_signer(boundary, prepared):
+    """Build a TEE-signing ``TransactionSigner`` for a prepared operation.
+
+    Returns ``None`` when the boundary is not configured or the OutLayer signing
+    route has no credential, so the pipeline falls back to the software key with
+    an honest note. It never substitutes a software key *for* a configured TEE
+    signature: if the boundary is required and cannot sign, the boundary raises.
+    """
+    if boundary is None:
+        return None
+    from tracesettle.near.tee_signing import TeeSigningTransactionSigner
+
+    record = {
+        "authorization_id": prepared.authorization_id,
+        "execution_digest": getattr(prepared, "execution_digest", "") or "",
+        "expires_at": getattr(prepared, "expires_at", "") or "",
+        "policy_version": getattr(prepared, "policy_version", "unknown"),
+        "transaction_digest": prepared.transaction.payload_fingerprint(),
+    }
+    return TeeSigningTransactionSigner(
+        boundary=boundary,
+        transaction=prepared.transaction,
+        decision=prepared.decision,
+        authorization_record=record,
+        network=NearNetwork.TESTNET,
+    )
+
+
 def _load_key() -> bytes | None:
     raw = os.environ.get("TRACESETTLE_DEMO_TESTNET_KEY", "").strip()
     if not raw:
@@ -122,6 +150,14 @@ def main(argv: list[str] | None = None) -> int:
         help="path to a SQLite ledger (default: in-memory)",
     )
     parser.add_argument("--json", action="store_true", help="print a JSON evidence block")
+    parser.add_argument(
+        "--tee-signing",
+        action="store_true",
+        help=(
+            "sign inside the OutLayer Signing Keys enclave (paid route; needs "
+            "TRACESETTLE_TEE_SIGNING_OWNER/_PROJECT/_PAYMENT_KEY/_APPROVED_BUILD)"
+        ),
+    )
     args = parser.parse_args(argv)
 
     network = network_config("testnet")
@@ -179,6 +215,28 @@ def main(argv: list[str] | None = None) -> int:
     ledger = SubmissionLedger(args.ledger or None)
     pipeline = NearExecutionPipeline(boundary, ledger=ledger)
 
+    # The optional TEE signing boundary: the only path that signs the exact
+    # digest inside a remote, attested enclave. Off unless asked for, and it
+    # never falls back to a software key — if the paid route has no credential
+    # the boundary refuses, and the demonstration reports that honestly.
+    tee_signing_boundary = None
+    if args.tee_signing:
+        from tracesettle.ui import _build_tee_signing_boundary
+
+        tee_signing_boundary = _build_tee_signing_boundary()
+        if tee_signing_boundary is None:
+            print(
+                "TEE signing was requested but the boundary is not configured "
+                "(TRACESETTLE_TEE_SIGNING_OWNER/_PROJECT/_PAYMENT_KEY/_APPROVED_BUILD)."
+            )
+            return 2
+        if not tee_signing_boundary.provider.capability().available:
+            print(
+                "TEE signing was requested but the OutLayer credential is not "
+                "available, so the boundary refuses to sign (no software fallback)."
+            )
+            return 2
+
     print("=" * 78)
     print("TRACESETTLE x NEAR - live testnet pipeline (TEE-gated signing)")
     print("=" * 78)
@@ -223,11 +281,22 @@ def main(argv: list[str] | None = None) -> int:
         print("2. TEE gate disabled: signing proceeds without an attestation (not hardware-protected)")
 
     # 3-6. Sign, submit, verify - through the real pipeline.
+    active_signer = signer
+    if tee_signing_boundary is not None:
+        active_signer = _build_tee_signing_signer(tee_signing_boundary, prepared)
+        print("2b. signing inside the OutLayer Signing Keys enclave (TEE-signed digest)")
     try:
-        result = pipeline.execute(prepared, signer)
+        result = pipeline.execute(prepared, active_signer)
     except SigningError as exc:
         print(f"3. signing refused: {exc}")
         return 1
+    if tee_signing_boundary is not None and getattr(active_signer, "last_evidence", None):
+        evidence = active_signer.last_evidence
+        print(
+            f"2c. enclave signature state: {evidence.state} "
+            f"(signature verified: {evidence.signature_verified}, "
+            f"attestation verified: {evidence.attestation_verified})"
+        )
     print(f"3. signed and submitted; tx hash {result.tx_hash}")
     print(f"   explorer: {network.explorer_url(result.tx_hash)}")
     print(f"4. submission state: {result.state}")

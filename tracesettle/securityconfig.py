@@ -193,6 +193,44 @@ def validate_startup(
                 "the provider-policy layer"
             )
 
+    # The TEE signing boundary fails closed. Enabling a paid, remote signing
+    # route without an owner/project/build, or asking for it as *required*
+    # without the execution boundary that would obey it, would silently drop the
+    # guarantee the operator asked for, so it is a hard error on any binding.
+    if config.TEE_SIGNING_ENABLED:
+        if not config.TEE_SIGNING_OWNER or not config.TEE_SIGNING_PROJECT:
+            raise ConfigurationError(
+                "TRACESETTLE_TEE_SIGNING is set but TRACESETTLE_TEE_SIGNING_OWNER or "
+                "TRACESETTLE_TEE_SIGNING_PROJECT is not; the signing guest cannot be "
+                "located. Set both, or unset TRACESETTLE_TEE_SIGNING"
+            )
+        if not config.TEE_SIGNING_APPROVED_BUILD:
+            raise ConfigurationError(
+                "TRACESETTLE_TEE_SIGNING is set but TRACESETTLE_TEE_SIGNING_APPROVED_BUILD "
+                "is not; no build identity is pinned, so a swapped signing WASM could sign. "
+                "Pin the approved build (sha256 of the signing WASM), or unset "
+                "TRACESETTLE_TEE_SIGNING"
+            )
+        if config.TEE_SIGNING_NETWORK not in {"testnet", "mainnet"}:
+            raise ConfigurationError(
+                "TRACESETTLE_TEE_SIGNING_NETWORK must be 'testnet' or 'mainnet'; got an "
+                "unsupported network name"
+            )
+
+    if config.TEE_SIGNING_REQUIRED:
+        if not config.TEE_SIGNING_ENABLED:
+            raise ConfigurationError(
+                "TRACESETTLE_TEE_SIGNING_REQUIRED is set but TRACESETTLE_TEE_SIGNING is not; "
+                "the gate would have no signing boundary to enforce. Enable the boundary, or "
+                "unset TRACESETTLE_TEE_SIGNING_REQUIRED"
+            )
+        if not config.NEAR_EXECUTION_ENABLED:
+            raise ConfigurationError(
+                "TRACESETTLE_TEE_SIGNING_REQUIRED is set but TRACESETTLE_NEAR_EXECUTION is "
+                "not; there is no execution boundary to enforce the gate on. Enable the "
+                "execution boundary, or unset TRACESETTLE_TEE_SIGNING_REQUIRED"
+            )
+
     if not public_binding:
         return profile
 

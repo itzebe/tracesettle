@@ -235,6 +235,7 @@ reports success with no decisive evidence and reports the honest level.
 | GET | `/api/guard/near/access-keys` | access-key permission analysis |
 | GET | `/api/guard/near/policy-scope` | which controls protect which path |
 | GET | `/api/guard/near/settlement-demo` | a provider claim that is not verified |
+| GET | `/api/guard/near/tee-signing` | the TEE signing boundary (OutLayer Signing Keys) state |
 | POST | `/api/guard/near/agent-evaluate` | evaluate one agent transaction |
 
 `agent-evaluate` is scoped to the authenticated service identity, like the other
@@ -250,6 +251,12 @@ service-facing routes. It never returns the authorization unless
 | `TRACESETTLE_NEAR_POLICY_FIXTURE` | Path to a local policy fixture. |
 | `TRACESETTLE_NEAR_AGENT_ID` | Default agent id to read a policy for. |
 | `TRACESETTLE_NEAR_ALLOW_CLIENT_POLICY_SELECTION` | Off by default. When off, `policy_fixture` and `agent_id` in a request body are **ignored** and the operator's configuration governs. Loopback-only: a public binding refuses to start with it set. |
+| `TRACESETTLE_TEE_SIGNING` | Off by default. Enables the OutLayer Signing Keys boundary (paid per execution; testnet-only). Requires owner, project and approved build, or start-up refuses. |
+| `TRACESETTLE_TEE_SIGNING_OWNER` / `_PROJECT` | The OutLayer project that publishes the signing guest. Required when the boundary is enabled. |
+| `TRACESETTLE_TEE_SIGNING_PAYMENT_KEY` | The OutLayer payment key (`pk_…`). Sent only as the `X-Payment-Key` header; never logged or returned. With no key the boundary refuses — no software fallback. |
+| `TRACESETTLE_TEE_SIGNING_APPROVED_BUILD` | `sha256` of the exact signing WASM. A build that differs is refused, so a swapped guest cannot sign. Required when the boundary is enabled. |
+| `TRACESETTLE_TEE_SIGNING_APPROVED_MEASUREMENT` | Optional `field=value` pin for the worker measurement; unset = reported as unpinned, never as matched. |
+| `TRACESETTLE_TEE_SIGNING_REQUIRED` | Off by default. When on, a NEAR execution that cannot obtain a TEE signature is refused rather than signed in software. Requires the boundary and the execution boundary. |
 
 ### The evaluated policy is not client-selectable
 
@@ -295,6 +302,13 @@ The runtime stays standard-library only. The NEAR package adds no dependency.
   not.** The guard fetches and verifies a genuine TDX quote (and its Intel PCS
   collateral) and can enforce it at the signing boundary, but the reference
   executor still simulates execution and broadcasts nothing.
+* **The TEE signing boundary (OutLayer Signing Keys) is implemented and tested,
+  but not run live here.** It is the one route that signs the exact NEAR digest
+  inside an attested Intel TDX enclave. The route is **paid per execution**, so a
+  live signature requires an OutLayer project and payment key that are outside the
+  zero-budget scope; `evidence/mission24/free_access_and_credentials.md` records
+  the exact owner action. It is off by default, fail-closed, and never falls back
+  to a software key. See the TEE signing section in §10.
 
 ## 10. Real-world execution evidence and the hardware blocker
 
@@ -401,3 +415,41 @@ unresolved, never a success. Only the two documented success synonyms
 (`success`, `completed`) map to `SUCCESS`; every other value is refused that
 promotion. This is asserted against the provider's live OpenAPI document in
 `tests/test_near_live_outlayer.py`, so the map cannot drift from the API.
+
+### TEE signing boundary — the exact-digest signing route
+
+The custody boundary above signs through a TEE-held wallet but cannot obtain a
+per-operation attestation. `tracesettle/near/tee_signing/` is the *other* OutLayer
+surface — **Signing Keys** (`outlayer:signing-keys`) — and it is the one route
+that signs a **caller-computed digest** inside an Intel TDX enclave. This closes
+the "software key holds the signing secret" gap: the key never reaches the host.
+
+What the boundary actually does, and what it refuses:
+
+- **It sends a description, not bytes.** The enclave receives the canonical
+  signing request (the authorized transaction's fields plus the authorization and
+  the approved build) and a WASI guest recomputes the NEAR digest itself. The host
+  cannot ask the enclave to sign a different transaction than the one authorized.
+- **`TEE_SIGNING_VERIFIED` is the conjunction of every claim.** A genuine Intel
+  TDX quote (verified against the pinned Intel root with fresh PCS collateral), an
+  operator-approved measurement *and* build (`sha256` of the signing WASM), the
+  caller/project identity, the fresh host nonce, the run's input/output
+  commitment, and a signature that verifies over the exact digest under the key
+  the provider reports. A verified quote alone is never sufficient; a signature
+  with no attestation is `SIGNATURE_VERIFIED` at most, and a non-verifying
+  attestation is `ATTESTATION_REJECTED`, never promoted.
+- **Off by default and fail-closed.** OutLayer bills per execution and does not
+  refund failures, so this is an explicit operator decision
+  (`TRACESETTLE_TEE_SIGNING=1`). Enabling it without an owner, project or approved
+  build is a hard start-up error (`securityconfig.validate_startup`). With no
+  payment key the boundary reports itself unavailable and refuses; it **never**
+  falls back to a software key. It is **testnet-only**.
+
+**Status: implemented and tested, not run live here.** The route is paid; a live
+signature needs an OutLayer project and payment key, which are outside the
+zero-budget scope. `evidence/mission24/free_access_and_credentials.md` records the
+exact owner action required. The offline demo
+(`python3 demo/near_tee_signing_demo.py`, 9/9) and the test suite substitute only
+the network transport — the key, the digest and the signature are real. The
+opt-in reproduction is `tests/test_near_live_tee_signing.py`, skipped unless
+`TRACESETTLE_TEST_OUTLAYER_*` credentials are supplied.

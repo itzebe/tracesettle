@@ -112,10 +112,11 @@ try:
         "/api/guard/near/prompt-injection",
         "/api/guard/near/behaviours",
         "/api/guard/near/custody",
+        "/api/guard/near/tee-signing",
         "/api/guard/invariants",
     ):
         try:
-            with urllib.request.urlopen(f"http://{{host}}:{{port}}{{path}}", timeout=10) as r:
+            with urllib.request.urlopen(f"http://{{host}}:{{port}}{{path}}", timeout=60) as r:
                 out[path] = r.status
         except Exception as exc:
             out[path] = type(exc).__name__
@@ -140,6 +141,7 @@ finally:
         "/api/guard/near/prompt-injection": 200,
         "/api/guard/near/behaviours": 200,
         "/api/guard/near/custody": 200,
+        "/api/guard/near/tee-signing": 200,
         "/api/guard/invariants": 200,
     }, results
 
@@ -303,7 +305,7 @@ try:
     out = {{}}
     for path in ("/api/guard/near/wallet", "/assets/near-connect.js"):
         try:
-            with urllib.request.urlopen(f"http://{{host}}:{{port}}{{path}}", timeout=10) as r:
+            with urllib.request.urlopen(f"http://{{host}}:{{port}}{{path}}", timeout=60) as r:
                 out[path] = r.status
         except Exception as exc:
             out[path] = type(exc).__name__

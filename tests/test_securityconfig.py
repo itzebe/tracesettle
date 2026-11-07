@@ -389,3 +389,94 @@ def test_outlayer_with_the_provider_policy_and_an_api_starts(monkeypatch):
     )
     profile = _validate("127.0.0.1")
     assert profile.public_binding is False
+
+
+# --- TEE signing boundary (OutLayer Signing Keys) --------------------------
+
+
+def test_tee_signing_without_owner_or_project_is_refused(monkeypatch):
+    _with_config(
+        monkeypatch,
+        TEE_SIGNING_ENABLED=True,
+        TEE_SIGNING_OWNER="",
+        TEE_SIGNING_PROJECT="proj",
+        TEE_SIGNING_APPROVED_BUILD="sha256:" + "0" * 64,
+        TEE_SIGNING_NETWORK="testnet",
+        TEE_SIGNING_REQUIRED=False,
+    )
+    with pytest.raises(ConfigurationError) as exc:
+        _validate("127.0.0.1")
+    assert "TRACESETTLE_TEE_SIGNING_OWNER" in str(exc.value)
+
+
+def test_tee_signing_without_an_approved_build_is_refused(monkeypatch):
+    _with_config(
+        monkeypatch,
+        TEE_SIGNING_ENABLED=True,
+        TEE_SIGNING_OWNER="owner",
+        TEE_SIGNING_PROJECT="proj",
+        TEE_SIGNING_APPROVED_BUILD="",
+        TEE_SIGNING_NETWORK="testnet",
+        TEE_SIGNING_REQUIRED=False,
+    )
+    with pytest.raises(ConfigurationError) as exc:
+        _validate("127.0.0.1")
+    assert "TRACESETTLE_TEE_SIGNING_APPROVED_BUILD" in str(exc.value)
+
+
+def test_tee_signing_with_an_unknown_network_is_refused(monkeypatch):
+    _with_config(
+        monkeypatch,
+        TEE_SIGNING_ENABLED=True,
+        TEE_SIGNING_OWNER="owner",
+        TEE_SIGNING_PROJECT="proj",
+        TEE_SIGNING_APPROVED_BUILD="sha256:" + "0" * 64,
+        TEE_SIGNING_NETWORK="devnet",
+        TEE_SIGNING_REQUIRED=False,
+    )
+    with pytest.raises(ConfigurationError) as exc:
+        _validate("127.0.0.1")
+    assert "TRACESETTLE_TEE_SIGNING_NETWORK" in str(exc.value)
+
+
+def test_tee_signing_required_without_the_boundary_is_refused(monkeypatch):
+    _with_config(
+        monkeypatch,
+        TEE_SIGNING_ENABLED=False,
+        TEE_SIGNING_REQUIRED=True,
+        NEAR_EXECUTION_ENABLED=True,
+    )
+    with pytest.raises(ConfigurationError) as exc:
+        _validate("127.0.0.1")
+    assert "TRACESETTLE_TEE_SIGNING_REQUIRED" in str(exc.value)
+
+
+def test_tee_signing_required_without_execution_is_refused(monkeypatch):
+    _with_config(
+        monkeypatch,
+        TEE_SIGNING_ENABLED=True,
+        TEE_SIGNING_OWNER="owner",
+        TEE_SIGNING_PROJECT="proj",
+        TEE_SIGNING_APPROVED_BUILD="sha256:" + "0" * 64,
+        TEE_SIGNING_NETWORK="testnet",
+        TEE_SIGNING_REQUIRED=True,
+        NEAR_EXECUTION_ENABLED=False,
+    )
+    with pytest.raises(ConfigurationError) as exc:
+        _validate("127.0.0.1")
+    assert "TRACESETTLE_NEAR_EXECUTION" in str(exc.value)
+
+
+def test_tee_signing_with_full_configuration_starts(monkeypatch):
+    _with_config(
+        monkeypatch,
+        TEE_SIGNING_ENABLED=True,
+        TEE_SIGNING_OWNER="owner",
+        TEE_SIGNING_PROJECT="proj",
+        TEE_SIGNING_APPROVED_BUILD="sha256:" + "0" * 64,
+        TEE_SIGNING_NETWORK="testnet",
+        TEE_SIGNING_REQUIRED=True,
+        NEAR_EXECUTION_ENABLED=True,
+    )
+    profile = _validate("127.0.0.1")
+    assert profile.public_binding is False

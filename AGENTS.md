@@ -2365,3 +2365,70 @@ now enforced on both, and the whole chain is surfaced on the console.
 - **Still credential-blocked (not code gaps):** a *successful* live Agent API
   provider-policy read needs a real `X-API-Key`; without it the adapter reports
   `UNCONFIGURED` and the operator policy governs. Reported as a limitation.
+
+## Mission 24 — TEE signing boundary (OutLayer Signing Keys) (2026-11-06)
+
+Closes the last link in the trusted execution chain: the signature over the exact
+NEAR transaction digest is now produced by a **remote, attested Intel TDX
+enclave**, so the signing key never reaches the host. The settlement engine, the
+guard controls and every existing verification rule are untouched; the boundary
+is additive and off by default.
+
+- **Route selection is research, not assumption.** OutLayer exposes three
+  surfaces and only one signs a caller-computed digest. The custody surface
+  (`/wallet/v1/*`) builds the transaction provider-side and defines no
+  per-operation attestation; the **Signing Keys** surface
+  (`outlayer:signing-keys`, WASI P2) signs the raw message the module composes and
+  emits a per-run TDX quote committing to input, output, `wasm_hash`, caller and
+  project. The evidence is in `evidence/mission24/provider_research.md`.
+- **New package `tracesettle/near/tee_signing/`** (stdlib only): `request.py`
+  (canonical `TeeSigningRequest` + `build_signing_request`), `provider.py`
+  (`OutLayerSigningProvider`, the real `/call/{owner}/{project}` transport, plus
+  `LocalStandInSigningProvider` for tests), `attestation.py`
+  (`verify_signing_attestation`), `boundary.py` (`TeeSigningBoundary`,
+  `TeeSigningTransactionSigner`), `guest_reference.py` and
+  `guest/signing-module/` (the Rust WASI-P2 guest source + manifest that composes
+  and signs the digest inside the enclave).
+- **The enclave is sent a description, never raw bytes.** The guest recomputes the
+  digest from the canonical request, so a host cannot smuggle a different
+  transaction past the boundary.
+- **The evidence ladder is monotonic and non-promoting:**
+  `EXECUTION_BLOCKED` < `PROVIDER_UNAVAILABLE` < `ATTESTATION_REJECTED` <
+  `SIGNATURE_VERIFIED` < `TEE_SIGNING_VERIFIED`. A verified quote alone is never
+  enough; with no attestation the result is `SIGNATURE_VERIFIED` at most.
+- **Preconditions are checked before the provider is called.** A `BLOCK`/`HOLD`/
+  `REQUIRE_APPROVAL` decision, a missing record, a record bound to a different
+  transaction, or an expired authorization raises `TeeSigningRefusal` and the
+  provider is never reached (asserted by the demo and the tests).
+- **Fail-closed configuration.** `TRACESETTLE_TEE_SIGNING=1` without owner,
+  project or approved build is a hard start-up error; an unsupported network name
+  is refused; `TRACESETTLE_TEE_SIGNING_REQUIRED` without the boundary or the
+  execution boundary is refused on **any** binding. With no payment key the
+  provider reports itself unavailable and the boundary refuses — no software
+  fallback. Testnet-only.
+- **`TeeSigningTransactionSigner`** adapts the boundary to the pipeline's
+  `TransactionSigner` and refuses if the pipeline asks to sign bytes other than
+  the authorized `transaction.tx_hash_bytes`.
+- **Two new invariants (60 total, 19 NEAR):**
+  `near_tee_signing_requires_an_authorization_and_a_verified_signature` (three
+  probes: a BLOCK never reaches the provider, a record bound to another
+  transaction is refused, a signature under a different key is refused) and
+  `near_tee_signing_never_claims_tee_without_attestation_evidence` (a
+  non-verifying attestation never reaches `TEE_SIGNING_VERIFIED`). Both
+  mutation-tested in `tests/test_guard_invariants.py`; the mutation tests are
+  themselves mutation-verified (a neutralised `_authorization` or a promoting
+  `_verify_attestation` makes each invariant fail).
+- **Surfaces.** `GET /api/guard/near/tee-signing` reports the real configured
+  state; the console NEAR tab gains a **TEE signing boundary (OutLayer Signing
+  Keys)** panel that names the checks and never shows a fabricated badge;
+  `demo/near_tee_signing_demo.py` (9/9, byte-identical) and
+  `demo/near_pipeline_demo.py --tee-signing` exercise it.
+- **Blocked, and stated as blocked:** the route is **paid per execution** and
+  failed executions are not refunded, so it is not run live here. The exact
+  owner-only action is in `evidence/mission24/free_access_and_credentials.md`;
+  the opt-in reproduction is `tests/test_near_live_tee_signing.py` (skipped
+  unless `TRACESETTLE_TEST_OUTLAYER_*` credentials are supplied).
+- **Counts:** 1833 collected; **1800 passed, 33 skipped** filesystem-only;
+  **1824 passed, 9 skipped** with PostgreSQL 16. pyflakes clean; compileall OK;
+  offline demo byte-identical (md5 `4864f13c…`); near demo byte-identical; 60/60
+  invariants hold.

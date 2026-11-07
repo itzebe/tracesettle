@@ -1,0 +1,10 @@
+{
+  "signing_keys": [
+    {
+      "path": "neartx",
+      "type": "ed25519",
+      "bind": "project",
+      "caller": "signer"
+    }
+  ]
+}
