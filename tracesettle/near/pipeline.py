@@ -37,6 +37,7 @@ from . import ed25519
 from .execution import NearExecutionBoundary, PreparedOperation
 from .ledger import SubmissionLedger, SubmissionRecord, SubmissionState
 from .networks import NearNetwork
+from .txbuild import NearTransaction
 from .verify import SettlementState, SettlementVerification, verify_transaction
 
 
@@ -414,6 +415,47 @@ class NearExecutionPipeline:
 
     # -- recovery ----------------------------------------------------------
 
+    def reconstruct_transaction(self, record: SubmissionRecord) -> NearTransaction | None:
+        """Rebuild the exact transaction from the durable signed bytes.
+
+        Recovery of a record whose original ``PreparedOperation`` is gone (a
+        restart, another instance, or a wallet-submitted transaction) can still
+        re-derive what was signed from the bytes the ledger stored, so the
+        on-chain record can be checked against the amount and actions - not only
+        the hash and finality. Returns ``None`` when the bytes cannot be decoded
+        faithfully, in which case the caller keeps the weaker, honest check.
+
+        The decoded transaction is cross-checked against the record's own fields:
+        a decode that disagrees with the recorded signer, receiver, amount or
+        destination is treated as a failure to reconstruct, never trusted.
+        """
+        if not record.signed_b64:
+            return None
+        try:
+            network = NearNetwork(record.network)
+        except ValueError:
+            return None
+        from .txdecode import TransactionDecodeError, decode_signed_b64
+
+        try:
+            decoded = decode_signed_b64(record.signed_b64, network=network)
+        except TransactionDecodeError:
+            return None
+        if decoded.operation == "UNKNOWN":
+            # The bytes decoded and verified, but the action set is not one this
+            # tool describes, so the amount cannot be re-checked. Do not pretend.
+            return None
+        # Defence in depth: the durable record and the signed bytes must agree.
+        if decoded.signer_id != record.signer_id:
+            return None
+        if record.receiver_id and decoded.receiver_id != record.receiver_id:
+            return None
+        if record.amount_base and str(decoded.amount_base) != str(record.amount_base):
+            return None
+        if record.destination and decoded.destination != record.destination:
+            return None
+        return decoded.to_transaction()
+
     def resolve_unknown(
         self, tx_hash: str, *, prepared: PreparedOperation | None = None
     ) -> ExecutionResult | None:
@@ -421,6 +463,13 @@ class NearExecutionPipeline:
 
         Returns ``None`` when the chain does not (yet) know the transaction, so
         the record stays ``UNKNOWN``. It never sends anything.
+
+        When the original ``prepared`` operation is unavailable but the signed
+        bytes are durably recorded, the transaction is reconstructed from those
+        bytes and the full semantic verification runs, so a recovered transaction
+        reaches the same verdict (``VERIFIED``) as one still in memory. Only when
+        the bytes cannot be faithfully reconstructed does the verdict fall back to
+        the weaker ``CONFIRMED``-capped check.
         """
         record = self.ledger.get(tx_hash)
         if record is None:
@@ -433,9 +482,15 @@ class NearExecutionPipeline:
                 transaction=prepared.transaction, result=result.data, source_status=result.status
             )
             return self._finalize(record, prepared, verification, endpoint=result.endpoint)
-        # Without the original transaction we can still reconcile identity and
-        # finality from the record itself; the amount is not re-checked, so the
-        # best we can honestly assert is CONFIRMED-level evidence, mapped below.
+        rebuilt = self.reconstruct_transaction(record)
+        if rebuilt is not None:
+            verification = verify_transaction(
+                transaction=rebuilt, result=result.data, source_status=result.status
+            )
+            return self._finalize(record, None, verification, endpoint=result.endpoint)
+        # The bytes are not reconstructable, so only identity and finality can be
+        # reconciled; the amount is not re-checked, so the best we can honestly
+        # assert is CONFIRMED-level evidence, mapped below.
         verification = self.boundary.verify_only(tx_hash, record.signer_id)
         return self._finalize(record, prepared, verification, endpoint=result.endpoint)
 

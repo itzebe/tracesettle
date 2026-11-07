@@ -324,6 +324,48 @@ def test_durable_submission_invariant_notices_a_retry_on_unknown_outcome():
         pl.NearExecutionPipeline._submit_and_verify = original
 
 
+def test_recovery_reconstruction_invariant_notices_a_disabled_decoder():
+    """If recovery stops reconstructing from the bytes, the invariant must fail.
+
+    The mutation neutralises ``reconstruct_transaction`` so a recovered
+    submission can never be verified to the stronger standard; the invariant must
+    notice that the faithful-bytes case no longer reaches ``VERIFIED``.
+    """
+    from tracesettle.guard import invariants as inv
+    from tracesettle.near import pipeline as pl
+
+    original = pl.NearExecutionPipeline.reconstruct_transaction
+    pl.NearExecutionPipeline.reconstruct_transaction = lambda self, record: None
+    try:
+        result = inv.INVARIANTS["recovered_transaction_is_reconstructed_from_signed_bytes"]()
+        assert result.holds is False
+    finally:
+        pl.NearExecutionPipeline.reconstruct_transaction = original
+
+
+def test_recovery_reconstruction_invariant_notices_an_unchecked_fallback():
+    """If the fallback inflated to VERIFIED, the invariant must fail.
+
+    The mutation makes the non-reconstructable path claim the stronger verdict;
+    the invariant's second half must notice the inflation.
+    """
+    from tracesettle.guard import invariants as inv
+    from tracesettle.near import execution as ex
+    from tracesettle.near.verify import SettlementState, SettlementVerification
+
+    original = ex.NearExecutionBoundary.verify_only
+
+    def inflate(self, tx_hash, signer_account_id):  # noqa: ANN001
+        return SettlementVerification(SettlementState.VERIFIED, [], {}, "", "mutation")
+
+    ex.NearExecutionBoundary.verify_only = inflate
+    try:
+        result = inv.INVARIANTS["recovered_transaction_is_reconstructed_from_signed_bytes"]()
+        assert result.holds is False
+    finally:
+        ex.NearExecutionBoundary.verify_only = original
+
+
 
 def test_counterparty_invariant_notices_a_read_that_relaxes_a_control():
     """If a counterparty read could not restrict, the invariant must fail."""

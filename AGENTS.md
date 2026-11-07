@@ -2261,3 +2261,59 @@ other. Runtime stays standard-library only; no authorization rule was weakened.
   syntax-error class this change fixed).
 - **Not live-verified:** the provider-policy live read (no Agent API credential).
   Stated as a limitation, never as production-proven.
+
+## Mission 22 — recovery verification from durable signed bytes (2026-11-06)
+
+Completes the last unverified offline capability of the NEAR execution path. No
+verification rule was weakened; the settlement engine, the guard controls, and
+the provider-policy gate are untouched; runtime stays standard-library only.
+
+- **Gap closed: recovery was weaker than the live path.** The pipeline stored the
+  exact signed bytes in the durable ledger (so a submission whose outcome is
+  unknown is resolved from the chain, never blindly resubmitted), but a record
+  whose original `PreparedOperation` was gone - after a restart, on another
+  instance, or a wallet submission - could only reconcile the hash and finality.
+  `verify_only` therefore capped at `CONFIRMED` and said plainly it could not
+  re-check the amount. The bytes to re-check it were already on disk.
+- **New module `tracesettle/near/txdecode.py`.** A strict, round-trip-checked
+  decoder for the V0 NEAR `SignedTransaction`. Two independent guarantees are
+  enforced before the result is trusted: the parsed fields are fed back through
+  the *same* encoders and must reproduce the input bytes exactly, and the ed25519
+  signature must verify over `sha256(unsigned_bytes)` under the transaction's own
+  key. Anything it does not fully understand raises `TransactionDecodeError`
+  rather than returning a best-effort object, so a partial parse is never mistaken
+  for a faithful one.
+- **Wired into `pipeline.resolve_unknown`.** When the original transaction is
+  unavailable but the bytes are recorded, the transaction is reconstructed and the
+  full semantic verification runs, so a recovered submission reaches `VERIFIED` -
+  the same verdict as one still in memory. The decode is cross-checked against the
+  record's own signer/receiver/amount/destination; a disagreement, an unknown
+  action set, or unreadable bytes fall back to the honest `CONFIRMED` cap and are
+  never inflated.
+- **New invariant (57 total):** `recovered_transaction_is_reconstructed_from_signed_bytes`.
+  It drives a submission to `UNKNOWN`, resolves it without the original
+  transaction, and requires both halves: faithful bytes reach `VERIFIED`, and
+  tampered bytes never do. Mutation-tested twice in `tests/test_guard_invariants.py`
+  (a disabled decoder and an inflated fallback each fail it).
+- **New tests:** `tests/test_near_txdecode.py` (13: round-trips for native and
+  NEP-141 transfers, tamper/truncation/empty/non-base64 refusals, network-scoped
+  asset registry, and the five recovery-upgrade cases). `tests/test_demo.py`
+  gained `test_near_recovery_demo_is_deterministic_and_passes`.
+- **New demo:** `demo/near_recovery_demo.py` — deterministic, offline, 7/7 checks
+  (UNKNOWN recorded, single attempt, durable bytes, reconstruct+VERIFY, amount
+  re-checked, no re-broadcast, unreadable bytes never inflated). Added to the CI
+  determinism gate.
+- **Counts:** **1738 passed, 30 skipped** filesystem-only (1768 collected;
+  1762 passed, 6 skipped with a PostgreSQL server); pyflakes clean; compileall
+  OK; offline demo byte-identical (md5 `4864f13c…`); near demo byte-identical
+  (md5 `fc2949ef…`); Task-7 security categories **482 passed**; 57/57 invariants
+  hold; judge path 10/10.
+- **Live-verified this session (real, not simulated):** a funded free-faucet
+  testnet account executed a real 0.01 NEAR transfer through the real pipeline
+  (`442DL9rha59fQdtUVVSzJFANtJfsKbn2LLwsdLHvqktM`), re-read `FINAL`/`SuccessValue`
+  from two independent public testnet RPCs with the receiver balance rising by the
+  amount; a genuine Intel TDX attestation verified and bound live; the OutLayer
+  unauthenticated boundary refused as modelled.
+- **Still credential-blocked (not code gaps):** the live Agent API provider-policy
+  read (needs a paid/real `X-API-Key`) and a live OutLayer custody transfer (needs
+  a `wk_` key). Both are reported as limitations, never as production-proven.

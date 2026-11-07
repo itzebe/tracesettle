@@ -121,6 +121,26 @@ jobs:
           print("agent lifecycle demonstration reproduced: block-before-sign + verified settlement")
           PY
 
+      - name: Recovery verification demonstration determinism
+        run: |
+          set -eu
+          python demo/near_recovery_demo.py --json > /tmp/recovery-1.json
+          python demo/near_recovery_demo.py --json > /tmp/recovery-2.json
+          if ! cmp -s /tmp/recovery-1.json /tmp/recovery-2.json; then
+            echo "recovery demonstration output is not deterministic"
+            diff -u /tmp/recovery-1.json /tmp/recovery-2.json || true
+            exit 1
+          fi
+          python - <<'PY'
+          import json
+          with open("/tmp/recovery-1.json") as handle:
+              data = json.load(handle)
+          if not data["all_passed"]:
+              raise SystemExit("a recovery-verification check did not match its expected outcome")
+          passed = [c for c in data["checks"] if c["passed"]]
+          print(f'{len(passed)}/{len(data["checks"])} recovery checks reproduced')
+          PY
+
       - name: Independent evaluation scenarios (judge path)
         run: |
           set -eu
