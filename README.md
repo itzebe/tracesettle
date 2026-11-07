@@ -956,7 +956,7 @@ curl -sS -X POST http://127.0.0.1:8080/api/guard/sign \
 curl -sS http://127.0.0.1:8080/api/guard/invariants \
   | python3 -c 'import sys,json;d=json.load(sys.stdin);print("all hold:",d["all_hold"]);[print(" ",i["name"]) for i in d["invariants"]]'
 ```
-→ `all hold: True` and the fifty-four invariant names, including the sixteen NEAR
+→ `all hold: True` and the fifty-five invariant names, including the sixteen NEAR
 ones (`near_policy_must_be_in_force`, `near_native_scope_gap_is_always_stated`,
 `near_function_call_key_cannot_transfer_near`,
 `near_unrecognised_access_key_never_allows`,
@@ -1531,7 +1531,7 @@ variable and all documented in `docs/TRANSACTION_SECURITY.md`:
   replay-nonce store all have explicit caps, so a flood cannot exhaust memory.
   When durable state is configured, spent nonces and the limit counters live in
   SQLite instead, so they survive a restart (see **Durable state** below).
-- **Structural invariants, checked by execution.** Fifty-three guarantees at
+- **Structural invariants, checked by execution.** Fifty-five guarantees at
   `GET /api/guard/invariants`, each mutation-tested so a checker that cannot fail
   is treated as a defect.
 - **Honest audit claim.** In-place modification of an audit record is detectable;
