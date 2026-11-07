@@ -2612,6 +2612,144 @@ def _near_submission_is_durable_and_recovery_never_resubmits():
     )
 
 
+def _recovered_transaction_is_reconstructed_from_signed_bytes():
+    """A recovered submission is verified to the same standard as a live one.
+
+    Recovery of a record whose original transaction is gone (a restart, another
+    instance, a wallet submission) must re-derive what was signed from the durable
+    signed bytes, so the on-chain record is checked against the amount and
+    actions - not only the hash and finality. The checker drives a submission to
+    an ``UNKNOWN`` outcome, then resolves it *without* the original transaction:
+
+    * a faithful decode reaches ``VERIFIED`` (the amount is re-checked);
+    * bytes that do not decode fall back to ``CONFIRMED`` and are never inflated
+      to ``VERIFIED``.
+
+    Both halves are required: the first proves recovery is not left weaker than
+    the live path, the second proves it never claims a check it did not run.
+    """
+    from ..near.networks import NETWORKS, NearNetwork
+    from ..near.pipeline import NearExecutionPipeline
+    from ..near.ledger import SubmissionLedger, SubmissionState
+    from ..near.execution import NearExecutionBoundary
+    from ..near.verify import SettlementState
+    from ..near import ed25519
+
+    name = "recovered_transaction_is_reconstructed_from_signed_bytes"
+    seed = bytes(range(32))
+    pub = "ed25519:" + _b58(ed25519.public_key(seed))
+    config = NETWORKS[NearNetwork.TESTNET]
+
+    class _FlakyRpc(_PermissionRpc):
+        def __init__(self, config):
+            super().__init__(config, "FullAccess")
+            self.status_result: dict | None = None
+
+        def send_tx(self, signed_transaction_b64, *, wait_until="INCLUDED_FINAL"):
+            self.broadcasts.append(signed_transaction_b64)
+            from ..near.rpc import RpcResult
+            from ..model import SourceStatus
+
+            return RpcResult(SourceStatus.TIMEOUT, None, error="connection timed out")
+
+        def tx_status(self, tx_hash, sender_account_id):
+            from ..near.rpc import RpcResult
+            from ..model import SourceStatus
+
+            if self.status_result is None:
+                return RpcResult(SourceStatus.NOT_FOUND, None, error="unknown transaction")
+            return RpcResult(SourceStatus.OK, self.status_result)
+
+    class _Signer:
+        public_key = pub
+
+        def sign(self, message):
+            return ed25519.sign(message, seed)
+
+    def _drive():
+        guard = GuardService(
+            policy=_near_invariant_policy("ok.testnet"),
+            authority=AuthorizationAuthority(
+                key=_INVARIANT_KEY, key_id="i", ephemeral=False, replay_store=InMemoryReplayStore()
+            ),
+        )
+        rpc = _FlakyRpc(config)
+        boundary = NearExecutionBoundary(guard, config, rpc=rpc)
+        pipeline = NearExecutionPipeline(boundary, ledger=SubmissionLedger())
+        prepared = boundary.prepare(
+            service_id="svc",
+            account_id="agent.testnet",
+            public_key=pub,
+            receiver_id="ok.testnet",
+            asset_identifier="near:native",
+            amount_human="1",
+        )
+        if not prepared.authorized:
+            return None
+        pipeline.execute(prepared, _Signer())
+        rpc.status_result = {
+            "final_execution_status": "FINAL",
+            "status": {"SuccessValue": ""},
+            "transaction": {
+                "hash": prepared.transaction.tx_hash,
+                "signer_id": prepared.transaction.signer_id,
+                "receiver_id": prepared.transaction.receiver_id,
+                "nonce": prepared.transaction.nonce,
+                "actions": [{"Transfer": {"deposit": str(prepared.transaction.amount_base)}}],
+            },
+            "transaction_outcome": {"outcome": {"logs": []}},
+            "receipts_outcome": [],
+        }
+        return pipeline, prepared, rpc
+
+    driven = _drive()
+    if driven is None:
+        return InvariantResult(name, False, "the invariant could not be exercised: not authorized")
+    pipeline, prepared, rpc = driven
+    tx_hash = prepared.transaction.tx_hash
+    record = pipeline.ledger.get(tx_hash)
+    if record is None or record.state != SubmissionState.UNKNOWN:
+        return InvariantResult(name, False, "the submission did not record an UNKNOWN outcome")
+    if not record.signed_b64:
+        return InvariantResult(name, False, "the signed bytes were not recorded")
+
+    # (a) reconstruction from the bytes reaches VERIFIED without the original tx.
+    resolved = pipeline.resolve_unknown(tx_hash)
+    if resolved is None or resolved.settlement_state != SettlementState.VERIFIED.value:
+        return InvariantResult(
+            name,
+            False,
+            "a recovered submission with faithful bytes did not reach VERIFIED",
+        )
+
+    # (b) unreadable bytes must never inflate to VERIFIED.
+    import base64 as _b64
+
+    driven = _drive()
+    if driven is None:
+        return InvariantResult(name, False, "the invariant could not be exercised on the retry")
+    pipeline2, prepared2, _ = driven
+    record2 = pipeline2.ledger.get(prepared2.transaction.tx_hash)
+    raw = bytearray(_b64.b64decode(record2.signed_b64))
+    raw[40] ^= 0x01
+    record2.signed_b64 = _b64.b64encode(bytes(raw)).decode("ascii")
+    pipeline2.ledger.put(record2)
+    resolved2 = pipeline2.resolve_unknown(prepared2.transaction.tx_hash)
+    if resolved2 is None or resolved2.settlement_state == SettlementState.VERIFIED.value:
+        return InvariantResult(
+            name,
+            False,
+            "a recovered submission with unreadable bytes was inflated to VERIFIED",
+        )
+
+    return InvariantResult(
+        name,
+        True,
+        "a recovered submission is reconstructed from its durable signed bytes and reaches VERIFIED; "
+        "unreadable bytes fall back to the weaker check and are never inflated",
+    )
+
+
 def _enclave_signing_requires_a_verified_attestation():
     """Enclave signing must refuse without a verified, pinned, bound attestation.
 
@@ -3855,6 +3993,9 @@ INVARIANTS: dict[str, Callable[[], InvariantResult]] = {
     "near_submission_is_durable_and_recovery_never_resubmits": (
         _near_submission_is_durable_and_recovery_never_resubmits
     ),
+    "recovered_transaction_is_reconstructed_from_signed_bytes": (
+        _recovered_transaction_is_reconstructed_from_signed_bytes
+    ),
     "enclave_signing_requires_a_verified_attestation": (
         _enclave_signing_requires_a_verified_attestation
     ),
@@ -3935,6 +4076,7 @@ INVARIANT_DESCRIPTIONS: dict[str, str] = {
     "tee_execution_record_is_transaction_bound": "A TEE-verified execution record authorizes only the exact transaction digest it was bound to; a substituted transaction is refused.",
     "near_execution_requires_access_key_permission": "The signer's on-chain access-key permission must cover the transaction; a function-call key can never move NEAR, and an unrecognised permission shape is never treated as safe.",
     "near_submission_is_durable_and_recovery_never_resubmits": "A submission whose outcome is unknown is recorded UNKNOWN (never FAILED) and resolved from the chain; it is never blindly resubmitted.",
+    "recovered_transaction_is_reconstructed_from_signed_bytes": "A submission recovered without its original transaction is reconstructed from the durable signed bytes and verified to the same standard (VERIFIED); bytes that do not decode faithfully fall back to the weaker CONFIRMED check and are never inflated.",
     "enclave_signing_requires_a_verified_attestation": "An enclave signing key is provisioned only from a verified Intel TDX attestation whose measurement is an approved identity and whose nonce is bound to the exact transaction; an unverified, unpinned or unbound attestation provisions nothing.",
     "enclave_signing_key_is_isolated_from_the_host": "The host cannot obtain a usable signature without the verified enclave key: a signature that does not verify over the exact bytes is refused, and a revoked or rotated key never signs again.",
     "tee_attestation_freshness_is_enforced": "The enclave provisioning nonce is fresh on every call and a provider policy read beyond its freshness bound (or with no timestamp) is refused, so a stale attestation or policy is never treated as current.",

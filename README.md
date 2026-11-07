@@ -835,12 +835,12 @@ a bare interpreter.
 **1. Run the tests.**
 
 ```sh
-python -m pytest tests/ --collect-only -q   # 1751 tests collected
-python -m pytest tests/ -q                  # 1720 passed, 31 skipped
+python -m pytest tests/ --collect-only -q   # 1768 tests collected
+python -m pytest tests/ -q                  # 1738 passed, 30 skipped
 ```
-→ `1720 passed, 31 skipped`. The skips are the PostgreSQL integration
+→ `1738 passed, 30 skipped`. The skips are the PostgreSQL integration
 tests; set `TRACESETTLE_TEST_PG_DSN` to a real server to run them
-(**1744 passed, 7 skipped** — the remaining 7 are opt-in *live-infrastructure*
+(**1762 passed, 6 skipped** — the remaining 6 are opt-in *live-infrastructure*
 tests that need real provider credentials, a testnet key, or a TDX enclave
 harness, none of which a zero-budget local run has).
 
@@ -1352,7 +1352,7 @@ transaction request ──▶ │ guard/rules.py      7 controls, all run  │
                         │                     validate, then execute │
                         │ guard/audit.py      hash-chained records  │
                         │ guard/monitor.py    counters + incidents  │
-                        │ guard/invariants.py 56 checked guarantees │
+                        │ guard/invariants.py 57 checked guarantees │
                         └────────────────────┬─────────────────────┘
                                              │ ALLOW + authorization
                                              ▼
@@ -1775,7 +1775,7 @@ immutable commit SHA (not a moving tag), and cancels superseded runs.
 ## Tests
 
 ```sh
-python3 -m pytest tests/ -q          # 1720 passed, 31 skipped (1744 passed, 7 skipped with PostgreSQL)
+python3 -m pytest tests/ -q          # 1738 passed, 30 skipped (1762 passed, 6 skipped with PostgreSQL)
 python3 -m pytest tests/test_guard_authorization.py -q
 python3 -m pytest tests/test_guard_invariants.py -q
 python3 -m pytest tests/test_guard_end_to_end.py -q
