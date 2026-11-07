@@ -82,8 +82,16 @@ class NetworkConfig:
 
 
 #: Public, keyless RPC endpoints. These are free and were verified reachable.
+#: The free nodes prune recent history within about two days, so the archival
+#: node is included as a fallback: a pruned transaction is a definitive
+#: ``NOT_FOUND`` on the free node, and only the archive can still answer. A
+#: ``NOT_FOUND`` is the *only* status that fans out (see ``NearRpc._call``), so
+#: an outage never multiplies load across the endpoints.
 _TESTNET_RPC = "https://rpc.testnet.near.org"
-_TESTNET_RPC_FALLBACKS = ("https://rpc.testnet.fastnear.com",)
+_TESTNET_RPC_FALLBACKS = (
+    "https://rpc.testnet.fastnear.com",
+    "https://archival-rpc.testnet.near.org",
+)
 _MAINNET_RPC = "https://rpc.mainnet.near.org"
 _MAINNET_RPC_FALLBACKS = ("https://free.rpc.fastnear.com", "https://rpc.mainnet.fastnear.com")
 
@@ -105,6 +113,29 @@ NETWORKS: dict[NearNetwork, NetworkConfig] = {
 #: The default network. Testnet is the default so a mistake cannot spend real
 #: funds; mainnet is opt-in and always explicit.
 DEFAULT_NETWORK = NearNetwork.TESTNET
+
+
+def archive_first_config(network: NearNetwork) -> NetworkConfig:
+    """The network's endpoints, reordered so an archive-capable node is first.
+
+    A *historical* read (an already-final transaction) is a definitive
+    ``NOT_FOUND`` on a free node that has pruned it, so the archive is the node
+    that actually holds the record. Putting it first turns two round trips into
+    one. A live submission must keep the free primary first for freshness, so
+    this is opt-in and used only by the historical settlement read.
+    """
+    config = network_config(network)
+    urls = (config.rpc_url, *config.rpc_fallbacks)
+    archive = [url for url in urls if "archival" in url]
+    if not archive:
+        return config
+    rest = [url for url in urls if "archival" not in url]
+    return NetworkConfig(
+        network=config.network,
+        rpc_url=archive[0],
+        rpc_fallbacks=tuple(archive[1:] + rest),
+        explorer_tx_base=config.explorer_tx_base,
+    )
 
 
 def parse_network(value: str | NearNetwork | None) -> NearNetwork:

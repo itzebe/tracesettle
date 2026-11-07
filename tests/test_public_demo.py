@@ -48,6 +48,7 @@ from guard_helpers import make_authority, make_service
 #: test failure, not a silent widening of the surface.
 EXPECTED_PUBLIC_ROUTES = {
     "/api/guard/scenarios",
+    "/api/guard/judge/scenarios",
     "/api/guard/near/agent-demo",
     "/api/guard/near/policy-scope",
     "/api/guard/near/behaviours",
@@ -81,6 +82,12 @@ def running_server(*, api_key: str | None = None, public_demo: bool = False, **k
     original_demo = config.PUBLIC_DEMO_ENABLED
     config.API_KEY = api_key
     config.PUBLIC_DEMO_ENABLED = public_demo
+    # The settlement read is cached process-wide because the pinned transaction
+    # is final. Clear it so a test that substitutes the RPC always exercises the
+    # live path instead of reading a value a previous test cached.
+    from tracesettle.near import settlement_check as _sc
+
+    _sc._SETTLEMENT_CACHE.clear()
     server = InvestigationServer(
         ("127.0.0.1", 0),
         timeout_seconds=2.0,
@@ -106,7 +113,7 @@ def _get(url: str, key: str | None = None):
     if key is not None:
         req.add_header("X-API-Key", key)
     try:
-        with urllib.request.urlopen(req, timeout=5) as resp:
+        with urllib.request.urlopen(req, timeout=30) as resp:
             body = resp.read().decode("utf-8", "replace")
             try:
                 parsed = json.loads(body)

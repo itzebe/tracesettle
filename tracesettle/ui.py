@@ -99,6 +99,7 @@ _STATIC_FILES = {
 PUBLIC_DEMO_ROUTES = frozenset(
     {
         "/api/guard/scenarios",
+        "/api/guard/judge/scenarios",
         "/api/guard/near/agent-demo",
         "/api/guard/near/policy-scope",
         "/api/guard/near/behaviours",
@@ -149,6 +150,11 @@ _INDEX_HTML = """<!DOCTYPE html>
   body { margin: 0; background: var(--bg); color: var(--fg);
     font: 15px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   header { padding: 20px 16px 12px; border-bottom: 1px solid var(--border); }
+  header .wrap { max-width: 1100px; margin: 0 auto; display: flex; gap: 12px;
+    align-items: flex-start; flex-wrap: wrap; }
+  header nav { margin-left: auto; display: flex; gap: 6px; font-size: 13px; }
+  /* WCAG 2.2 AA 2.5.8: nav targets must be at least 24x24 CSS px. */
+  header nav a { display: inline-block; padding: 6px 9px; border-radius: 7px; }
   h1 { margin: 0 0 4px; font-size: 20px; letter-spacing: .5px; }
   .tag { color: var(--muted); font-size: 12px; }
   main { max-width: 1100px; margin: 0 auto; padding: 16px; }
@@ -194,6 +200,8 @@ _INDEX_HTML = """<!DOCTYPE html>
   a { color: var(--accent); }
   code { background: #0b0f14; padding: 1px 5px; border-radius: 4px; font-size: 12px; }
   footer { color: var(--muted); font-size: 12px; padding: 20px 16px; text-align: center; }
+  /* WCAG 2.2 AA 2.5.8: keep inline footer links at a 24x24 CSS px target. */
+  footer a { display: inline-block; padding: 5px 8px; border-radius: 6px; }
   .hero { margin-bottom: 20px; }
   .hero-title { margin: 0 0 4px; font-size: 24px; line-height: 1.25; }
   .hero-sub { margin: 0 0 10px; font-size: 16px; color: var(--accent); font-weight: 600; }
@@ -207,6 +215,12 @@ _INDEX_HTML = """<!DOCTYPE html>
   .cap ul { margin: 0; padding-left: 18px; }
   .cap li { margin-bottom: 6px; font-size: 13px; }
   .cap-cta { margin: 12px 0 0; font-size: 13px; font-weight: 600; }
+  /* WCAG 2.2 AA target size (2.5.8): a call to action must offer at least a
+     24x24 CSS px target. An inline link is only ~15px tall, so the CTAs are
+     promoted to inline-blocks with vertical padding. */
+  .cap-cta a, .hero a.cta { display: inline-block; padding: 7px 12px; border-radius: 7px;
+    border: 1px solid var(--border); background: #21262d; text-decoration: none; }
+  .cap-cta a:hover, .hero a.cta:hover { border-color: var(--accent); }
   .demo-cta { background: #1d1a2e; border: 1px solid var(--border); border-left: 3px solid var(--sim);
     border-radius: 8px; padding: 14px 16px; margin-bottom: 20px; }
   .demo-cta h3 { margin: 0 0 6px; font-size: 15px; }
@@ -227,8 +241,13 @@ _INDEX_HTML = """<!DOCTYPE html>
 <body>
 <a class="skip" href="#main">Skip to main content</a>
 <header>
-  <h1>TRACESETTLE</h1>
-  <div class="tag">Security infrastructure for autonomous payments &middot; NEAR &middot; v__VERSION__</div>
+  <div class="wrap">
+    <div>
+      <h1>TRACESETTLE</h1>
+      <div class="tag">Security infrastructure for autonomous payments &middot; NEAR &middot; v__VERSION__</div>
+    </div>
+    <nav aria-label="Site">__SITE_NAV__</nav>
+  </div>
 </header>
 <main id="main">
   <section class="hero">
@@ -531,7 +550,11 @@ _DEMO_HTML = """<!DOCTYPE html>
     padding: 8px 12px; border-radius: 0 0 6px 0; z-index: 20; }
   .skip:focus { left: 0; }
   header { padding: 18px 16px 14px; border-bottom: 1px solid var(--border); }
-  header .wrap { max-width: 1080px; margin: 0 auto; }
+  header .wrap { max-width: 1080px; margin: 0 auto; display: flex; gap: 14px;
+    align-items: flex-start; flex-wrap: wrap; }
+  header nav { margin-left: auto; display: flex; gap: 6px; font-size: 13px; }
+  /* WCAG 2.2 AA 2.5.8: nav targets must be at least 24x24 CSS px. */
+  header nav a { display: inline-block; padding: 6px 9px; border-radius: 7px; }
   h1 { margin: 0 0 4px; font-size: 19px; letter-spacing: .5px; }
   .tag { color: var(--muted); font-size: 12px; }
   main { max-width: 1080px; margin: 0 auto; padding: 20px 16px 40px; }
@@ -586,6 +609,8 @@ _DEMO_HTML = """<!DOCTYPE html>
   .mono { word-break: break-all; }
   footer { color: var(--muted); font-size: 12px; padding: 24px 16px; text-align: center;
     border-top: 1px solid var(--border); }
+  /* WCAG 2.2 AA 2.5.8: keep inline footer links at a 24x24 CSS px target. */
+  footer a { display: inline-block; padding: 5px 8px; border-radius: 6px; }
   @media (max-width: 640px) {
     .hero h2 { font-size: 21px; }
     .kv { grid-template-columns: 1fr; gap: 1px 0; }
@@ -597,8 +622,16 @@ _DEMO_HTML = """<!DOCTYPE html>
 <a class="skip" href="#main">Skip to main content</a>
 <header>
   <div class="wrap">
-    <h1>TRACESETTLE</h1>
-    <div class="tag">Security infrastructure for autonomous payments &middot; NEAR &middot; v__VERSION__</div>
+    <div>
+      <h1>TRACESETTLE</h1>
+      <div class="tag">Security infrastructure for autonomous payments &middot; NEAR &middot; v__VERSION__</div>
+    </div>
+    <nav aria-label="Site">
+      <a href="/">Home</a>
+      <a href="/evaluate">Evaluate</a>
+      <a href="/JUDGE_GUIDE">Judge guide</a>
+      <a href="/console">Console</a>
+    </nav>
   </div>
 </header>
 <main id="main">
@@ -1004,18 +1037,50 @@ class Handler(BaseHTTPRequestHandler):
         with an authentication error.
         """
         if config.PUBLIC_DEMO_ENABLED:
-            guard_link = '<a href="demo">Open the authorization firewall &rarr;</a>'
+            guard_link = '<a href="evaluate">Test TRACESETTLE &rarr;</a>'
             demo_link = '<a href="demo">Run the six-scene demonstration &rarr;</a>'
+            site_nav = (
+                '<a href="demo">Demo</a>'
+                '<a href="evaluate">Evaluate</a>'
+                '<a href="JUDGE_GUIDE">Judge guide</a>'
+                '<a href="console">Console</a>'
+            )
         else:
             guard_link = '<a href="console#guard">Open the authorization firewall &rarr;</a>'
             demo_link = '<a href="console#lab">Open the demonstration &rarr;</a>'
+            site_nav = '<a href="console">Console</a>'
         html = (
             _INDEX_HTML.replace("__VERSION__", __version__)
             .replace("__DISCLAIMER__", DISCLAIMER)
+            .replace("__SITE_NAV__", site_nav)
             .replace("__GUARD_LINK__", guard_link)
             .replace("__DEMO_LINK__", demo_link)
         )
         return html.encode("utf-8")
+
+    def _serve_judge_guide(self) -> None:
+        """Render ``JUDGE_GUIDE.md`` from the repository root to HTML.
+
+        The file is read from the project root, not from the package, so a
+        deployment that ships only the package answers 404 rather than rendering
+        a stale or empty page.
+        """
+        from .markdown import render
+
+        root = pathlib.Path(__file__).resolve().parent.parent
+        source = root / "JUDGE_GUIDE.md"
+        try:
+            text = source.read_text(encoding="utf-8")
+        except OSError:
+            self._json(404, {"error": "judge guide not available in this deployment"})
+            return
+        body = render(text)
+        from .evaluate import DOC_PAGE
+
+        html = DOC_PAGE.replace("__TITLE__", "Judge guide").replace("__BODY__", body).replace(
+            "__VERSION__", __version__
+        )
+        self._send(200, html.encode("utf-8"), "text/html; charset=utf-8")
 
     def do_GET(self) -> None:  # noqa: N802
         path = urlparse(self.path).path
@@ -1032,6 +1097,24 @@ class Handler(BaseHTTPRequestHandler):
                 "__DISCLAIMER__", DISCLAIMER
             )
             self._send(200, html.encode("utf-8"), "text/html; charset=utf-8")
+        elif path in ("/evaluate", "/evaluate/"):
+            # The public, keyless independent-evaluation page. Served only when
+            # the operator opted into the public demonstration, so it and /demo
+            # are always either both present or both absent.
+            if not config.PUBLIC_DEMO_ENABLED:
+                self._json(404, {"error": "not found"})
+                return
+            from .evaluate import EVALUATE_HTML
+
+            html = EVALUATE_HTML.replace("__VERSION__", __version__)
+            self._send(200, html.encode("utf-8"), "text/html; charset=utf-8")
+        elif path in ("/JUDGE_GUIDE", "/judge-guide", "/judge-guide/"):
+            # The judge guide is one file, rendered at request time, so the copy
+            # a judge reads here and the copy in the repository cannot drift.
+            if not config.PUBLIC_DEMO_ENABLED:
+                self._json(404, {"error": "not found"})
+                return
+            self._serve_judge_guide()
         elif path in ("/console", "/console/"):
             html = CONSOLE_HTML.replace("__VERSION__", __version__).replace(
                 "__DISCLAIMER__", DISCLAIMER

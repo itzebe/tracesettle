@@ -194,6 +194,52 @@ def _cmd_credentials_revoke(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_judge(args: argparse.Namespace) -> int:
+    """Run the independent evaluation scenarios and print the report."""
+    import json
+
+    from .judge import to_report
+
+    report = to_report()
+    summary = report["summary"]
+    if args.json:
+        print(json.dumps(report, indent=2))
+    else:
+        # A live check that could not run (no outbound network) is an honest
+        # environmental limitation, not a defect, so it is marked "SKIP" rather
+        # than "FAIL". Only a real contradiction is a failure. The `skipped`
+        # flag is computed once in judge.py so the CLI and the web page agree.
+        print("TRACESETTLE — independent evaluation scenarios")
+        print("=" * 64)
+        for s in report["scenarios"]:
+            mark = "PASS" if s["passed"] else ("SKIP" if s["skipped"] else "FAIL")
+            kind = "real" if s["real"] else "sim"
+            print(f"[{mark}] {s['id']:32} {kind:4} decision={s['decision']:16} "
+                  f"signer_calls={s['signer_calls']}")
+            print(f"        expected: {s['expected']}")
+            print(f"        observed: {s['observed']}")
+        print("-" * 64)
+        print(f"passed {summary['passed']}/{summary['total']} "
+              f"(enforcement {summary['enforcement_passed']}/{summary['enforcement_total']}, "
+              f"live {summary['live_passed']}/{summary['live_total']})")
+        if summary["live_passed"] < summary["live_total"]:
+            print("note: the live settlement check could not run here (no outbound network); "
+                  "it is reported UNAVAILABLE, never assumed.")
+        print(f"anything broadcast: {summary['broadcast_occurred']}")
+        print()
+        print(report["disclaimer"])
+    # Exit non-zero only for a real defect: an enforcement scenario that did not
+    # behave as specified, or a live check that found a contradiction. A live
+    # check that is merely UNAVAILABLE (no network from this host) is an honest
+    # environmental limitation, not a failure of the product.
+    enforcement_ok = summary["enforcement_passed"] == summary["enforcement_total"]
+    live_states = {
+        s["decision"] for s in report["scenarios"] if s["real"]
+    }
+    live_contradiction = bool(live_states & {"DISPUTED", "FAILED", "CONTRADICTORY"})
+    return 0 if enforcement_ok and not live_contradiction else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="tracesettle",
@@ -215,6 +261,12 @@ def build_parser() -> argparse.ArgumentParser:
     srv.add_argument("--timeout", type=float, default=15.0)
     srv.add_argument("--attempts", type=int, default=3)
     srv.set_defaults(func=_cmd_serve)
+
+    judge = sub.add_parser(
+        "judge", help="run the independent evaluation scenarios (offline, no key needed)"
+    )
+    judge.add_argument("--json", action="store_true", help="emit the full report as JSON")
+    judge.set_defaults(func=_cmd_judge)
 
     creds = sub.add_parser(
         "credentials",

@@ -233,6 +233,8 @@ class GuardAPI:
             return ApiResponse(200, payload)
         if path == "/api/guard/scenarios":
             return ApiResponse(200, {"scenarios": SCENARIOS, "note": SIMULATION_NOTE})
+        if path == "/api/guard/judge/scenarios":
+            return self._judge_scenarios()
         if path == "/api/guard/near/scenarios":
             from ..near.attacks import SIMULATION_NOTE as NEAR_NOTE
             from ..near.attacks import run_all
@@ -354,6 +356,18 @@ class GuardAPI:
                 "audit": audit.to_dict(),
             },
         )
+
+    def _judge_scenarios(self) -> ApiResponse:
+        """Run the independent judge evaluation scenarios.
+
+        Nine controlled enforcement scenarios plus one genuine, read-only NEAR
+        testnet settlement check. Every result states its own decision, whether
+        the signer was reached, whether anything was signed and whether anything
+        was broadcast, so a judge can verify the boundary without trusting prose.
+        """
+        from ..judge import to_report
+
+        return ApiResponse(200, to_report())
 
     def _near_behaviours(self) -> ApiResponse:
         """Run the six required agent-authorization behaviours, each labelled."""
