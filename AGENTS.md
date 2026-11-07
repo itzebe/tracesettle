@@ -2432,3 +2432,35 @@ is additive and off by default.
   **1824 passed, 9 skipped** with PostgreSQL 16. pyflakes clean; compileall OK;
   offline demo byte-identical (md5 `4864f13c…`); near demo byte-identical; 60/60
   invariants hold.
+
+### Release closure (2026-11-06)
+
+- **PR #24** (`feat/mission24-tee-signing-boundary` → `master`) squash-merged as
+  **`3c9cf0eb1037d592f59310241873b135742ff3ef`**. All five CI checks green on the
+  merged head: Tests and static analysis, PostgreSQL shared-state integration,
+  Docker build and runtime, Vercel container image, Vercel Preview Comments.
+- **First CI run failed, and the fix was a real one.** `test_near_packaging.py`
+  probes `/api/guard/invariants` over a real socket with a 10 s per-request
+  budget; that endpoint runs all 60 invariants synchronously (~9.6 s locally,
+  slower on a shared runner), so the read timed out while every route was in fact
+  answering. The budget is now 60 s and the assertion is unchanged (a timeout is
+  still a failure). Lesson: a route whose cost grows with the invariant count
+  needs a test budget that grows with it, or CI fails for a non-defect.
+- **Production verified live** (`https://tracesettle-navy.vercel.app`, deployment
+  `3c9cf0eb`, `Server: Vercel`, version `0.2.0`): `/` `200`, `/console` `200`,
+  `/demo` `200`, `/api/health` `200`; `GET /api/guard/near/tee-signing` → `401`
+  (key-gated, as designed); `/console` renders the **TEE signing boundary
+  (OutLayer Signing Keys)** panel; the console NEAR tab shows the full trusted
+  signing chain.
+- **Demonstration re-verified in a real browser and by direct API call.**
+  `/api/guard/near/agent-demo` → `reproduced: true`, malicious `decision=BLOCK`,
+  `signer_calls=0`, `broadcast_occurred=false`; legitimate `decision=ALLOW`,
+  `signer_calls=1`, `settlement_state=VERIFIED`. Scene 6 is a genuine read-only
+  testnet read: `/api/guard/near/settlement-check` → `VERIFIED`, tx
+  `3wQ7UDmQzCTtqyxnBMaQ35SfxioQJUp3rnLyEPX6nuQd`, every field check `ok: true`.
+- **Gates re-run on the merged head:** `judge` 9/9 enforcement, `broadcast=False`;
+  `near_tee_signing_demo.py` 9/9 and byte-identical across runs; offline demo md5
+  `4864f13c1c08cf1b8b871a64102848bf`.
+- **Still not run live, and stated as such:** the OutLayer `/call` signing route
+  is paid, so no real enclave signature was produced here. `evidence/mission24/`
+  records the exact owner-only action. Nothing in the release claims otherwise.
