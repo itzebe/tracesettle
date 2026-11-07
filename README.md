@@ -189,6 +189,31 @@ Where each capability stands:
      endpoint, but no endpoint that signs an arbitrary NEAR transaction. The
      blocker and the integration path are documented in
      [`docs/NEAR_INTEGRATION.md`](docs/NEAR_INTEGRATION.md) §10.
+  4. **TEE signing boundary (OutLayer Signing Keys)** — a separate, opt-in route
+     (`tracesettle/near/tee_signing/`, `TRACESETTLE_TEE_SIGNING=1`) that asks a
+     remote, **attested Intel TDX enclave** to sign the exact NEAR transaction
+     digest. The enclave is given a *structured description* of the authorized
+     transaction (the canonical signing request), never raw caller bytes, and a
+     WASI guest recomputes the digest itself, so the host cannot smuggle a
+     different transaction. A signature is labelled `TEE_SIGNING_VERIFIED` only
+     when **every** separate claim holds — a genuine Intel TDX quote verified
+     against the pinned Intel root with fresh PCS collateral, an operator-approved
+     measurement *and* build (`sha256` of the exact signing WASM), the
+     caller/project identity, a fresh host nonce, the run's input/output
+     commitment, and the signature over the exact digest. A verified quote alone
+     is never enough: a signature with no attestation is `SIGNATURE_VERIFIED` at
+     most, and a non-verifying attestation is `ATTESTATION_REJECTED`, never
+     promoted. It is a **paid per-execution** route, so it is off by default;
+     with no credential the real provider reports itself unavailable and the
+     boundary refuses — it **never** falls back to a software key, and it is
+     **testnet-only**. The demo
+     (`python3 demo/near_tee_signing_demo.py`, 9/9) and the tests substitute only
+     the network transport; the key, the digest and the signature are real.
+     Enabling it without an owner, project or approved build is a fail-closed
+     start-up error. Structural guarantees:
+     `near_tee_signing_requires_an_authorization_and_a_verified_signature` and
+     `near_tee_signing_never_claims_tee_without_attestation_evidence`, both
+     mutation-tested.
 - **Live NEAR execution boundary:** Testnet verified — the opt-in boundary
   (`TRACESETTLE_NEAR_EXECUTION=1`) built, signed, broadcast and independently
   verified a real NEAR testnet transfer of 0.01 NEAR (tx
@@ -644,6 +669,47 @@ attestation provider and the execution boundary is a fail-closed start-up error
 on any binding. This gates the *signing boundary*; the default executor still
 simulates execution and broadcasts nothing.
 
+### TEE signing boundary — OutLayer Signing Keys (optional, off by default)
+
+The gate above binds a verified attestation to the exact bytes, but the signature
+still comes from a software key. The **TEE signing boundary** closes that last
+gap: it asks a remote, **attested Intel TDX enclave** to produce the ed25519
+signature over the exact NEAR transaction digest, so the key never leaves the
+enclave. It targets **OutLayer Signing Keys** (`outlayer:signing-keys`), the one
+documented route that signs a caller-computed digest; the research that selected
+it is in `evidence/mission24/provider_research.md`.
+
+- **The enclave is given a description, never raw bytes.** It receives the
+  canonical signing request — the authorized transaction's fields plus the
+  authorization and approved build — and a WASI guest recomputes the digest
+  itself, so the host cannot smuggle a different transaction past the boundary.
+- **`TEE_SIGNING_VERIFIED` requires every separate claim.** A genuine Intel TDX
+  quote verified against the pinned Intel root with **fresh PCS collateral**, an
+  operator-approved measurement *and* build (`sha256` of the exact signing WASM),
+  the caller/project identity, a fresh host nonce, the run's input/output
+  commitment, and the signature over the exact digest. A verified quote alone is
+  never enough: with no attestation the result is `SIGNATURE_VERIFIED` at most,
+  and a non-verifying attestation is `ATTESTATION_REJECTED`, never promoted.
+- **Off by default, and fail-closed.** The route is **paid per execution**
+  (failed executions are not refunded), so it is an explicit operator decision
+  (`TRACESETTLE_TEE_SIGNING=1`). Enabling it without an owner, project or approved
+  build is a hard start-up error. With no payment key the boundary reports itself
+  unavailable and **refuses** — it never falls back to a software key. It is
+  **testnet-only**.
+- **Structural guarantees.**
+  `near_tee_signing_requires_an_authorization_and_a_verified_signature` and
+  `near_tee_signing_never_claims_tee_without_attestation_evidence`, both
+  mutation-tested.
+
+Config: `TRACESETTLE_TEE_SIGNING`, `TRACESETTLE_TEE_SIGNING_OWNER`,
+`TRACESETTLE_TEE_SIGNING_PROJECT`, `TRACESETTLE_TEE_SIGNING_PAYMENT_KEY`
+(server-side only; never logged or returned), `TRACESETTLE_TEE_SIGNING_NETWORK`,
+`TRACESETTLE_TEE_SIGNING_APPROVED_BUILD`, `TRACESETTLE_TEE_SIGNING_APPROVED_MEASUREMENT`,
+`TRACESETTLE_TEE_SIGNING_REQUIRED`. The console's **TEE signing boundary
+(OutLayer Signing Keys)** panel and `GET /api/guard/near/tee-signing` report the
+real configured state; the demo `python3 demo/near_tee_signing_demo.py` (9/9)
+exercises the boundary with a deterministic stand-in provider.
+
 ### Wallet-mediated flow (the wallet signs and sends)
 
 The server-side boundary above is for an operator who wants TRACESETTLE to build
@@ -800,7 +866,7 @@ refusal is provable: the executor is never called unless the outcome was `ALLOW`
 | H | Native tx wrongly assumed protected by an Intents-only policy | policy-scope rejection |
 | I | Provider reports success without independent evidence | `UNKNOWN` / `UNAVAILABLE` |
 
-Seventeen NEAR-specific structural guarantees join the invariant set, each
+Nineteen NEAR-specific structural guarantees join the invariant set, each
 mutation-tested: `near_policy_must_be_in_force`,
 `near_policy_selection_is_not_client_controlled`,
 `near_native_scope_gap_is_always_stated`,
@@ -815,9 +881,12 @@ mutation-tested: `near_policy_must_be_in_force`,
 `near_execution_never_signs_without_authorization`,
 `near_execution_binding_covers_the_bytes`,
 `near_signature_is_verified_before_state_is_consumed`,
-`near_execution_requires_access_key_permission`, and
-`near_submission_is_durable_and_recovery_never_resubmits` (sixteen NEAR-specific
-in total). Two further guarantees cover the newer controls and are mutation-tested
+`near_execution_requires_access_key_permission`,
+`near_submission_is_durable_and_recovery_never_resubmits`,
+`near_execution_enforces_the_provider_policy`,
+`near_tee_signing_requires_an_authorization_and_a_verified_signature`, and
+`near_tee_signing_never_claims_tee_without_attestation_evidence` (nineteen
+NEAR-specific in total). Two further guarantees cover the newer controls and are mutation-tested
 too: `counterparty_intelligence_only_adds_restriction` (a counterparty read can
 never weaken a decision) and `human_approval_cannot_override_a_block` (an approval
 can never lift a `BLOCK` or a `HOLD`). Four more cover the OutLayer custody
@@ -850,14 +919,15 @@ a bare interpreter.
 **1. Run the tests.**
 
 ```sh
-python -m pytest tests/ --collect-only -q   # 1785 tests collected
-python -m pytest tests/ -q                  # 1755 passed, 30 skipped
+python -m pytest tests/ --collect-only -q   # 1833 tests collected
+python -m pytest tests/ -q                  # 1800 passed, 33 skipped
 ```
-→ `1755 passed, 30 skipped`. The skips are the PostgreSQL integration
+→ `1800 passed, 33 skipped`. The skips are the PostgreSQL integration
 tests; set `TRACESETTLE_TEST_PG_DSN` to a real server to run them
-(**1779 passed, 6 skipped** — the remaining 6 are opt-in *live-infrastructure*
-tests that need real provider credentials, a testnet key, or a TDX enclave
-harness, none of which a zero-budget local run has).
+(**1824 passed, 9 skipped** — the remaining 9 are opt-in *live-infrastructure*
+tests that need real provider credentials, a testnet key, a TDX enclave
+harness, or a live OutLayer signing credential, none of which a zero-budget
+local run has).
 
 **2. See the product, then the end-to-end story, from one command.**
 
@@ -989,7 +1059,7 @@ curl -sS -X POST http://127.0.0.1:8080/api/guard/sign \
 curl -sS http://127.0.0.1:8080/api/guard/invariants \
   | python3 -c 'import sys,json;d=json.load(sys.stdin);print("all hold:",d["all_hold"]);[print(" ",i["name"]) for i in d["invariants"]]'
 ```
-→ `all hold: True` and the fifty-eight invariant names, including the seventeen NEAR
+→ `all hold: True` and the sixty invariant names, including the nineteen NEAR
 ones (`near_policy_must_be_in_force`, `near_native_scope_gap_is_always_stated`,
 `near_function_call_key_cannot_transfer_near`,
 `near_unrecognised_access_key_never_allows`,
@@ -1295,6 +1365,24 @@ refused; E a key cannot be used with a different provisioning request. Expected:
 `5/5 checks produced the expected outcome.` and `No transaction was signed for a
 chain.` The demo is byte-identical across runs.
 
+**20. See the TEE signing boundary hold its guarantees.**
+
+```sh
+python3 demo/near_tee_signing_demo.py
+```
+→ nine checks against the real boundary logic, using a deterministic stand-in
+signing provider (a real ed25519 key, a real NEAR transaction, no network): A an
+authorized transaction is signed and the signature verifies; B the enclave guest
+recomputes the product's exact NEAR digest; C a `BLOCK` decision never reaches the
+signing provider; D a record bound to another transaction is refused; E a
+signature under a different key is refused; F a non-verifying attestation never
+reaches `TEE_SIGNING_VERIFIED`; G a fully verified attestation reaches
+`TEE_SIGNING_VERIFIED`; H mainnet is refused (testnet-only); I with no payment key
+the real OutLayer provider reports itself unavailable and refuses — no software
+fallback. Expected: `9/9 checks produced the expected outcome.` and `No OutLayer
+call was made. Nothing was broadcast. No key was requested.` The demo is
+byte-identical across runs.
+
 ## Supported input and honest limits
 
 | Identifier | What it can do |
@@ -1367,7 +1455,7 @@ transaction request ──▶ │ guard/rules.py      7 controls, all run  │
                         │                     validate, then execute │
                         │ guard/audit.py      hash-chained records  │
                         │ guard/monitor.py    counters + incidents  │
-                        │ guard/invariants.py 58 checked guarantees │
+                        │ guard/invariants.py 60 checked guarantees │
                         └────────────────────┬─────────────────────┘
                                              │ ALLOW + authorization
                                              ▼
@@ -1445,7 +1533,7 @@ identical decisions.
 | `tracesettle/guard/safeguards.py` | Durable security safeguards: the learning loop's store (SQLite). |
 | `tracesettle/guard/learning.py` | The learning loop: derive a lesson, apply safeguards (only ever tightening). |
 | `tracesettle/guard/state_pg.py` | Optional PostgreSQL backend: shared nonces, counters, revocations, idempotency. |
-| `tracesettle/guard/invariants.py` | The fifty-eight structural guarantees, checked by execution. |
+| `tracesettle/guard/invariants.py` | The sixty structural guarantees, checked by execution. |
 | `tracesettle/guard/api.py` | Guard HTTP routing and JSON serialization. |
 | `tracesettle/guard/console.py` | The security operations console page. |
 | `docs/TRANSACTION_SECURITY.md` | The security layer in full, including what it does not do. |
@@ -1457,7 +1545,7 @@ identical decisions.
 | `tracesettle/near/agent_demo.py` | The one implementation of the offline end-to-end demonstration (policy, harness, `run_agent_payment_demo`); used by the CLI, the `/api/guard/near/agent-demo` endpoint, and the console panel. |
 | `demo/replay_opener.py` | Offline transport that replays `evidence/raw/` through the real code. |
 | `tracesettle/static/near-connect.js` | Vendored `@hot-labs/near-connect` (MIT) wallet connector, served same-origin at `/assets/near-connect.js`. |
-| `tests/` | 1785 tests (30 PostgreSQL tests skip without `TRACESETTLE_TEST_PG_DSN`; further tests are opt-in live tests that skip without a live testnet key, live Agent API credentials, or `TRACESETTLE_ENCLAVE_HARNESS=1`). `evidence/raw/` fixtures are real captures; `tests/fixtures/synthetic/` are clearly labelled synthetic. |
+| `tests/` | 1833 tests (33 skip without `TRACESETTLE_TEST_PG_DSN`; further tests are opt-in live tests that skip without a live testnet key, live Agent API credentials, `TRACESETTLE_ENCLAVE_HARNESS=1`, or live OutLayer signing credentials). `evidence/raw/` fixtures are real captures; `tests/fixtures/synthetic/` are clearly labelled synthetic. |
 | `JUDGE_GUIDE.md` | The independent evaluation guide, rendered at `/JUDGE_GUIDE`. |
 | `docs/API.md` | The complete HTTP surface: routes, auth, request/response shape. |
 | `PHASE1_FEASIBILITY.md` | Phase 1 feasibility and API verification. |
@@ -1471,7 +1559,9 @@ tracesettle/near/          NEAR agent protection: policy scope, access-key
                           the settlement assurance view, the Intents lifecycle
                           (create → authorize → quote → approve → deposit →
                           settle), TEE research, the enclave signing boundary,
-                          and the opt-in OutLayer custody boundary (outlayer.py,
+                          the opt-in TEE signing boundary (tee_signing/: the
+                          OutLayer Signing Keys raw-digest route), and the opt-in
+                          OutLayer custody boundary (outlayer.py,
                           outlayer_execution.py, custody_attestation.py,
                           provider_policy_gate.py)
 
@@ -1565,7 +1655,7 @@ variable and all documented in `docs/TRANSACTION_SECURITY.md`:
   replay-nonce store all have explicit caps, so a flood cannot exhaust memory.
   When durable state is configured, spent nonces and the limit counters live in
   SQLite instead, so they survive a restart (see **Durable state** below).
-- **Structural invariants, checked by execution.** Fifty-eight guarantees at
+- **Structural invariants, checked by execution.** Sixty guarantees at
   `GET /api/guard/invariants`, each mutation-tested so a checker that cannot fail
   is treated as a defect.
 - **Honest audit claim.** In-place modification of an audit record is detectable;
@@ -1790,7 +1880,7 @@ immutable commit SHA (not a moving tag), and cancels superseded runs.
 ## Tests
 
 ```sh
-python3 -m pytest tests/ -q          # 1755 passed, 30 skipped (1779 passed, 6 skipped with PostgreSQL)
+python3 -m pytest tests/ -q          # 1800 passed, 33 skipped (1824 passed, 9 skipped with PostgreSQL)
 python3 -m pytest tests/test_guard_authorization.py -q
 python3 -m pytest tests/test_guard_invariants.py -q
 python3 -m pytest tests/test_guard_end_to_end.py -q
@@ -1852,7 +1942,7 @@ Intents), a function-call key that cannot transfer NEAR, a full-access key that
 forces review, the five outcomes, determinism, an invalid amount failing safe to
 `UNKNOWN`, a client-supplied approval flag never honoured, and the settlement
 assurance rule that a provider success claim is never independently verified
-without decisive evidence. Each of the sixteen NEAR-specific invariants is mutation-tested.
+without decisive evidence. Each of the nineteen NEAR-specific invariants is mutation-tested.
 
 ## Read-only guarantee
 

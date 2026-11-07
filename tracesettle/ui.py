@@ -1764,6 +1764,70 @@ def _build_enclave_boundary() -> Any:
     )
 
 
+def _build_tee_signing_boundary() -> Any:
+    """Build the TEE signing boundary, or ``None`` when it is not configured.
+
+    This is the OutLayer Signing Keys route — the only one that signs the exact
+    NEAR transaction digest inside an Intel TDX enclave. It is a **paid**
+    per-execution route, so enabling it is an explicit operator decision and it is
+    never a public-bind default. A missing owner, project or approved build is a
+    hard failure at start-up (the boundary would otherwise report itself
+    available and then refuse every call).
+
+    With the flag off, or with no owner/project, the boundary is not built and the
+    route reports it disabled. With owner and project set but no payment key, the
+    boundary *is* built and reports itself unavailable and refuses to sign — the
+    honest state for "the route exists but this deployment cannot pay for it".
+    """
+    if not config.TEE_SIGNING_ENABLED:
+        return None
+    from .near.tee_signing import OutLayerSigningProvider, TeeSigningBoundary
+
+    if not config.TEE_SIGNING_OWNER or not config.TEE_SIGNING_PROJECT:
+        raise RuntimeError(
+            "TRACESETTLE_TEE_SIGNING=1 requires TRACESETTLE_TEE_SIGNING_OWNER and "
+            "TRACESETTLE_TEE_SIGNING_PROJECT"
+        )
+    if not config.TEE_SIGNING_APPROVED_BUILD:
+        raise RuntimeError(
+            "TRACESETTLE_TEE_SIGNING=1 requires TRACESETTLE_TEE_SIGNING_APPROVED_BUILD "
+            "(the sha256 of the exact signing WASM), so a swapped build cannot sign"
+        )
+    from .near.collateral import PcsCollateralClient
+
+    approved_measurement = None
+    if config.TEE_SIGNING_APPROVED_MEASUREMENT:
+        from .near.enclave import ApprovedMeasurement, MeasurementPolicy
+
+        fields = config.parse_approved_measurement(config.TEE_SIGNING_APPROVED_MEASUREMENT)
+        approved_measurement = MeasurementPolicy(
+            [ApprovedMeasurement("operator-approved", fields)], require_pin=True
+        )
+
+    client = HttpClient(
+        timeout=config.OUTLAYER_TIMEOUT_SECONDS,
+        max_attempts=config.MAX_ATTEMPTS,
+    )
+    provider = OutLayerSigningProvider(
+        client=client,
+        network=config.TEE_SIGNING_NETWORK,
+        owner=config.TEE_SIGNING_OWNER,
+        project=config.TEE_SIGNING_PROJECT,
+        payment_key=config.TEE_SIGNING_PAYMENT_KEY or None,
+        approved_build=config.TEE_SIGNING_APPROVED_BUILD,
+    )
+    boundary = TeeSigningBoundary(
+        provider=provider,
+        approved_build=config.TEE_SIGNING_APPROVED_BUILD,
+        approved_measurement=approved_measurement,
+        expected_caller=config.TEE_SIGNING_OWNER,
+        expected_project=config.TEE_SIGNING_PROJECT,
+        collateral_client=PcsCollateralClient(),
+    )
+    boundary.required = config.TEE_SIGNING_REQUIRED
+    return boundary
+
+
 def _attestation_base_url() -> str:
     """The attested gateway origin, derived from the configured attestation URL."""
     from urllib.parse import urlsplit
@@ -1881,6 +1945,7 @@ class InvestigationServer(ThreadingHTTPServer):
             tee_provider=_build_tee_provider(),
             enclave=_build_enclave_boundary(),
             custody=_build_custody_boundary(self.guard_service),
+            tee_signing=_build_tee_signing_boundary(),
         )
         self.guard_limiter = guard_limiter or TokenBucketLimiter(
             config.GUARD_RATE_LIMIT_PER_MINUTE, config.GUARD_RATE_LIMIT_BURST

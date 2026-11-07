@@ -1,0 +1,18 @@
+[package]
+name = "tracesettle-signing-module"
+version = "0.1.0"
+edition = "2021"
+
+# A WASI Preview 2 component. OutLayer refuses a WASI P1 module that declares
+# signing keys, so this MUST be built for wasm32-wasip2:
+#   cargo build --release --target wasm32-wasip2
+# The manifest (manifest.json) is embedded as the `outlayer.manifest` custom
+# section, covered by the wasm's sha256 — the approved-build identity.
+[dependencies]
+
+[lib]
+crate-type = ["cdylib"]
+
+[profile.release]
+opt-level = "s"
+lto = true

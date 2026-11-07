@@ -413,3 +413,47 @@ def test_enclave_sign_route_requires_a_known_prepare_id():
         api, "/api/guard/near/execution/enclave-sign", {"prepare_id": "does-not-exist"}
     )
     assert refused.status == 404
+
+
+# ---------------------------------------------------------------------------
+# The TEE signing boundary route (OutLayer Signing Keys)
+# ---------------------------------------------------------------------------
+
+
+def test_tee_signing_is_disabled_by_default():
+    api = GuardAPI(make_guard())
+    info = api.dispatch("GET", "/api/guard/near/tee-signing", {}, None)
+    assert info.status == 200
+    assert info.payload["enabled"] is False
+    assert "TRACESETTLE_TEE_SIGNING" in info.payload["note"]
+
+
+def test_tee_signing_reports_unavailable_when_configured_without_a_payment_key():
+    from tracesettle.near.tee_signing import OutLayerSigningProvider, TeeSigningBoundary
+
+    provider = OutLayerSigningProvider(
+        client=None, network="testnet", owner="owner", project="proj", payment_key=None
+    )
+    boundary = TeeSigningBoundary(provider=provider, approved_build="sha256:" + "0" * 64)
+    api = GuardAPI(make_guard(), tee_signing=boundary)
+    info = api.dispatch("GET", "/api/guard/near/tee-signing", {}, None)
+    assert info.status == 200
+    assert info.payload["enabled"] is True
+    assert info.payload["available"] is False
+    assert info.payload["provider"]["requires_payment"] is True
+
+
+def test_tee_signing_never_reports_a_tee_claim_it_did_not_verify():
+    from tracesettle.near.tee_signing import LocalStandInSigningProvider, TeeSigningBoundary
+
+    boundary = TeeSigningBoundary(
+        provider=LocalStandInSigningProvider(seed=bytes(range(32))),
+        approved_build="sha256:" + "0" * 64,
+    )
+    api = GuardAPI(make_guard(), tee_signing=boundary)
+    info = api.dispatch("GET", "/api/guard/near/tee-signing", {}, None)
+    # The stand-in is not a TEE; the route still reports the honest checks.
+    assert "the Intel TDX quote against the pinned Intel root and fresh collateral" in info.payload[
+        "verifies"
+    ]
+    assert info.payload["measurement_pinned"] is False

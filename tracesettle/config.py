@@ -621,6 +621,59 @@ TEE_ATTESTATION_ENABLED = (
 )
 
 # ---------------------------------------------------------------------------
+# TEE signing boundary (OutLayer Signing Keys — the raw-digest signing route)
+# ---------------------------------------------------------------------------
+
+#: Whether the TEE signing boundary is enabled. Off by default. This is the only
+#: route that signs the exact NEAR transaction digest inside an Intel TDX enclave
+#: (OutLayer's ``outlayer:signing-keys`` WASI-P2 path). It is a **paid** route —
+#: OutLayer bills per execution and failed executions are not refunded — so it is
+#: an explicit operator decision and is never a public-bind default. With no
+#: credential the boundary reports itself unavailable and refuses to sign; it
+#: never falls back to a software key.
+TEE_SIGNING_ENABLED = (
+    os.environ.get("TRACESETTLE_TEE_SIGNING", "").strip().lower()
+    in {"1", "true", "yes", "on"}
+)
+
+#: The OutLayer project owner and project name that publish the signing guest.
+#: Both are required when the boundary is enabled; a missing one is a hard
+#: start-up failure, never a silent skip.
+TEE_SIGNING_OWNER = os.environ.get("TRACESETTLE_TEE_SIGNING_OWNER", "").strip()
+TEE_SIGNING_PROJECT = os.environ.get("TRACESETTLE_TEE_SIGNING_PROJECT", "").strip()
+
+#: The OutLayer payment key (``pk_...``) that pays for the signing calls. Read
+#: here, sent only as the ``X-Payment-Key`` header, never returned or logged.
+TEE_SIGNING_PAYMENT_KEY = os.environ.get("TRACESETTLE_TEE_SIGNING_PAYMENT_KEY", "").strip()
+
+#: The network the signing project lives on. ``testnet`` (default) or ``mainnet``.
+TEE_SIGNING_NETWORK = (
+    os.environ.get("TRACESETTLE_TEE_SIGNING_NETWORK", "testnet").strip() or "testnet"
+)
+
+#: The approved build identity: the sha256 of the exact signing WASM the operator
+#: published. An attestation whose ``wasm_hash`` differs is refused, so a swapped
+#: build cannot sign. Required when the boundary is enabled.
+TEE_SIGNING_APPROVED_BUILD = (
+    os.environ.get("TRACESETTLE_TEE_SIGNING_APPROVED_BUILD", "").strip()
+)
+
+#: The approved worker measurement (an ``ApprovedMeasurement`` spec string), so a
+#: quote from an unapproved worker is refused. Optional: when unset, the boundary
+#: reports the measurement as unpinned rather than claiming it matched.
+TEE_SIGNING_APPROVED_MEASUREMENT = (
+    os.environ.get("TRACESETTLE_TEE_SIGNING_APPROVED_MEASUREMENT", "").strip() or None
+)
+
+#: Whether the signing boundary is *required*: with this on, a NEAR execution that
+#: cannot obtain a TEE signature is refused rather than signed in software. Off by
+#: default so the software testnet path still works without the paid route.
+TEE_SIGNING_REQUIRED = (
+    os.environ.get("TRACESETTLE_TEE_SIGNING_REQUIRED", "").strip().lower()
+    in {"1", "true", "yes", "on"}
+)
+
+# ---------------------------------------------------------------------------
 # Serve defaults (env-driven so a container image needs no CLI flags)
 # ---------------------------------------------------------------------------
 #

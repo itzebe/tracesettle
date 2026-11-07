@@ -122,3 +122,42 @@ is a TEE-integrated *signing* path (the executor is still a simulator) and live
 provider-policy integration. The two structural invariants
 `tee_attestation_verification_is_genuine` and
 `tee_attestation_is_bound_to_the_decision_nonce` hold this boundary.
+
+## Update: the OutLayer Signing Keys boundary (implemented, paid)
+
+The "Decision: not integrated" above is about OutLayer's *execution/custody*
+surface. A later, separate surface — **Signing Keys**
+(`outlayer:signing-keys`, WASI P2) — is the one route that signs a
+**caller-computed digest** inside an Intel TDX enclave, and it is the provider
+`tracesettle/near/tee_signing/` targets. It closes the "a software key holds the
+signing secret" gap: the enclave composes and signs the NEAR digest, and the key
+never leaves it.
+
+The zero-budget rule still governs. Signing Keys runs through `/call`, priced per
+execution, and **failed executions are not refunded**; a call needs a payment key
+backed by a funded balance. So the boundary is **implemented, tested and
+fail-closed by default**, but it is **not run live here**. The exact owner-only
+action to run it (fund an OutLayer payment key, or obtain a sponsor code / trial)
+is recorded in `evidence/mission24/free_access_and_credentials.md`; the research
+that selected this route over the custody surface is in
+`evidence/mission24/provider_research.md`.
+
+What the code enforces, and never weakens:
+
+* The enclave is sent a **structured description** of the authorized transaction,
+  never raw caller bytes; a WASI guest recomputes the digest itself.
+* `TEE_SIGNING_VERIFIED` requires the conjunction of a genuine TDX quote (pinned
+  Intel root + fresh PCS collateral), an approved measurement *and* build, the
+  caller/project identity, a fresh nonce, the run's input/output commitment, and
+  a signature that verifies over the exact digest. A verified quote alone is never
+  enough; no attestation is `SIGNATURE_VERIFIED` at most, and a non-verifying
+  attestation is `ATTESTATION_REJECTED`.
+* With no credential the real provider reports itself unavailable and the
+  boundary **refuses** — it never substitutes a software key. It is
+  **testnet-only**. Off by default (`TRACESETTLE_TEE_SIGNING=1`), and enabling it
+  without an owner, project or approved build is a fail-closed start-up error.
+
+The two structural invariants
+`near_tee_signing_requires_an_authorization_and_a_verified_signature` and
+`near_tee_signing_never_claims_tee_without_attestation_evidence` hold this, both
+mutation-tested.

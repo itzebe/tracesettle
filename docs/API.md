@@ -57,7 +57,8 @@ an internal path, a stack trace or a secret.
 
 The NEAR routes (`/api/guard/near/scenarios`, `.../behaviours`,
 `.../prompt-injection`, `.../policy-scope`, `.../agent-demo`,
-`.../settlement-check`, `.../access-keys`, `.../custody`) are read-only analyses
+`.../settlement-check`, `.../access-keys`, `.../custody`,
+`.../tee-signing`) are read-only analyses
 of shipped fixtures and real chain reads; the public demonstration exposes a
 subset of them. The state-changing NEAR routes (`.../agent-evaluate`,
 `.../execution/*`, `.../wallet/*`, `.../lifecycle*`, `.../custody/prepare`,

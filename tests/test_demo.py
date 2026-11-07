@@ -196,3 +196,23 @@ def test_near_recovery_demo_is_deterministic_and_passes():
         timeout=60,
     )
     assert second.stdout == first.stdout
+
+
+def test_near_tee_signing_demo_is_deterministic_and_passes():
+    """The TEE signing-boundary demonstration is self-contained and reproducible."""
+    first = subprocess.run(
+        [sys.executable, str(DEMO_DIR / "near_tee_signing_demo.py")],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert first.returncode == 0, first.stderr
+    assert "9/9 checks produced the expected outcome." in first.stdout
+    assert "No OutLayer call was made. Nothing was broadcast. No key was requested." in first.stdout
+    second = subprocess.run(
+        [sys.executable, str(DEMO_DIR / "near_tee_signing_demo.py")],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert second.stdout == first.stdout
