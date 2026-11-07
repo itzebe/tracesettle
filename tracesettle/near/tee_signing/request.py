@@ -78,7 +78,11 @@ class TeeSigningRequest:
             "public_key": self.public_key,
             "receiver_account": self.receiver_account,
             "nonce": int(self.nonce),
-            "block_hash": self.block_hash.lower(),
+            # Base58 is case-sensitive: the block hash is carried verbatim, so the
+            # enclave recomposes the exact transaction bytes. Lowercasing it (a
+            # latent defect) would make the base58 undecodable and no correct
+            # signature could ever be produced.
+            "block_hash": self.block_hash,
             "actions": [dict(a) for a in self.actions],
             "transfer_amount_yocto": str(self.transfer_amount_yocto),
             "gas": int(self.gas),

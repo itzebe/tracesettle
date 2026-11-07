@@ -165,6 +165,30 @@ jobs:
           print(f'{len(passed)}/{len(data["checks"])} TEE signing-boundary checks reproduced')
           PY
 
+      - name: Free on-chain TEE signing demonstration determinism
+        run: |
+          set -eu
+          # This replays the real 2026-11-07 OutLayer capture (a genuine Intel TDX
+          # enclave signed a real NEAR testnet transaction). It makes no network
+          # call and must be byte-identical across runs; the product's own builder
+          # must reproduce the live run's exact digest and transaction hash.
+          python demo/near_onchain_tee_demo.py --json > /tmp/onchain-1.json
+          python demo/near_onchain_tee_demo.py --json > /tmp/onchain-2.json
+          if ! cmp -s /tmp/onchain-1.json /tmp/onchain-2.json; then
+            echo "on-chain TEE signing demonstration output is not deterministic"
+            diff -u /tmp/onchain-1.json /tmp/onchain-2.json || true
+            exit 1
+          fi
+          python - <<'PY'
+          import json
+          with open("/tmp/onchain-1.json") as handle:
+              data = json.load(handle)
+          if not data["all_passed"]:
+              raise SystemExit("an on-chain TEE signing check did not match its expected outcome")
+          passed = [c for c in data["checks"] if c["passed"]]
+          print(f'{len(passed)}/{len(data["checks"])} on-chain TEE signing checks reproduced')
+          PY
+
       - name: Independent evaluation scenarios (judge path)
         run: |
           set -eu
@@ -472,3 +496,41 @@ jobs:
       - name: Clean up
         if: always()
         run: docker rm -f tracesettle-vercel || true
+
+  guest-parity:
+    name: TEE guest digest parity
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install the Rust toolchain
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          # Pinned by SHA, the action requires the toolchain explicitly (a tag
+          # would otherwise carry it).
+          toolchain: stable
+          targets: wasm32-wasip2
+
+      # The guest composes the NEAR digest itself, inside the enclave. Its Borsh
+      # encoder and the product's Python encoder must agree byte for byte, or a
+      # correct signature could never be produced. The guest's own tests
+      # recompute the digests in `vectors/tee_signing_vectors.json`, which the
+      # product generated, so this job is the cross-language binding.
+      - name: Guest tests (cross-language digest parity)
+        working-directory: tracesettle/near/tee_signing/guest/signing-module
+        run: cargo test --release --quiet
+
+      - name: Build the guest for wasm32-wasip2
+        working-directory: tracesettle/near/tee_signing/guest/signing-module
+        run: |
+          set -eu
+          cargo build --release --target wasm32-wasip2 --no-default-features --features wasm
+          wasm="target/wasm32-wasip2/release/tracesettle-signing-module.wasm"
+          test -f "$wasm"
+          # The worker hands out no keys without the manifest custom section, and
+          # every call needs the signing-keys import.
+          grep -qa 'outlayer.manifest' "$wasm"
+          grep -qa 'outlayer:signing-keys' "$wasm"
+          echo "guest wasm built: $(stat -c%s "$wasm") bytes, sha256 $(sha256sum "$wasm" | cut -d' ' -f1)"

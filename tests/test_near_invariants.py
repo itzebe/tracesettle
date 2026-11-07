@@ -16,7 +16,7 @@ FIXTURE_DIR = pathlib.Path(__file__).resolve().parent.parent / "tracesettle" / "
 
 def test_near_invariants_are_registered():
     near = [name for name in inv.INVARIANTS if name.startswith("near_")]
-    assert len(near) == 19
+    assert len(near) == 20
     assert all(name in inv.INVARIANT_DESCRIPTIONS for name in near)
 
 
@@ -485,4 +485,51 @@ def test_near_execution_provider_policy_invariant_notices_an_ignored_layer(monke
         lambda self, decision: (decision, None),
     )
     result = inv.INVARIANTS["near_execution_enforces_the_provider_policy"]()
+    assert result.holds is False
+
+
+def test_onchain_tee_invariant_notices_a_digest_drift(monkeypatch):
+    """If the product's builder stopped reproducing the live digest, the invariant must fail."""
+    from tracesettle.near import txbuild as txbuild_mod
+
+    original = txbuild_mod.NearTransaction.payload_fingerprint
+
+    def drifted(self):
+        return "sha256:" + "00" * 32
+
+    monkeypatch.setattr(txbuild_mod.NearTransaction, "payload_fingerprint", drifted)
+    result = inv.INVARIANTS["near_onchain_tee_signing_reproduces_the_products_digest"]()
+    assert result.holds is False
+    # Restore is handled by monkeypatch; the original is referenced so a rename is caught.
+    assert original is not None
+
+
+def test_onchain_tee_invariant_notices_a_provider_that_accepts_any_digest(monkeypatch):
+    """If the provider stopped checking the digest, the invariant must fail.
+
+    The mutation is surgical: the enclave's answer is rewritten so its digest
+    always echoes the requested one — exactly what a buggy or dishonest enclave
+    would do. The real parsing, the real request and the real refusal path are
+    otherwise unchanged, so a failure can only come from the digest guard.
+    """
+    import base64
+    import json
+
+    from tracesettle.near.tee_signing import onchain as onchain_mod
+
+    real_submit = onchain_mod.OutLayerOnChainSigningProvider._submit
+
+    def echoing_submit(self, input_data):
+        requested = json.loads(input_data)
+        result = real_submit(self, input_data)
+        for receipt in result.get("receipts_outcome", []):
+            status = receipt.get("outcome", {}).get("status")
+            if isinstance(status, dict) and status.get("SuccessValue"):
+                answer = json.loads(base64.b64decode(status["SuccessValue"]).decode())
+                answer["transaction_digest"] = requested.get("transaction_digest", "")
+                status["SuccessValue"] = base64.b64encode(json.dumps(answer).encode()).decode()
+        return result
+
+    monkeypatch.setattr(onchain_mod.OutLayerOnChainSigningProvider, "_submit", echoing_submit)
+    result = inv.INVARIANTS["near_onchain_tee_signing_reproduces_the_products_digest"]()
     assert result.holds is False

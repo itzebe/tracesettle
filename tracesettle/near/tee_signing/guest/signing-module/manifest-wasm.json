@@ -1,0 +1,19 @@
+{
+  "display": {
+    "name": "TraceSettle TEE signing module (direct run)"
+  },
+  "operations": [
+    "sign_transaction"
+  ],
+  "capabilities": {
+    "network": []
+  },
+  "signing_keys": [
+    {
+      "path": "neartx",
+      "type": "ed25519",
+      "bind": "wasm",
+      "caller": "none"
+    }
+  ]
+}

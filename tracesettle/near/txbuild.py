@@ -290,8 +290,13 @@ def build_ft_transfer(
         args["memo"] = memo
     import json
 
+    # Canonical JSON: no insignificant whitespace, which is what near-api-js and
+    # the NEAR SDKs emit. The TEE guest (`tee_signing/guest/.../src/main.rs`) and
+    # `guest_reference` serialize the same `args` object the same way, so the
+    # recomposed digest is identical; `test_near_tee_signing` pins the bytes.
+    args_json = json.dumps(args, separators=(",", ":"))
     action = borsh.action_function_call(
-        "ft_transfer", json.dumps(args).encode("utf-8"), gas, ONE_YOCTO
+        "ft_transfer", args_json.encode("utf-8"), gas, ONE_YOCTO
     )
     return NearTransaction(
         network=network,

@@ -2,17 +2,43 @@
 name = "tracesettle-signing-module"
 version = "0.1.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "TraceSettle TEE signing module: composes the NEAR transaction digest and has the OutLayer enclave sign it"
 
-# A WASI Preview 2 component. OutLayer refuses a WASI P1 module that declares
-# signing keys, so this MUST be built for wasm32-wasip2:
+# A WASI Preview 2 command component. OutLayer refuses a WASI P1 module that
+# declares signing keys, so this MUST be built for wasm32-wasip2:
 #   cargo build --release --target wasm32-wasip2
 # The manifest (manifest.json) is embedded as the `outlayer.manifest` custom
 # section, covered by the wasm's sha256 — the approved-build identity.
-[dependencies]
+[[bin]]
+name = "tracesettle-signing-module"
+path = "src/main.rs"
 
-[lib]
-crate-type = ["cdylib"]
+[features]
+# Which manifest is embedded. `project` (the default) declares a key bound to a
+# registered project; `wasm` declares one bound to this wasm hash, which is what
+# a direct run of the wasm URL (WasmUrl) uses. The manifest is covered by the
+# wasm's sha256, so the key path the enclave derives is tied to these bytes.
+default = ["project"]
+project = []
+wasm = []
+
+[dependencies]
+# The `outlayer:signing-keys` host functions are not in a published SDK crate;
+# the bindings are generated from `wit/signing-keys.wit`, a copy of OutLayer's
+# own `sdk/outlayer/wit/deps/signing-keys.wit` (build.sh diffs it).
+wit-bindgen = "0.36"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["preserve_order"] }
+sha2 = "0.10"
+hex = "0.4"
+bs58 = "0.5"
+base64 = "0.22"
+# The guest verifies the signature it gets back, over the digest it composed.
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
 
 [profile.release]
-opt-level = "s"
+opt-level = "z"
 lto = true
+strip = true
+codegen-units = 1

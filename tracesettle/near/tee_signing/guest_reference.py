@@ -58,10 +58,10 @@ def _action_bytes(action: Mapping[str, Any]) -> bytes:
         args = action.get("args")
         import json
 
-        # Match `txbuild.build_ft_transfer` exactly: `json.dumps(args)` with the
-        # default separators and insertion order. The digest test is what proves
-        # the guest and the product agree on these bytes.
-        encoded = json.dumps(args).encode("utf-8")
+        # Match `txbuild.build_ft_transfer` exactly: compact JSON, the same
+        # `receiver_id`/`amount`(/`memo`) object in insertion order. The digest
+        # test is what proves the guest and the product agree on these bytes.
+        encoded = json.dumps(args, separators=(",", ":")).encode("utf-8")
         return borsh.action_function_call(
             str(action["method_name"]),
             encoded,

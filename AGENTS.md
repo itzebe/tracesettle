@@ -2464,3 +2464,48 @@ is additive and off by default.
 - **Still not run live, and stated as such:** the OutLayer `/call` signing route
   is paid, so no real enclave signature was produced here. `evidence/mission24/`
   records the exact owner-only action. Nothing in the release claims otherwise.
+
+## Mission 25 — free on-chain TEE signing, live (2026-11-07)
+
+A real Intel TDX enclave now signs a real NEAR **testnet** transaction on a
+**free** path. No paid service, no mainnet, no fabricated evidence.
+
+- **The unblock.** OutLayer's HTTPS `POST /call/{owner}/{project}` route needs a
+  prepaid USD balance (minimum $1) → paid. Its **on-chain** route,
+  `outlayer.testnet.request_execution`, is paid from the caller's **NEAR**
+  balance, and on NEAR **testnet** NEAR is free. So the same real enclave runs
+  free via a contract call. `POST https://helper.testnet.near.org/account`
+  creates a funded `.testnet` account (10 000 NEAR) with no signup.
+- **New module `tracesettle/near/tee_signing/onchain.py`.** `OutLayerOnChainSigningProvider`
+  publishes the guest WASM to a public HTTPS URL, checks its `sha256` against the
+  operator's approved build, submits `request_execution`, parses the
+  `execution_requested` / `execution_completed` events and the receipt
+  `SuccessValue`, and **refuses an answer whose `transaction_digest` differs from
+  the one the product computed**. `OnChainCaller` holds only a `sign` callable —
+  never a key. **Testnet only:** `OnChainTeeConfig.executor()` refuses `mainnet`.
+- **Live proof (2026-11-07).** Enclave-derived key
+  `ed25519:H3dd94sk1df1t2PVyQWjD9cyzDAKh2WceAFmP3tWdC2a`, implicit account
+  `ee678ff2…`; the enclave signed tx `F27Erv42DhGhaTqNXPhsf5KXedfQvP3cd1Vbz9aZnQPj`
+  (0.1 NEAR) and the recipient's balance rose by exactly that amount. Cost
+  ~0.00105 NEAR charged, the rest refunded. Captures in
+  `evidence/mission25/` (`tee_signing_live_run.md`, `transactions.json`).
+- **The product's serializer reproduces the live run.** Feeding the enclave's own
+  recorded parameters to `txbuild.build_transfer` yields the **exact** live digest
+  `sha256:d04c4090…aa8a` and hash `F27Erv42…`. A one-byte drift fails this, so it
+  is a real cross-language binding, not a restatement.
+- **New fixture `tracesettle/near/fixtures/onchain_tee_run.json`** (inside the
+  package, so it ships in the image). Public on-chain data only.
+- **New demo `demo/near_onchain_tee_demo.py`** (5/5, byte-identical across runs;
+  no network). **New tests:** `tests/test_near_onchain_tee.py` (16, offline, real
+  provider + stand-in transport) and `tests/test_near_live_onchain_tee.py`
+  (opt-in live, testnet-only, creates its own faucet account).
+- **New invariant (61 total; 20 NEAR)**
+  `near_onchain_tee_signing_reproduces_the_products_digest`, mutation-tested twice
+  (builder drift; an enclave that echoes the requested digest).
+- **CI** gained an on-chain TEE demonstration determinism step.
+- **Counts:** 1821 passed / 34 skipped (filesystem); 1855 collected. pyflakes
+  clean; compileall OK; offline demo byte-identical (md5 `4864f13c…`).
+- **Honest scope:** the enclave signs; it does not itself prove settlement — that
+  is established by independently re-reading the chain. The relying party for the
+  enclave is OutLayer and the guest is identified by a pinned `sha256`, not a
+  reproducible build. See `docs/TEE_ONCHAIN_SIGNING.md`.
