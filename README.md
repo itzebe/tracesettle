@@ -214,6 +214,29 @@ Where each capability stands:
      `near_tee_signing_requires_an_authorization_and_a_verified_signature` and
      `near_tee_signing_never_claims_tee_without_attestation_evidence`, both
      mutation-tested.
+  5. **Free on-chain TEE signing — real Intel TDX enclave, real testnet settlement**
+     (`tracesettle/near/tee_signing/onchain.py`, **Testnet verified**). The paid
+     HTTPS route above needs a prepaid USD balance; the *on-chain* route
+     (`outlayer.testnet.request_execution`) is paid from the caller's NEAR
+     balance, and on NEAR **testnet** NEAR is free. So this route runs a real
+     Intel TDX enclave for free and is the one the demonstration uses.
+     `OutLayerOnChainSigningProvider` publishes the guest WASM to a public HTTPS
+     URL, checks the bytes' `sha256` against the operator's approved build, and
+     submits `request_execution`; the enclave compiles and runs the guest inside
+     the TEE. On 2026-11-07 a real run derived `ed25519:H3dd94sk…` inside the
+     enclave, signed a real NEAR testnet transfer, and the settlement was
+     confirmed on-chain (`F27Erv42DhGhaTqNXPhsf5KXedfQvP3cd1Vbz9aZnQPj`; the
+     recipient's balance rose by exactly 0.1 NEAR). The enclave's own answer is
+     bound to the digest the product authorized, and the product's transaction
+     builder **reproduces the live run's exact digest and transaction hash** from
+     the enclave's recorded parameters — a one-byte serialization drift fails the
+     check. Reproduce it offline with `python3 demo/near_onchain_tee_demo.py`
+     (5/5, deterministic; replays the real capture and makes no network call), or
+     live with `tests/test_near_live_onchain_tee.py` (opt-in, testnet only). The
+     structural guarantee is `near_onchain_tee_signing_reproduces_the_products_digest`,
+     mutation-tested. **Honest scope:** the enclave signs; it does not itself
+     prove settlement — that is established by independently re-reading the chain.
+     No mainnet transaction is made and no mainnet key exists.
 - **Live NEAR execution boundary:** Testnet verified — the opt-in boundary
   (`TRACESETTLE_NEAR_EXECUTION=1`) built, signed, broadcast and independently
   verified a real NEAR testnet transfer of 0.01 NEAR (tx
@@ -866,7 +889,7 @@ refusal is provable: the executor is never called unless the outcome was `ALLOW`
 | H | Native tx wrongly assumed protected by an Intents-only policy | policy-scope rejection |
 | I | Provider reports success without independent evidence | `UNKNOWN` / `UNAVAILABLE` |
 
-Nineteen NEAR-specific structural guarantees join the invariant set, each
+Twenty NEAR-specific structural guarantees join the invariant set, each
 mutation-tested: `near_policy_must_be_in_force`,
 `near_policy_selection_is_not_client_controlled`,
 `near_native_scope_gap_is_always_stated`,
@@ -919,10 +942,10 @@ a bare interpreter.
 **1. Run the tests.**
 
 ```sh
-python -m pytest tests/ --collect-only -q   # 1833 tests collected
-python -m pytest tests/ -q                  # 1800 passed, 33 skipped
+python -m pytest tests/ --collect-only -q   # 1854 tests collected
+python -m pytest tests/ -q                  # 1821 passed, 34 skipped
 ```
-→ `1800 passed, 33 skipped`. The skips are the PostgreSQL integration
+→ `1821 passed, 34 skipped`. The skips are the PostgreSQL integration
 tests; set `TRACESETTLE_TEST_PG_DSN` to a real server to run them
 (**1824 passed, 9 skipped** — the remaining 9 are opt-in *live-infrastructure*
 tests that need real provider credentials, a testnet key, a TDX enclave
@@ -1059,7 +1082,7 @@ curl -sS -X POST http://127.0.0.1:8080/api/guard/sign \
 curl -sS http://127.0.0.1:8080/api/guard/invariants \
   | python3 -c 'import sys,json;d=json.load(sys.stdin);print("all hold:",d["all_hold"]);[print(" ",i["name"]) for i in d["invariants"]]'
 ```
-→ `all hold: True` and the sixty invariant names, including the nineteen NEAR
+→ `all hold: True` and the sixty-one invariant names, including the twenty NEAR
 ones (`near_policy_must_be_in_force`, `near_native_scope_gap_is_always_stated`,
 `near_function_call_key_cannot_transfer_near`,
 `near_unrecognised_access_key_never_allows`,
@@ -1455,7 +1478,7 @@ transaction request ──▶ │ guard/rules.py      7 controls, all run  │
                         │                     validate, then execute │
                         │ guard/audit.py      hash-chained records  │
                         │ guard/monitor.py    counters + incidents  │
-                        │ guard/invariants.py 60 checked guarantees │
+                        │ guard/invariants.py 61 checked guarantees │
                         └────────────────────┬─────────────────────┘
                                              │ ALLOW + authorization
                                              ▼
@@ -1533,7 +1556,7 @@ identical decisions.
 | `tracesettle/guard/safeguards.py` | Durable security safeguards: the learning loop's store (SQLite). |
 | `tracesettle/guard/learning.py` | The learning loop: derive a lesson, apply safeguards (only ever tightening). |
 | `tracesettle/guard/state_pg.py` | Optional PostgreSQL backend: shared nonces, counters, revocations, idempotency. |
-| `tracesettle/guard/invariants.py` | The sixty structural guarantees, checked by execution. |
+| `tracesettle/guard/invariants.py` | The sixty-one structural guarantees, checked by execution. |
 | `tracesettle/guard/api.py` | Guard HTTP routing and JSON serialization. |
 | `tracesettle/guard/console.py` | The security operations console page. |
 | `docs/TRANSACTION_SECURITY.md` | The security layer in full, including what it does not do. |
@@ -1545,7 +1568,7 @@ identical decisions.
 | `tracesettle/near/agent_demo.py` | The one implementation of the offline end-to-end demonstration (policy, harness, `run_agent_payment_demo`); used by the CLI, the `/api/guard/near/agent-demo` endpoint, and the console panel. |
 | `demo/replay_opener.py` | Offline transport that replays `evidence/raw/` through the real code. |
 | `tracesettle/static/near-connect.js` | Vendored `@hot-labs/near-connect` (MIT) wallet connector, served same-origin at `/assets/near-connect.js`. |
-| `tests/` | 1833 tests (33 skip without `TRACESETTLE_TEST_PG_DSN`; further tests are opt-in live tests that skip without a live testnet key, live Agent API credentials, `TRACESETTLE_ENCLAVE_HARNESS=1`, or live OutLayer signing credentials). `evidence/raw/` fixtures are real captures; `tests/fixtures/synthetic/` are clearly labelled synthetic. |
+| `tests/` | 1855 tests (34 skip without `TRACESETTLE_TEST_PG_DSN`; further tests are opt-in live tests that skip without a live testnet key, live Agent API credentials, `TRACESETTLE_ENCLAVE_HARNESS=1`, `TRACESETTLE_TEST_ONCHAIN_TEE=1`, or live OutLayer signing credentials). `evidence/raw/` fixtures are real captures; `tests/fixtures/synthetic/` are clearly labelled synthetic. |
 | `JUDGE_GUIDE.md` | The independent evaluation guide, rendered at `/JUDGE_GUIDE`. |
 | `docs/API.md` | The complete HTTP surface: routes, auth, request/response shape. |
 | `PHASE1_FEASIBILITY.md` | Phase 1 feasibility and API verification. |
@@ -1655,7 +1678,7 @@ variable and all documented in `docs/TRANSACTION_SECURITY.md`:
   replay-nonce store all have explicit caps, so a flood cannot exhaust memory.
   When durable state is configured, spent nonces and the limit counters live in
   SQLite instead, so they survive a restart (see **Durable state** below).
-- **Structural invariants, checked by execution.** Sixty guarantees at
+- **Structural invariants, checked by execution.** Sixty-one guarantees at
   `GET /api/guard/invariants`, each mutation-tested so a checker that cannot fail
   is treated as a defect.
 - **Honest audit claim.** In-place modification of an audit record is detectable;
@@ -1880,7 +1903,7 @@ immutable commit SHA (not a moving tag), and cancels superseded runs.
 ## Tests
 
 ```sh
-python3 -m pytest tests/ -q          # 1800 passed, 33 skipped (1824 passed, 9 skipped with PostgreSQL)
+python3 -m pytest tests/ -q          # 1821 passed, 34 skipped (1845 passed, 10 skipped with PostgreSQL)
 python3 -m pytest tests/test_guard_authorization.py -q
 python3 -m pytest tests/test_guard_invariants.py -q
 python3 -m pytest tests/test_guard_end_to_end.py -q

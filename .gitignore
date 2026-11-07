@@ -63,3 +63,6 @@ build/
 
 # Agent workspace state (not part of the project)
 .openhands/
+
+# Rust guest build output (rebuilt by tracesettle/near/tee_signing/guest/signing-module/build.sh)
+tracesettle/near/tee_signing/guest/signing-module/target/

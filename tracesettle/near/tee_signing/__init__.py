@@ -53,6 +53,12 @@ from .boundary import (
     TeeSigningBoundary,
     TeeSigningRefusal,
 )
+from .onchain import (
+    OnChainCaller,
+    OnChainTeeConfig,
+    OnChainTeeError,
+    OutLayerOnChainSigningProvider,
+)
 
 __all__ = [
     "SIGNING_DOMAIN",
@@ -72,4 +78,8 @@ __all__ = [
     "TeeSignatureEvidence",
     "TeeSigningBoundary",
     "TeeSigningRefusal",
+    "OnChainCaller",
+    "OnChainTeeConfig",
+    "OnChainTeeError",
+    "OutLayerOnChainSigningProvider",
 ]

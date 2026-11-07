@@ -216,3 +216,29 @@ def test_near_tee_signing_demo_is_deterministic_and_passes():
         timeout=60,
     )
     assert second.stdout == first.stdout
+
+
+def test_near_onchain_tee_demo_is_deterministic_and_passes():
+    """The free on-chain TEE signing demonstration is self-contained and reproducible."""
+    first = subprocess.run(
+        [sys.executable, str(DEMO_DIR / "near_onchain_tee_demo.py")],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert first.returncode == 0, first.stderr
+    assert "5/5 checks produced the expected outcome." in first.stdout
+    assert "No OutLayer call was made. Nothing was broadcast. No key was requested." in first.stdout
+    second = subprocess.run(
+        [sys.executable, str(DEMO_DIR / "near_onchain_tee_demo.py"), "--json"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    third = subprocess.run(
+        [sys.executable, str(DEMO_DIR / "near_onchain_tee_demo.py"), "--json"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert second.stdout == third.stdout

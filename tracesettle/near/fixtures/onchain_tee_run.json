@@ -1,0 +1,160 @@
+{
+  "_note": "Captured from a real OutLayer testnet run on 2026-11-07. All fields are PUBLIC on-chain data: the enclave's public key, its signature over a broadcast transaction, and the signed transaction bytes (all already public on NEAR). No private key, seed, or credential is present.",
+  "executor": "outlayer.testnet",
+  "network": "testnet",
+  "public_key": {
+    "events": {
+      "execution_completed": {
+        "code_source": {
+          "WasmUrl": {
+            "build_target": "wasm32-wasip2",
+            "hash": "eb705a61554fc9823e9e11a61aa0192d2d9fdf51280379098c1b480c025dd6d0",
+            "url": "https://work-1-iujlibhgxzczwmem.prod-runtime.all-hands.dev/tracesettle-signing-module-wasm.wasm"
+          }
+        },
+        "compilation_note": "Cached WASM from 2026-11-07T22:42:17.892735+00:00",
+        "error_message": null,
+        "payment_charged": "1057000000000000000000",
+        "payment_refunded": "998943000000000000000000",
+        "resources_used": {
+          "compile_time_ms": null,
+          "instructions": 52005,
+          "time_ms": 570
+        },
+        "sender_id": "ts-m25-a1399d.testnet",
+        "success": true,
+        "timestamp": 1794091578374514830
+      },
+      "execution_requested": {
+        "data_id": [
+          163,
+          5,
+          67,
+          67,
+          97,
+          206,
+          196,
+          218,
+          102,
+          191,
+          28,
+          109,
+          225,
+          8,
+          41,
+          46,
+          232,
+          33,
+          255,
+          90,
+          218,
+          63,
+          99,
+          184,
+          136,
+          2,
+          208,
+          68,
+          165,
+          158,
+          68,
+          180
+        ],
+        "request_data": "{\"request_id\":12892,\"sender_id\":\"ts-m25-a1399d.testnet\",\"predecessor_id\":\"ts-m25-a1399d.testnet\",\"code_source\":{\"WasmUrl\":{\"url\":\"https://work-1-iujlibhgxzczwmem.prod-runtime.all-hands.dev/tracesettle-signing-module-wasm.wasm\",\"hash\":\"eb705a61554fc9823e9e11a61aa0192d2d9fdf51280379098c1b480c025dd6d0\",\"build_target\":\"wasm32-wasip2\"}},\"resource_limits\":{\"max_instructions\":10000000000,\"max_memory_mb\":256,\"max_execution_seconds\":30},\"input_data\":\"{\\\"guest_op\\\": \\\"public_key\\\"}\",\"input_data_in_state\":false,\"secrets_ref\":null,\"response_format\":\"Json\",\"payment\":\"1000000000000000000000000\",\"attached_usd\":\"0\",\"timestamp\":1794091572975662346,\"compile_only\":false,\"force_rebuild\":false,\"store_on_fastfs\":false,\"use_bound_identity\":false,\"project_uuid\":null,\"project_id\":null}",
+        "timestamp": 1794091572975662346
+      }
+    },
+    "output": {
+      "operation": "public_key",
+      "public_key": "ed25519:H3dd94sk1df1t2PVyQWjD9cyzDAKh2WceAFmP3tWdC2a",
+      "status": "ok"
+    }
+  },
+  "settlement": {
+    "amount_yocto": 100000000000000000000000,
+    "balance_delta_yocto": 100000000000000000000000,
+    "recipient": "ts-m25-recipient.testnet",
+    "tx_hash": "F27Erv42DhGhaTqNXPhsf5KXedfQvP3cd1Vbz9aZnQPj"
+  },
+  "sign_transaction": {
+    "events": {
+      "execution_completed": {
+        "code_source": {
+          "WasmUrl": {
+            "build_target": "wasm32-wasip2",
+            "hash": "eb705a61554fc9823e9e11a61aa0192d2d9fdf51280379098c1b480c025dd6d0",
+            "url": "https://work-1-iujlibhgxzczwmem.prod-runtime.all-hands.dev/tracesettle-signing-module-wasm.wasm"
+          }
+        },
+        "compilation_note": "Cached WASM from 2026-11-07T22:42:17.892735+00:00",
+        "error_message": null,
+        "payment_charged": "1053100200000000000000",
+        "payment_refunded": "998946899800000000000000",
+        "resources_used": {
+          "compile_time_ms": null,
+          "instructions": 2883689,
+          "time_ms": 531
+        },
+        "sender_id": "ts-m25-a1399d.testnet",
+        "success": true,
+        "timestamp": 1794091679581561576
+      },
+      "execution_requested": {
+        "data_id": [
+          62,
+          92,
+          234,
+          163,
+          0,
+          138,
+          223,
+          168,
+          34,
+          231,
+          137,
+          171,
+          44,
+          251,
+          235,
+          224,
+          193,
+          20,
+          111,
+          205,
+          254,
+          193,
+          193,
+          1,
+          83,
+          97,
+          53,
+          90,
+          60,
+          98,
+          45,
+          102
+        ],
+        "request_data": "{\"request_id\":12895,\"sender_id\":\"ts-m25-a1399d.testnet\",\"predecessor_id\":\"ts-m25-a1399d.testnet\",\"code_source\":{\"WasmUrl\":{\"url\":\"https://work-1-iujlibhgxzczwmem.prod-runtime.all-hands.dev/tracesettle-signing-module-wasm.wasm\",\"hash\":\"eb705a61554fc9823e9e11a61aa0192d2d9fdf51280379098c1b480c025dd6d0\",\"build_target\":\"wasm32-wasip2\"}},\"resource_limits\":{\"max_instructions\":10000000000,\"max_memory_mb\":256,\"max_execution_seconds\":30},\"input_data\":\"{\\\"v\\\": \\\"1\\\", \\\"domain\\\": \\\"tracesettle.tee.signing-request\\\", \\\"network\\\": \\\"testnet\\\", \\\"signer_account\\\": \\\"ee678ff2b2243fa83e63582f7e017027470be84c55f8deaef87f72244f1a6fb7\\\", \\\"public_key\\\": \\\"ed25519:H3dd94sk1df1t2PVyQWjD9cyzDAKh2WceAFmP3tWdC2a\\\", \\\"receiver_account\\\": \\\"ts-m25-recipient.testnet\\\", \\\"nonce\\\": 276693195000001, \\\"block_hash\\\": \\\"GxyTdWapMrdBEJZUrPPVjs1xWaPWs1djtr245p3crnqa\\\", \\\"actions\\\": [{\\\"type\\\": \\\"Transfer\\\", \\\"deposit\\\": \\\"100000000000000000000000\\\"}], \\\"transfer_amount_yocto\\\": \\\"100000000000000000000000\\\", \\\"gas\\\": 0, \\\"asset\\\": \\\"NEAR:NATIVE\\\", \\\"operation\\\": \\\"TRANSFER\\\", \\\"transaction_digest\\\": \\\"sha256:d04c4090dd83727874a059b2260d2fb7073155141c3cd91a4482e42ecf61aa8a\\\", \\\"authorization\\\": {\\\"id\\\": \\\"m25-auth-1\\\", \\\"digest\\\": \\\"sha256:abababababababababababababababababababababababababababababababab\\\", \\\"expiry\\\": \\\"2999-01-01T00:00:00+00:00\\\", \\\"policy_version\\\": \\\"m25\\\"}, \\\"provider\\\": \\\"outlayer:signing-tee\\\", \\\"approved_build\\\": \\\"sha256:eb705a61554fc9823e9e11a61aa0192d2d9fdf51280379098c1b480c025dd6d0\\\", \\\"request_digest\\\": \\\"sha256:71191396f58ef23e7510b561ddff069b993b07c0a791490fbfe6f791701bb9a3\\\"}\",\"input_data_in_state\":false,\"secrets_ref\":null,\"response_format\":\"Json\",\"payment\":\"1000000000000000000000000\",\"attached_usd\":\"0\",\"timestamp\":1794091674803059210,\"compile_only\":false,\"force_rebuild\":false,\"store_on_fastfs\":false,\"use_bound_identity\":false,\"project_uuid\":null,\"project_id\":null}",
+        "timestamp": 1794091674803059210
+      }
+    },
+    "output": {
+      "amount_base": "100000000000000000000000",
+      "approved_build": "sha256:eb705a61554fc9823e9e11a61aa0192d2d9fdf51280379098c1b480c025dd6d0",
+      "authorization_id": "m25-auth-1",
+      "manifest_len": 301,
+      "network": "testnet",
+      "operation": "sign_transaction",
+      "public_key": "ed25519:H3dd94sk1df1t2PVyQWjD9cyzDAKh2WceAFmP3tWdC2a",
+      "receiver_id": "ts-m25-recipient.testnet",
+      "signature": "v3KoH1N68yw0exvy6V7W14HMxZMsocJsVMv0E7ipV3CgxSfmnC4iQVgxZroC0izN/mN1lxYOrZrZoWVZWtFgBg==",
+      "signature_verified_in_guest": true,
+      "signed_transaction": "QAAAAGVlNjc4ZmYyYjIyNDNmYTgzZTYzNTgyZjdlMDE3MDI3NDcwYmU4NGM1NWY4ZGVhZWY4N2Y3MjI0NGYxYTZmYjcA7meP8rIkP6g+Y1gvfgFwJ0cL6ExV+N6u+H9yJE8ab7fBiJmnpvsAABgAAAB0cy1tMjUtcmVjaXBpZW50LnRlc3RuZXTtNhZBYWP8bp+yINIWLyRv44fDDjrCpDGLeKt+uDLZLQEAAAADAACA9krhxwItFQAAAAAAAAC/cqgfU3rzLDR7G/LpXtbXgczFkyyhwmxUy/QTuKlXcKDFJ+acLiJBWDFmugLSLM3+Y3WXFg6tmtmhZVla0WAG",
+      "signer_id": "ee678ff2b2243fa83e63582f7e017027470be84c55f8deaef87f72244f1a6fb7",
+      "status": "ok",
+      "transaction_digest": "sha256:d04c4090dd83727874a059b2260d2fb7073155141c3cd91a4482e42ecf61aa8a",
+      "tx_hash": "F27Erv42DhGhaTqNXPhsf5KXedfQvP3cd1Vbz9aZnQPj"
+    }
+  },
+  "wasm_sha256": "eb705a61554fc9823e9e11a61aa0192d2d9fdf51280379098c1b480c025dd6d0"
+}

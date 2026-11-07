@@ -18,3 +18,6 @@ submission
 Dockerfile
 .dockerignore
 .vercel
+
+# Rust guest build output (built by build.sh; never committed or imaged)
+tracesettle/near/tee_signing/guest/signing-module/target/

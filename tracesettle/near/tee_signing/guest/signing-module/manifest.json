@@ -1,4 +1,13 @@
 {
+  "display": {
+    "name": "TraceSettle TEE signing module"
+  },
+  "operations": [
+    "sign_transaction"
+  ],
+  "capabilities": {
+    "network": []
+  },
   "signing_keys": [
     {
       "path": "neartx",

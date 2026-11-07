@@ -4311,6 +4311,156 @@ def _near_tee_signing_never_claims_tee_without_attestation_evidence():
     )
 
 
+def _near_onchain_tee_signing_reproduces_the_products_digest():
+    """The on-chain TEE route binds the enclave's answer to the product's digest.
+
+    Probes, so the check is not a blanket refusal. It replays the real 2026-11-07
+    OutLayer capture (``near/fixtures/onchain_tee_run.json``) and:
+
+    (a) rebuilds the transaction from the enclave's recorded parameters with the
+        product's own builder and requires the **exact** live digest and hash —
+        a one-byte serialization drift fails here;
+    (b) drives the provider with a stand-in transport and requires it to parse
+        the captured answer and return the enclave's key and digest;
+    (c) feeds it an answer whose digest differs and requires a refusal.
+
+    A provider that accepted any digest, or a builder that had drifted, would
+    fail one of these.
+    """
+    import base64 as _b64
+    import json as _json
+    import pathlib as _pathlib
+    from decimal import Decimal
+
+    from ..model import SourceStatus
+    from ..near import ed25519
+    from ..near.networks import NearNetwork
+    from ..near.rpc import RpcResult
+    from ..near.tee_signing import (
+        OnChainCaller,
+        OnChainTeeConfig,
+        OnChainTeeError,
+        OutLayerOnChainSigningProvider,
+        build_signing_request,
+    )
+    from ..near.tee_signing.boundary import _b58
+    from ..near.txbuild import build_transfer
+
+    name = "near_onchain_tee_signing_reproduces_the_products_digest"
+    path = _pathlib.Path(__file__).resolve().parents[1] / "near" / "fixtures" / "onchain_tee_run.json"
+    capture = _json.loads(path.read_text(encoding="utf-8"))
+    recorded = capture["sign_transaction"]["output"]
+
+    event = capture["sign_transaction"]["events"]["execution_requested"]
+    params = _json.loads(_json.loads(event["request_data"])["input_data"])
+    tx = build_transfer(
+        network=NearNetwork.TESTNET,
+        signer_id=params["signer_account"],
+        public_key=params["public_key"],
+        nonce=int(params["nonce"]),
+        receiver_id=params["receiver_account"],
+        block_hash=params["block_hash"],
+        amount_human=Decimal(params["transfer_amount_yocto"]) / Decimal(10**24),
+        service_id="invariant",
+    )
+    if tx.payload_fingerprint() != recorded["transaction_digest"]:
+        return InvariantResult(
+            name,
+            False,
+            "the product's builder no longer reproduces the live run's digest",
+        )
+    if tx.tx_hash != recorded["tx_hash"]:
+        return InvariantResult(name, False, "the product's builder no longer reproduces the live hash")
+
+    seed = bytes(range(32))
+    caller_public = "ed25519:" + _b58(ed25519.public_key(seed))
+
+    def _request(transaction):
+        return build_signing_request(
+            transaction=transaction,
+            authorization={
+                "id": recorded["authorization_id"],
+                "digest": "sha256:" + "00" * 32,
+                "expiry": "2999-01-01T00:00:00+00:00",
+                "policy_version": "invariant",
+            },
+            provider="outlayer:signing-keys-onchain",
+            approved_build="sha256:" + capture["wasm_sha256"],
+        )
+
+    class _Rpc:
+        def __init__(self, digest: str) -> None:
+            self._digest = digest
+
+        def block_hash(self, *, finality: str = "final"):  # noqa: ANN001
+            return RpcResult(
+                SourceStatus.OK,
+                data={"hash": params["block_hash"], "height": 1},
+            )
+
+        def view_access_key(self, account_id: str, public_key: str):  # noqa: ANN001
+            return RpcResult(SourceStatus.OK, data={"nonce": int(params["nonce"]) - 1})
+
+        def send_tx(self, signed_b64, *, wait_until="INCLUDED_FINAL"):  # noqa: ANN001
+            output = dict(recorded)
+            output["transaction_digest"] = self._digest
+            return RpcResult(
+                SourceStatus.OK,
+                data={
+                    "receipts_outcome": [
+                        {
+                            "outcome": {
+                                "status": {
+                                    "SuccessValue": _b64.b64encode(
+                                        _json.dumps(output).encode("utf-8")
+                                    ).decode("ascii")
+                                },
+                                "logs": [],
+                            }
+                        }
+                    ]
+                },
+            )
+
+    def _provider(digest: str) -> OutLayerOnChainSigningProvider:
+        return OutLayerOnChainSigningProvider(
+            caller=OnChainCaller(
+                account_id="invariant.testnet",
+                public_key=caller_public,
+                sign=lambda d: ed25519.sign(d, seed),
+            ),
+            config=OnChainTeeConfig(
+                network="testnet",
+                wasm_url="https://example.test/g.wasm",
+                wasm_sha256=capture["wasm_sha256"],
+            ),
+            rpc=_Rpc(digest),
+        )
+
+    # (b) the captured answer parses and returns the enclave's key and digest.
+    result = _provider(recorded["transaction_digest"]).sign(_request(tx))
+    if result.public_key != recorded["public_key"] or result.transaction_digest != recorded["transaction_digest"]:
+        return InvariantResult(name, False, "the captured answer did not parse as expected")
+
+    # (c) an answer over a different digest is refused.
+    try:
+        _provider("sha256:" + "11" * 32).sign(_request(tx))
+    except OnChainTeeError:
+        pass
+    else:
+        return InvariantResult(name, False, "a signature over a different digest was accepted")
+
+    return InvariantResult(
+        name,
+        True,
+        "the product's builder reproduces the live run's exact digest and hash; the provider parses "
+        "the real captured answer and refuses one whose digest differs",
+    )
+
+
+
+
+
 INVARIANTS: dict[str, Callable[[], InvariantResult]] = {
     "non_allow_never_authorizes": _non_allow_never_authorizes,
     "refusal_never_reaches_the_executor": _refusal_never_reaches_the_executor,
@@ -4418,6 +4568,9 @@ INVARIANTS: dict[str, Callable[[], InvariantResult]] = {
     "near_tee_signing_never_claims_tee_without_attestation_evidence": (
         _near_tee_signing_never_claims_tee_without_attestation_evidence
     ),
+    "near_onchain_tee_signing_reproduces_the_products_digest": (
+        _near_onchain_tee_signing_reproduces_the_products_digest
+    ),
     "service_facing_routes_require_a_credential": (
         _service_facing_routes_require_a_credential
     ),
@@ -4490,6 +4643,7 @@ INVARIANT_DESCRIPTIONS: dict[str, str] = {
     "public_demo_never_exposes_a_state_changing_route": "The keyless public demonstration is an exact allowlist of read-only routes; it never evaluates, signs, broadcasts or mutates state, and enabling it does not relax the API-key requirement on any sensitive route.",
     "agent_surface_is_sandbox_scoped": "The agent integration is sandbox-scoped: a sandbox credential resolves to a sandbox- identity, the sandbox policy registers no operator service, a cross-service request is refused, and the approval secret is separate from the API credential.",
     "hostile_input_never_crashes_the_guard": "A malformed request is always a decision or a typed refusal, never an unhandled exception: a non-token authorization, an absurd amount exponent and a non-string destination each fail closed.",
+    "near_onchain_tee_signing_reproduces_the_products_digest": "The free on-chain TEE route binds the enclave's answer to the product's own digest: the product's transaction builder reproduces the live run's exact digest and hash from the enclave's recorded parameters, the provider parses the real captured answer, and an answer whose digest differs is refused.",
 }
 
 
