@@ -4106,6 +4106,211 @@ def _agent_surface_is_sandbox_scoped() -> InvariantResult:
     )
 
 
+def _near_tee_signing_requires_an_authorization_and_a_verified_signature():
+    """The TEE signing boundary signs only an authorized, digest-bound transaction.
+
+    Probes, so the check is not a blanket refusal:
+
+    (a) a BLOCK decision is refused and the provider is never called;
+    (b) a missing authorization record is refused;
+    (c) a record bound to a *different* digest is refused (mutation of the amount,
+        recipient or bytes changes the digest);
+    (d) an ALLOW with a matching record produces a signature that verifies over
+        the exact NEAR digest under the transaction's own key.
+
+    A boundary that ignored the authorization, the binding, or the signature
+    check would fail one of these, so the invariant is mutation-sensitive.
+    """
+    from decimal import Decimal
+
+    from ..near import ed25519
+    from ..near.networks import NearNetwork
+    from ..near.tee_signing import (
+        LocalStandInSigningProvider,
+        TeeSigningBoundary,
+        TeeSigningRefusal,
+    )
+    from ..near.tee_signing.boundary import _b58
+    from ..near.txbuild import build_transfer
+
+    name = "near_tee_signing_requires_an_authorization_and_a_verified_signature"
+    seed = bytes(range(32))
+    public_key = "ed25519:" + _b58(ed25519.public_key(seed))
+
+    def _tx(amount: str = "0.01", receiver: str = "merchant.testnet"):
+        return build_transfer(
+            network=NearNetwork.TESTNET,
+            signer_id="agent.testnet",
+            public_key=public_key,
+            nonce=7,
+            receiver_id=receiver,
+            block_hash="9Gq9bHtf6SKUuWLbzgPMVedA3BtYbYVwb5NVUrQyzoE9",
+            amount_human=Decimal(amount),
+            service_id="svc",
+        )
+
+    class _Decision:
+        def __init__(self, outcome: str) -> None:
+            self.outcome = outcome
+
+    def _record(tx, *, expired: bool = False):
+        return {
+            "authorization_id": "auth_1",
+            "execution_digest": "sha256:" + "ab" * 32,
+            "expires_at": "2999-01-01T00:00:00+00:00",
+            "policy_version": "v1",
+            "transaction_digest": tx.payload_fingerprint(),
+            "expired": expired,
+        }
+
+    provider = LocalStandInSigningProvider(seed=seed)
+    boundary = TeeSigningBoundary(provider=provider, approved_build="sha256:" + "0" * 64)
+
+    calls = {"n": 0}
+    real_sign = provider.sign
+
+    def _counting_sign(request):  # noqa: ANN001
+        calls["n"] += 1
+        return real_sign(request)
+
+    provider.sign = _counting_sign  # type: ignore[assignment]
+
+    # (a) BLOCK is refused and the provider is never reached.
+    tx = _tx()
+    before = calls["n"]
+    try:
+        boundary.sign(tx, decision=_Decision("BLOCK"), authorization_record=_record(tx))
+        return InvariantResult(name, False, "a BLOCK decision reached the signing provider")
+    except TeeSigningRefusal:
+        pass
+    if calls["n"] != before:
+        return InvariantResult(name, False, "the provider was called for a BLOCK decision")
+
+    # (b) a missing record is refused.
+    try:
+        boundary.sign(tx, decision=_Decision("ALLOW"), authorization_record=None)
+        return InvariantResult(name, False, "an unrecorded authorization reached the provider")
+    except TeeSigningRefusal:
+        pass
+
+    # (c) a record for a different digest is refused (the amount was changed).
+    other = _tx(amount="9999")
+    try:
+        boundary.sign(other, decision=_Decision("ALLOW"), authorization_record=_record(tx))
+        return InvariantResult(name, False, "a record for another transaction was accepted")
+    except TeeSigningRefusal:
+        pass
+
+    # (d) a matching, authorized transaction yields a verified signature.
+    evidence = boundary.sign(tx, decision=_Decision("ALLOW"), authorization_record=_record(tx))
+    if not evidence.signature_verified:
+        return InvariantResult(name, False, "an authorized transaction was not signed")
+    signature = __import__("base64").b64decode(evidence.signature_b64)
+    if not ed25519.verify(signature, tx.tx_hash_bytes, ed25519.public_key(seed)):
+        return InvariantResult(name, False, "the returned signature does not verify over the digest")
+    if evidence.state == "TEE_SIGNING_VERIFIED" and not evidence.simulated:
+        return InvariantResult(name, False, "a TEE claim was made without attestation evidence")
+
+    return InvariantResult(
+        name,
+        True,
+        "a BLOCK, a missing record and a digest-mismatched record are all refused before the "
+        "provider is reached; an authorized, digest-bound transaction yields a signature that "
+        "verifies over the exact NEAR digest under the transaction's key, and no TEE claim is "
+        "made without attestation evidence",
+    )
+
+
+def _near_tee_signing_never_claims_tee_without_attestation_evidence():
+    """A signature is never labelled TEE-signed without verifying attestation claims.
+
+    The evidence ladder is non-promoting: with no attestation material the state
+    is ``SIGNATURE_VERIFIED`` at most, and an attestation that does not verify is
+    ``ATTESTATION_REJECTED`` — never ``TEE_SIGNING_VERIFIED``. Only a fully
+    verified, approved, bound attestation reaches the top state.
+    """
+    from decimal import Decimal
+
+    from ..near import ed25519
+    from ..near.networks import NearNetwork
+    from ..near.tee_signing import LocalStandInSigningProvider, TeeSigningBoundary
+    from ..near.tee_signing.boundary import _b58
+    from ..near.txbuild import build_transfer
+
+    name = "near_tee_signing_never_claims_tee_without_attestation_evidence"
+    seed = bytes(range(32))
+    public_key = "ed25519:" + _b58(ed25519.public_key(seed))
+    tx = build_transfer(
+        network=NearNetwork.TESTNET,
+        signer_id="agent.testnet",
+        public_key=public_key,
+        nonce=9,
+        receiver_id="merchant.testnet",
+        block_hash="9Gq9bHtf6SKUuWLbzgPMVedA3BtYbYVwb5NVUrQyzoE9",
+        amount_human=Decimal("0.02"),
+        service_id="svc",
+    )
+
+    class _Decision:
+        outcome = "ALLOW"
+
+    record = {
+        "authorization_id": "auth_2",
+        "execution_digest": "sha256:" + "cd" * 32,
+        "expires_at": "2999-01-01T00:00:00+00:00",
+        "policy_version": "v1",
+        "transaction_digest": tx.payload_fingerprint(),
+        "expired": False,
+    }
+
+    provider = LocalStandInSigningProvider(seed=seed)
+
+    class _FailingQuoteVerifier:
+        def __call__(self, *a, **k):  # noqa: ANN002, ANN003
+            class _V:
+                verified = False
+                failures = ["quote signature did not verify"]
+                measurement: dict = {}
+                nonce = ""
+
+            return _V()
+
+    boundary = TeeSigningBoundary(
+        provider=provider,
+        approved_build="sha256:" + "0" * 64,
+        quote_verifier=_FailingQuoteVerifier(),
+    )
+
+    # No attestation -> SIGNATURE_VERIFIED, never a TEE claim.
+    plain = boundary.sign(tx, decision=_Decision(), authorization_record=record)
+    if plain.state == "TEE_SIGNING_VERIFIED" or plain.attestation_verified:
+        return InvariantResult(name, False, "a TEE claim was made with no attestation")
+
+    # A non-verifying attestation -> ATTESTATION_REJECTED, never a TEE claim.
+    rejected = boundary.sign(
+        tx,
+        decision=_Decision(),
+        authorization_record=record,
+        attestation={
+            "intel_quote": "00" * 8,
+            "nonce": "11" * 32,
+            "wasm_hash": "sha256:" + "0" * 64,
+            "caller": "agent.testnet",
+            "project": "owner/project",
+        },
+    )
+    if rejected.state == "TEE_SIGNING_VERIFIED":
+        return InvariantResult(name, False, "a non-verifying attestation reached TEE_SIGNING_VERIFIED")
+
+    return InvariantResult(
+        name,
+        True,
+        "with no attestation the state is SIGNATURE_VERIFIED and with a non-verifying attestation "
+        "it is ATTESTATION_REJECTED; TEE_SIGNING_VERIFIED is reached only when every separate "
+        "attestation claim holds",
+    )
+
+
 INVARIANTS: dict[str, Callable[[], InvariantResult]] = {
     "non_allow_never_authorizes": _non_allow_never_authorizes,
     "refusal_never_reaches_the_executor": _refusal_never_reaches_the_executor,
@@ -4207,6 +4412,12 @@ INVARIANTS: dict[str, Callable[[], InvariantResult]] = {
     "near_execution_enforces_the_provider_policy": (
         _near_execution_enforces_the_provider_policy
     ),
+    "near_tee_signing_requires_an_authorization_and_a_verified_signature": (
+        _near_tee_signing_requires_an_authorization_and_a_verified_signature
+    ),
+    "near_tee_signing_never_claims_tee_without_attestation_evidence": (
+        _near_tee_signing_never_claims_tee_without_attestation_evidence
+    ),
     "service_facing_routes_require_a_credential": (
         _service_facing_routes_require_a_credential
     ),
@@ -4273,6 +4484,8 @@ INVARIANT_DESCRIPTIONS: dict[str, str] = {
     "custody_tee_signing_requires_bound_attestation_and_settlement": "TEE signing is claimed only when a genuine TDX attestation is cryptographically bound to the exact authorized operation and signing key and independent NEAR RPC settlement verification also holds; a provider success or an unbound quote never reaches TEE_SIGNING_VERIFIED.",
     "custody_provider_policy_only_tightens": "The independent NEAR provider (Agent API) policy gates a custody operation and can only tighten the guard's decision: a policy that is not in force, is stale, unreadable, frozen, or does not enable the native transfer blocks execution before the provider is reached, and an in-force policy that enables the transfer still authorizes.",
     "near_execution_enforces_the_provider_policy": "The NEAR execution boundary enforces the independent provider (Agent API) policy and it can only tighten the operator decision: a policy that is not in force (or unreadable, stale, frozen, or for another agent) refuses authorization and nothing reaches the RPC, while an in-force policy that enables the native transfer still authorizes.",
+    "near_tee_signing_requires_an_authorization_and_a_verified_signature": "The TEE signing boundary signs only an authorized, digest-bound transaction: a BLOCK, a missing authorization record and a record bound to a different digest are all refused before the signing provider is reached, and an authorized transaction yields a signature that verifies over the exact NEAR digest under the transaction's own key.",
+    "near_tee_signing_never_claims_tee_without_attestation_evidence": "A signature is never labelled TEE-signed without verifying attestation claims: with no attestation the state is SIGNATURE_VERIFIED at most and a non-verifying attestation is ATTESTATION_REJECTED; TEE_SIGNING_VERIFIED is reached only when every separate claim (genuine quote, approved measurement and build, caller/project identity, freshness nonce, input/output commitment, exact-digest signature) holds.",
     "service_facing_routes_require_a_credential": "Every guard route that consults the authenticated service identity is gated by the credential registry: with a registry configured, a request with no credential is refused (401) before any work, so a caller cannot adopt another service's identity by editing a field.",
     "public_demo_never_exposes_a_state_changing_route": "The keyless public demonstration is an exact allowlist of read-only routes; it never evaluates, signs, broadcasts or mutates state, and enabling it does not relax the API-key requirement on any sensitive route.",
     "agent_surface_is_sandbox_scoped": "The agent integration is sandbox-scoped: a sandbox credential resolves to a sandbox- identity, the sandbox policy registers no operator service, a cross-service request is refused, and the approval secret is separate from the API credential.",

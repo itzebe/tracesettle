@@ -141,6 +141,30 @@ jobs:
           print(f'{len(passed)}/{len(data["checks"])} recovery checks reproduced')
           PY
 
+      - name: TEE signing-boundary demonstration determinism
+        run: |
+          set -eu
+          # The OutLayer signing route is paid, so this demonstration uses a
+          # deterministic stand-in provider; the boundary, the digest binding and
+          # the signature verification are the real code paths. It must be
+          # byte-identical across runs and every check must match expectation.
+          python demo/near_tee_signing_demo.py --json > /tmp/teesign-1.json
+          python demo/near_tee_signing_demo.py --json > /tmp/teesign-2.json
+          if ! cmp -s /tmp/teesign-1.json /tmp/teesign-2.json; then
+            echo "TEE signing demonstration output is not deterministic"
+            diff -u /tmp/teesign-1.json /tmp/teesign-2.json || true
+            exit 1
+          fi
+          python - <<'PY'
+          import json
+          with open("/tmp/teesign-1.json") as handle:
+              data = json.load(handle)
+          if not data["all_passed"]:
+              raise SystemExit("a TEE signing-boundary check did not match its expected outcome")
+          passed = [c for c in data["checks"] if c["passed"]]
+          print(f'{len(passed)}/{len(data["checks"])} TEE signing-boundary checks reproduced')
+          PY
+
       - name: Independent evaluation scenarios (judge path)
         run: |
           set -eu

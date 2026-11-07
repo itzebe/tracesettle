@@ -397,6 +397,20 @@ CONSOLE_HTML = """<!DOCTYPE html>
     </div>
 
     <div class="panel">
+      <h2>TEE signing boundary (OutLayer Signing Keys)</h2>
+      <p class="small">The one route that signs the <strong>exact NEAR transaction digest</strong>
+        inside an Intel TDX enclave. The enclave is asked to sign a <em>structured description</em>
+        of the authorized transaction, never raw caller bytes, and the guest recomputes the digest
+        itself. A signature is labelled <code>TEE_SIGNING_VERIFIED</code> only when every separate
+        claim holds — a genuine quote, an approved measurement and build, the caller/project
+        identity, the freshness nonce, the input/output commitment, and the exact-digest signature.
+        A verified quote alone is never enough. This is a <strong>paid per-execution</strong>
+        route, so it is off by default and reports its availability honestly; with no credential it
+        refuses to sign and never falls back to a software key.</p>
+      <div id="near-tee-signing"></div>
+    </div>
+
+    <div class="panel">
       <h2>OutLayer custody evidence</h2>
       <p class="small">The OutLayer custody boundary sends an authorized operation to a
         <strong>TEE-held signing wallet</strong>. It reports the evidence state it actually
@@ -942,6 +956,41 @@ async function loadNear() {
       "</dd></div>" + ms + '<div class="note ' + (info.available ? "ok" : "sim") + '">' +
       esc(info.note) + "</div></div>";
   } catch (err) { encEl.innerHTML = '<div class="note bad">' + esc(err.message) + "</div>"; }
+
+  const teeSigEl = document.getElementById("near-tee-signing");
+  if (teeSigEl) {
+    teeSigEl.innerHTML = loading("Loading TEE signing boundary…");
+    try {
+      const info = await api("GET", "/api/guard/near/tee-signing");
+      if (!info.enabled) {
+        teeSigEl.innerHTML = '<div class="note sim">' +
+          esc(info.note || "The TEE signing boundary is disabled.") + "</div>";
+      } else {
+        const cap = info.provider || {};
+        teeSigEl.innerHTML = '<div class="card"><div class="kv">' +
+          "<dt>Provider</dt><dd class='mono small'>" + esc(cap.provider || "—") + "</dd>" +
+          "<dt>Available</dt><dd>" +
+          (info.available
+            ? '<span class="small ok">yes</span>'
+            : '<span class="small bad">no</span>') + "</dd>" +
+          "<dt>Requires payment</dt><dd>" +
+          (cap.requires_payment ? "yes (per execution)" : "no") + "</dd>" +
+          "<dt>Approved build</dt><dd class='mono small'>" +
+          esc(info.approved_build || "—") + "</dd>" +
+          "<dt>Measurement pinned</dt><dd>" +
+          (info.measurement_pinned ? "yes" : "no") + "</dd>" +
+          "<dt>Required</dt><dd>" + (info.required ? "yes" : "no") + "</dd>" +
+          "</div>" +
+          '<p class="small"><strong>Verifies:</strong> ' +
+          esc((info.verifies || []).join("; ")) + "</p>" +
+          '<div class="note ' + (info.available ? "ok" : "sim") + '">' +
+          esc(cap.detail || "") + "</div>" +
+          '<div class="note sim">' + esc(info.note) + "</div></div>";
+      }
+    } catch (err) {
+      teeSigEl.innerHTML = '<div class="note bad">' + esc(err.message) + "</div>";
+    }
+  }
 
   const custEl = document.getElementById("near-custody");
   if (custEl) {

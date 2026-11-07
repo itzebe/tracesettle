@@ -90,6 +90,7 @@ class GuardAPI:
         tee_provider: Any = None,
         enclave: Any = None,
         custody: Any = None,
+        tee_signing: Any = None,
     ) -> None:
         self.service = service
         #: The optional durable settlement-investigation store. When set, a
@@ -122,6 +123,12 @@ class GuardAPI:
         #: set, an operation reaches the provider only after the guard returned
         #: ALLOW, and settlement is verified independently against the NEAR RPC.
         self.custody = custody
+        #: The optional TEE signing boundary: the one path that asks a remote,
+        #: attested enclave (OutLayer Signing Keys) to sign the exact NEAR
+        #: transaction digest. Off by default. With no credential it reports
+        #: itself unavailable and refuses to sign; it never falls back to a
+        #: software key.
+        self.tee_signing = tee_signing
 
     def dispatch(
         self,
@@ -269,6 +276,8 @@ class GuardAPI:
             return self._near_tee_info()
         if path == "/api/guard/near/enclave":
             return self._near_enclave_info()
+        if path == "/api/guard/near/tee-signing":
+            return self._near_tee_signing_info()
         if path == "/api/guard/near/custody":
             return self._near_custody_info()
         if path == "/api/guard/near/custody/status":
@@ -527,6 +536,58 @@ class GuardAPI:
                     "The quote is real hardware attestation and is verified locally against "
                     "the pinned Intel root. Revocation and TCB freshness require Intel PCS "
                     "collateral and are not checked here, so they are not claimed."
+                ),
+            },
+        )
+
+    def _near_tee_signing_info(self) -> ApiResponse:
+        """Describe the TEE signing boundary honestly.
+
+        This is the OutLayer Signing Keys route — the only one that signs the
+        exact NEAR digest inside an Intel TDX enclave. It is a **paid** route, so
+        it is off by default and reports its availability from the configured
+        provider rather than claiming a capability it does not have.
+        """
+        if self.tee_signing is None:
+            return ApiResponse(
+                200,
+                {
+                    "enabled": False,
+                    "note": (
+                        "The TEE signing boundary is disabled. It signs the exact NEAR "
+                        "transaction digest inside an attested Intel TDX enclave via "
+                        "OutLayer Signing Keys, a paid per-execution route, so it is an "
+                        "explicit operator decision. Enable it with "
+                        "TRACESETTLE_TEE_SIGNING=1 and configure the owner, project, "
+                        "approved build and payment key. With no credential it refuses "
+                        "to sign and never falls back to a software key."
+                    ),
+                },
+            )
+        provider = getattr(self.tee_signing, "provider", None)
+        capability = provider.capability().to_dict() if provider is not None else {}
+        return ApiResponse(
+            200,
+            {
+                "enabled": True,
+                "available": bool(capability.get("available")),
+                "provider": capability,
+                "approved_build": getattr(self.tee_signing, "approved_build", ""),
+                "measurement_pinned": getattr(self.tee_signing, "approved_measurement", None)
+                is not None,
+                "required": bool(getattr(self.tee_signing, "required", False)),
+                "verifies": [
+                    "the Intel TDX quote against the pinned Intel root and fresh collateral",
+                    "the measurement and build against the operator's approved identity",
+                    "the caller/project identity the request names",
+                    "the fresh host nonce for this execution",
+                    "the run's input and output commitment to this request and signature",
+                    "the signature over the exact NEAR transaction digest",
+                ],
+                "note": (
+                    "A signature is labelled TEE-signed only when every separate "
+                    "attestation claim holds; a verified quote alone is never enough, and "
+                    "a signature with no attestation is SIGNATURE_VERIFIED at most."
                 ),
             },
         )
