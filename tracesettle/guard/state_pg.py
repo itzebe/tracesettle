@@ -158,6 +158,26 @@ _PG_MIGRATIONS: dict[int, tuple[str, ...]] = {
         "CREATE INDEX IF NOT EXISTS counter_events_at ON counter_events(at)",
         "CREATE INDEX IF NOT EXISTS idempotency_at ON idempotency(at)",
     ),
+    # Short-lived sandbox integration credentials (see the SQLite store). The
+    # shape matches so both backends satisfy the same ``StateStore`` contract.
+    3: (
+        """
+        CREATE TABLE IF NOT EXISTS sandbox_credentials (
+            credential_id TEXT PRIMARY KEY,
+            label         TEXT NOT NULL,
+            scope         TEXT NOT NULL,
+            secret_hash   TEXT NOT NULL,
+            approval_hash TEXT,
+            service_id    TEXT NOT NULL,
+            created_at    DOUBLE PRECISION NOT NULL,
+            expires_at    DOUBLE PRECISION NOT NULL,
+            revoked       INTEGER NOT NULL DEFAULT 0,
+            request_count INTEGER NOT NULL DEFAULT 0
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS sandbox_credentials_expires_at "
+        "ON sandbox_credentials(expires_at)",
+    ),
 }
 
 
@@ -674,6 +694,131 @@ class PostgresGuardStateStore:
                 self._raise_for(exc, "idempotency lookup")
                 raise  # unreachable
             return None if row is None else str(row[0])
+
+    # -- sandbox integration credentials ------------------------------------
+
+    def add_sandbox_credential(
+        self,
+        *,
+        credential_id: str,
+        label: str,
+        scope: str,
+        secret_hash: str,
+        approval_hash: str | None,
+        service_id: str,
+        expires_at: float,
+        at: float | None = None,
+    ) -> None:
+        moment = time.time() if at is None else at
+        with self._lock:
+            self._prepare()
+            try:
+                with self._connection.transaction():
+                    with self._connection.cursor() as cur:
+                        cur.execute(
+                            "INSERT INTO sandbox_credentials("
+                            "credential_id, label, scope, secret_hash, approval_hash, service_id, "
+                            "created_at, expires_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                            (
+                                credential_id,
+                                label,
+                                scope,
+                                secret_hash,
+                                approval_hash,
+                                service_id,
+                                moment,
+                                float(expires_at),
+                            ),
+                        )
+            except Exception as exc:
+                self._raise_for(exc, "recording a sandbox credential")
+                raise  # unreachable
+
+    def sandbox_credentials(self, *, include_inactive: bool = False) -> list[dict[str, Any]]:
+        now = time.time()
+        with self._read_cursor() as cursor:
+            try:
+                cursor.execute(
+                    "SELECT credential_id, label, scope, service_id, created_at, expires_at, "
+                    "revoked, request_count, approval_hash FROM sandbox_credentials "
+                    "ORDER BY created_at DESC"
+                )
+                rows = cursor.fetchall()
+            except Exception as exc:
+                self._raise_for(exc, "sandbox credential lookup")
+                raise  # unreachable
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            record = {
+                "credential_id": str(row[0]),
+                "label": str(row[1]),
+                "scope": str(row[2]),
+                "service_id": str(row[3]),
+                "created_at": float(row[4]),
+                "expires_at": float(row[5]),
+                "revoked": bool(row[6]),
+                "request_count": int(row[7]),
+                "has_approval_secret": row[8] is not None,
+            }
+            record["expired"] = record["expires_at"] <= now
+            record["active"] = not record["revoked"] and not record["expired"]
+            if include_inactive or record["active"]:
+                out.append(record)
+        return out
+
+    def sandbox_credential_secrets(self) -> list[dict[str, Any]]:
+        """Return the hash material for credential resolution (never a plaintext)."""
+        with self._read_cursor() as cursor:
+            try:
+                cursor.execute(
+                    "SELECT credential_id, secret_hash, approval_hash, revoked, expires_at, "
+                    "request_count FROM sandbox_credentials"
+                )
+                rows = cursor.fetchall()
+            except Exception as exc:
+                self._raise_for(exc, "sandbox credential secret lookup")
+                raise  # unreachable
+        return [
+            {
+                "credential_id": str(row[0]),
+                "secret_hash": row[1],
+                "approval_hash": row[2],
+                "revoked": bool(row[3]),
+                "expires_at": float(row[4]),
+                "request_count": int(row[5]),
+            }
+            for row in rows
+        ]
+
+    def revoke_sandbox_credential(self, credential_id: str) -> bool:
+        with self._lock:
+            self._prepare()
+            try:
+                with self._connection.transaction():
+                    with self._connection.cursor() as cur:
+                        cur.execute(
+                            "UPDATE sandbox_credentials SET revoked = 1 WHERE credential_id = %s",
+                            (credential_id,),
+                        )
+                        return cur.rowcount > 0
+            except Exception as exc:
+                self._raise_for(exc, "revoking a sandbox credential")
+                raise  # unreachable
+
+    def touch_sandbox_credential(self, credential_id: str) -> None:
+        """Increment a credential's use counter. Best-effort, never fatal."""
+        try:
+            with self._lock:
+                self._prepare()
+                with self._connection.transaction():
+                    with self._connection.cursor() as cur:
+                        cur.execute(
+                            "UPDATE sandbox_credentials SET request_count = request_count + 1 "
+                            "WHERE credential_id = %s",
+                            (credential_id,),
+                        )
+        except Exception:
+            return
 
 
 # ---------------------------------------------------------------------------

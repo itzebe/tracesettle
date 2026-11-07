@@ -658,3 +658,51 @@ def test_hostile_input_invariant_notices_a_token_that_raises(monkeypatch):
         assert result.holds is False
     finally:
         monkeypatch.undo()
+
+
+# --- agent surface is sandbox-scoped (mission 21) --------------------------
+
+
+def test_agent_surface_invariant_holds_on_the_current_build():
+    from tracesettle.guard.invariants import INVARIANTS
+
+    result = INVARIANTS["agent_surface_is_sandbox_scoped"]()
+    assert result.holds is True, result.detail
+
+
+def test_agent_surface_invariant_notices_an_operator_identity(monkeypatch):
+    """If a sandbox credential could name an operator service, it must fail.
+
+    The mutation: drop the cross-service refusal in the agent API, so a request
+    naming ``treasury-agent`` is evaluated instead of refused.
+    """
+    from tracesettle import agentapi as api_module
+    from tracesettle.guard import invariants as inv
+
+    monkeypatch.setattr(api_module.AgentAPI, "_identity_ok", lambda self, record, body: None)
+    try:
+        result = inv.INVARIANTS["agent_surface_is_sandbox_scoped"]()
+        assert result.holds is False
+        assert "403" in result.detail
+    finally:
+        monkeypatch.undo()
+
+
+def test_agent_surface_invariant_notices_a_self_approving_credential(monkeypatch):
+    """If the API credential were accepted as the approval secret, it must fail.
+
+    The mutation: make ``resolve_approval`` accept anything, so an agent holding
+    only its API credential could self-approve.
+    """
+    from tracesettle.guard import invariants as inv
+    from tracesettle.guard import sandbox as sandbox_module
+
+    monkeypatch.setattr(
+        sandbox_module.SandboxAuthority, "resolve_approval", lambda self, credential_id, presented: True
+    )
+    try:
+        result = inv.INVARIANTS["agent_surface_is_sandbox_scoped"]()
+        assert result.holds is False
+        assert "approval secret" in result.detail
+    finally:
+        monkeypatch.undo()

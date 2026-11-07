@@ -37,7 +37,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Iterator, Protocol, runtime_checkable
 
 #: Bump when the schema changes and add a migration below.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 DEFAULT_BUSY_TIMEOUT_MS = 5000
 
@@ -138,6 +138,29 @@ class StateStore(Protocol):
 
     def decision_for(self, request_key: str) -> str | None: ...
 
+    # -- sandbox integration credentials ------------------------------------
+
+    def add_sandbox_credential(
+        self,
+        *,
+        credential_id: str,
+        label: str,
+        scope: str,
+        secret_hash: str,
+        approval_hash: str | None,
+        service_id: str,
+        expires_at: float,
+        at: float | None = None,
+    ) -> None: ...
+
+    def sandbox_credentials(self, *, include_inactive: bool = False) -> list[dict[str, Any]]: ...
+
+    def sandbox_credential_secrets(self) -> list[dict[str, Any]]: ...
+
+    def revoke_sandbox_credential(self, credential_id: str) -> bool: ...
+
+    def touch_sandbox_credential(self, credential_id: str) -> None: ...
+
 
 def _decimal_or_none(value: Any) -> Decimal | None:
     if value is None or value == "":
@@ -207,6 +230,31 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
     2: (
         "CREATE INDEX IF NOT EXISTS counter_events_at ON counter_events(at)",
         "CREATE INDEX IF NOT EXISTS idempotency_at ON idempotency(at)",
+    ),
+    # Short-lived, narrowly scoped *sandbox* integration credentials, so an
+    # independent judge can connect an agent without the operator minting a
+    # durable service credential. Kept in the same store as the nonce/limit state
+    # because it is security-critical: a credential must survive a restart and be
+    # honoured by every instance. Only the SHA-256 hash is stored; the secret is
+    # shown once at issue time. ``scope`` and ``expires_at`` bound it, and
+    # ``revoked`` lets an operator cut it off early.
+    3: (
+        """
+        CREATE TABLE IF NOT EXISTS sandbox_credentials (
+            credential_id TEXT PRIMARY KEY,
+            label         TEXT NOT NULL,
+            scope         TEXT NOT NULL,
+            secret_hash   TEXT NOT NULL,
+            approval_hash TEXT,
+            service_id    TEXT NOT NULL,
+            created_at    REAL NOT NULL,
+            expires_at    REAL NOT NULL,
+            revoked       INTEGER NOT NULL DEFAULT 0,
+            request_count INTEGER NOT NULL DEFAULT 0
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS sandbox_credentials_expires_at "
+        "ON sandbox_credentials(expires_at)",
     ),
 }
 
@@ -595,6 +643,135 @@ class GuardStateStore:
             except sqlite3.Error as exc:
                 raise StateStoreError(f"idempotency lookup failed: {exc}") from exc
             return None if row is None else str(row["decision_id"])
+
+    # -- sandbox integration credentials ------------------------------------
+
+    def add_sandbox_credential(
+        self,
+        *,
+        credential_id: str,
+        label: str,
+        scope: str,
+        secret_hash: str,
+        approval_hash: str | None,
+        service_id: str,
+        expires_at: float,
+        at: float | None = None,
+    ) -> None:
+        """Persist one sandbox credential (hashes only; never the secrets)."""
+        moment = time.time() if at is None else at
+        with self._lock:
+            self._guard_usable()
+            try:
+                self._connection.execute(
+                    "INSERT INTO sandbox_credentials("
+                    "credential_id, label, scope, secret_hash, approval_hash, service_id, "
+                    "created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        credential_id,
+                        label,
+                        scope,
+                        secret_hash,
+                        approval_hash,
+                        service_id,
+                        moment,
+                        float(expires_at),
+                    ),
+                )
+            except sqlite3.Error as exc:
+                self._mark_degraded()
+                raise StateStoreError(f"recording a sandbox credential failed: {exc}") from exc
+
+    def sandbox_credentials(self, *, include_inactive: bool = False) -> list[dict[str, Any]]:
+        """Return sandbox credentials (metadata only; never the secret or its hash).
+
+        ``include_inactive`` includes expired and revoked rows for an operator
+        audit; the default is the active set only.
+        """
+        now = time.time()
+        with self._cursor() as cursor:
+            try:
+                rows = cursor.execute(
+                    "SELECT credential_id, label, scope, service_id, created_at, expires_at, "
+                    "revoked, request_count, approval_hash FROM sandbox_credentials "
+                    "ORDER BY created_at DESC"
+                ).fetchall()
+            except sqlite3.Error as exc:
+                raise StateStoreError(f"sandbox credential lookup failed: {exc}") from exc
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            record = {
+                "credential_id": str(row["credential_id"]),
+                "label": str(row["label"]),
+                "scope": str(row["scope"]),
+                "service_id": str(row["service_id"]),
+                "created_at": float(row["created_at"]),
+                "expires_at": float(row["expires_at"]),
+                "revoked": bool(row["revoked"]),
+                "request_count": int(row["request_count"]),
+                "has_approval_secret": row["approval_hash"] is not None,
+            }
+            record["expired"] = record["expires_at"] <= now
+            record["active"] = not record["revoked"] and not record["expired"]
+            if include_inactive or record["active"]:
+                out.append(record)
+        return out
+
+    def sandbox_credential_secrets(self) -> list[dict[str, Any]]:
+        """Return the *hash material* for credential resolution.
+
+        Internal to the sandbox authority: it needs the stored hashes to verify a
+        presented secret. This never includes a plaintext secret (none is stored)
+        and is not part of any API response.
+        """
+        with self._cursor() as cursor:
+            try:
+                rows = cursor.execute(
+                    "SELECT credential_id, secret_hash, approval_hash, revoked, expires_at, "
+                    "request_count FROM sandbox_credentials"
+                ).fetchall()
+            except sqlite3.Error as exc:
+                raise StateStoreError(f"sandbox credential secret lookup failed: {exc}") from exc
+        return [
+            {
+                "credential_id": str(row["credential_id"]),
+                "secret_hash": row["secret_hash"],
+                "approval_hash": row["approval_hash"],
+                "revoked": bool(row["revoked"]),
+                "expires_at": float(row["expires_at"]),
+                "request_count": int(row["request_count"]),
+            }
+            for row in rows
+        ]
+
+    def revoke_sandbox_credential(self, credential_id: str) -> bool:
+        with self._lock:
+            self._guard_usable()
+            try:
+                cursor = self._connection.execute(
+                    "UPDATE sandbox_credentials SET revoked = 1 WHERE credential_id = ?",
+                    (credential_id,),
+                )
+                return cursor.rowcount > 0
+            except sqlite3.Error as exc:
+                self._mark_degraded()
+                raise StateStoreError(f"revoking a sandbox credential failed: {exc}") from exc
+
+    def touch_sandbox_credential(self, credential_id: str) -> None:
+        """Increment a credential's use counter. Best-effort, never fatal."""
+        with self._lock:
+            self._guard_usable()
+            try:
+                self._connection.execute(
+                    "UPDATE sandbox_credentials SET request_count = request_count + 1 "
+                    "WHERE credential_id = ?",
+                    (credential_id,),
+                )
+            except sqlite3.Error:
+                # A counter is diagnostic, not a security control: a failure here
+                # must not fail an otherwise valid request, and must not latch the
+                # store degraded.
+                return
 
 
 class DurableReplayStore:

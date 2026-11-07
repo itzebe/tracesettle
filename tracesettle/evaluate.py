@@ -189,6 +189,34 @@ EVALUATE_HTML = """<!DOCTYPE html>
     the transaction.</p>
 
   <div id="out" aria-live="polite"></div>
+
+  <section class="hero" id="connect" style="margin-top:40px;border-top:1px solid var(--line);padding-top:28px">
+    <h2 style="font-size:24px;margin:0 0 8px">Connect your own agent</h2>
+    <p class="sub" style="margin-bottom:8px">A scoped, keyless sandbox credential.</p>
+    <p>Point an agent you already operate at this deployment. One call issues a short-lived
+      credential scoped to the sandbox policy — no account, no wallet, no funded key. Your agent then
+      submits a payment intent and TRACESETTLE returns the enforcement decision: an approved
+      destination is <span class="mono">ALLOW</span>, an unapproved one is
+      <span class="mono">BLOCK</span>, and an amount over the threshold is
+      <span class="mono">REQUIRE_APPROVAL</span>. The credential can only ever reach this sandbox:
+      it cannot name an operator service, sign a real transaction, or broadcast.</p>
+    <div class="pillrow">
+      <span class="pill ok">keyless</span>
+      <span class="pill">credential-gated</span>
+      <span class="pill sim">execution is simulated</span>
+      <span class="pill">revocable &amp; expiring</span>
+    </div>
+  </section>
+
+  <div class="controls">
+    <button id="connect-run" class="primary" type="button">Issue a credential &amp; run a demo agent</button>
+    <a href="api/agent/openapi.json">OpenAPI contract</a>
+    <a href="api/agent/config">Scope &amp; limits</a>
+  </div>
+  <p class="hint">Runs entirely against this deployment. The credential expires in an hour and can
+    be revoked; the run demonstrates an allowed payment, a blocked payment and a
+    require-approval payment in one sequence.</p>
+  <div id="agent-out" aria-live="polite"></div>
 </main>
 <footer>
   <p>Read-only and non-custodial. This evaluation never signs, broadcasts or moves funds.
@@ -275,6 +303,109 @@ async function run() {
 }
 
 runBtn.addEventListener('click', run);
+
+/* ---- connect your own agent ---- */
+const connectBtn = document.getElementById('connect-run');
+const agentOut = document.getElementById('agent-out');
+
+function decisionClass(d) {
+  if (d === 'ALLOW') return 'st-pass';
+  if (d === 'BLOCK') return 'st-fail';
+  if (d === 'REQUIRE_APPROVAL' || d === 'HOLD') return 'st-skip';
+  return '';
+}
+
+function agentStep(title, decision, detail, extra) {
+  var badge = decision
+    ? '<span class="st ' + decisionClass(decision) + '">decision: ' + esc(decision) + '</span>'
+    : '';
+  var bits = [badge];
+  if (extra) { bits.push(extra); }
+  return '<div class="scenario"><div class="body"><strong>' + esc(title) + '</strong> ' +
+    '<div class="badge-row" style="margin:8px 0">' + bits.join('') + '</div>' +
+    '<p class="exp">' + detail + '</p></div></div>';
+}
+
+async function agentFetch(method, path, body, headers) {
+  var res = await fetch(path, {
+    method: method,
+    headers: Object.assign({ 'Content-Type': 'application/json' }, headers || {}),
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  var payload = null;
+  try { payload = await res.json(); } catch (e) { payload = null; }
+  if (!res.ok) {
+    throw new Error((payload && (payload.error || payload.reason)) || ('HTTP ' + res.status));
+  }
+  return payload;
+}
+
+async function connectAgent() {
+  connectBtn.disabled = true;
+  agentOut.innerHTML = '<div class="loading">Issuing a sandbox credential and running the agent&hellip;</div>';
+  try {
+    var cred = await agentFetch('POST', 'api/agent/connect', { label: 'independent judge' });
+    var cfg = await agentFetch('GET', 'api/agent/config');
+    var headers = { 'X-Sandbox-Credential': cred.api_credential };
+    var leg = cfg.sandbox.approved_destinations[0];
+    var bad = cfg.sandbox.blocked_example_destination;
+
+    var allowed = await agentFetch('POST', 'api/agent/evaluate', { transaction: {
+      operation: 'WITHDRAWAL', chain: 'base', asset: 'USDC', amount: '50', destination: leg } }, headers);
+    var blocked = await agentFetch('POST', 'api/agent/evaluate', { transaction: {
+      operation: 'WITHDRAWAL', chain: 'base', asset: 'USDC', amount: '50', destination: bad } }, headers);
+    var review = await agentFetch('POST', 'api/agent/evaluate', { transaction: {
+      operation: 'WITHDRAWAL', chain: 'base', asset: 'USDC', amount: '250', destination: leg, request_id: 'judge-review' } }, headers);
+
+    var executed = null;
+    if (allowed.authorization) {
+      executed = await agentFetch('POST', 'api/agent/execute', {
+        transaction: { operation: 'WITHDRAWAL', chain: 'base', asset: 'USDC', amount: '50', destination: leg },
+        authorization: allowed.authorization }, headers);
+    }
+
+    var html = '<div class="summary">' +
+      '<div class="kpi"><div class="n">' + esc(cred.service_id) + '</div><div class="l">sandbox identity</div></div>' +
+      '<div class="kpi"><div class="n">' + esc(String(cred.ttl_seconds)) + 's</div><div class="l">credential lifetime</div></div>' +
+      '<div class="kpi"><div class="n">' + esc(String(cred.max_requests)) + '</div><div class="l">request cap</div></div>' +
+      '<div class="kpi"><div class="n">' + esc(String(executed ? executed.executor_calls : 0)) +
+        '</div><div class="l">executor calls</div></div>' +
+      '</div>';
+
+    html += agentStep('Approved destination', allowed.decision,
+      'A payment inside policy to an approved destination. The boundary returns <strong>ALLOW</strong> and mints an authorization bound to the exact parameters.',
+      '<span class="badge">authorization: ' + esc(String(!!allowed.authorization)) + '</span>');
+
+    html += agentStep('Unapproved destination', blocked.decision,
+      'The same amount to a destination the policy never approved. The boundary returns <strong>BLOCK</strong> and issues no authorization, so nothing can reach the signer.',
+      '<span class="badge">authorization: ' + esc(String(!!blocked.authorization)) + '</span>' +
+      '<span class="badge">signer reached: ' +
+        esc(blocked.signer_calls === undefined ? 'no' : String(blocked.signer_calls)) + '</span>');
+
+    html += agentStep('Amount over the approval threshold', review.decision,
+      'An amount above the threshold requires a human approval before it can be signed. An agent holding only its API credential cannot supply it.',
+      '<span class="badge">authorization: ' + esc(String(!!review.authorization)) + '</span>');
+
+    if (executed) {
+      html += agentStep('Execute the allowed payment', executed.sign_result.outcome,
+        'The allowed authorization is presented to the signing boundary. The signer re-derives the binding and, for a valid token, simulates execution. <strong>Nothing is broadcast.</strong>',
+        '<span class="badge">executor calls: ' + esc(String(executed.executor_calls)) + '</span>' +
+        boolBadge('broadcast', executed.broadcast, true));
+    }
+
+    html += '<div class="note sim">' + esc(cred.note) + '</div>';
+    html += '<details class="raw"><summary>Your credential and raw decisions (JSON)</summary><pre>' +
+      esc(JSON.stringify({ credential: cred, allowed: allowed, blocked: blocked, review: review, executed: executed }, null, 2)) +
+      '</pre></details>';
+    agentOut.innerHTML = html;
+  } catch (err) {
+    agentOut.innerHTML = '<div class="note bad">' + esc(err.message) + '</div>';
+  } finally {
+    connectBtn.disabled = false;
+  }
+}
+
+connectBtn.addEventListener('click', connectAgent);
 </script>
 </body>
 </html>

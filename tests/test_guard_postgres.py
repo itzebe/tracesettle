@@ -49,6 +49,21 @@ _PAYLOAD = {
 }
 
 
+def _expected_public_table_count() -> int:
+    """The number of tables the PostgreSQL schema creates in ``public``.
+
+    Derived from the migration statements themselves, so adding a table (as the
+    sandbox-credential migration did) does not silently invalidate this check.
+    """
+    from tracesettle.guard.state_pg import _PG_MIGRATIONS
+
+    return sum(
+        statement.count("CREATE TABLE IF NOT EXISTS")
+        for statements in _PG_MIGRATIONS.values()
+        for statement in statements
+    )
+
+
 @pytest.fixture(autouse=True)
 def _clean_state(pg_dsn_value):
     """Truncate the guard tables before and after every test in this module.
@@ -640,9 +655,10 @@ def test_concurrent_first_start_on_an_empty_database(pg_dsn_value):
                         "SELECT count(*) FROM information_schema.tables "
                         "WHERE table_schema = 'public'"
                     )
-                    assert cur.fetchone()[0] == 5, (
-                        f"attempt {attempt}: expected 5 tables, the schema was created "
-                        "more than once or partially"
+                    expected_tables = _expected_public_table_count()
+                    assert cur.fetchone()[0] == expected_tables, (
+                        f"attempt {attempt}: expected {expected_tables} tables, the schema "
+                        "was created more than once or partially"
                     )
             finally:
                 admin.close()
@@ -720,7 +736,7 @@ def test_postgres_failure_never_falls_back_to_memory(pg_dsn_value):
 
 def test_postgres_and_sqlite_satisfy_the_same_contract(pg_dsn_value, tmp_path):
     """Both backends expose the identical surface and behave the same on it."""
-    from tracesettle.guard.state import GuardStateStore, StateStore
+    from tracesettle.guard.state import GuardStateStore, SCHEMA_VERSION, StateStore
     from tracesettle.guard.state_pg import PostgresGuardStateStore
 
     pg = PostgresGuardStateStore(pg_dsn_value)
@@ -728,7 +744,7 @@ def test_postgres_and_sqlite_satisfy_the_same_contract(pg_dsn_value, tmp_path):
     try:
         for store in (pg, sq):
             assert isinstance(store, StateStore)
-            assert store.schema_version() == 2
+            assert store.schema_version() == SCHEMA_VERSION
             assert store.consume_nonce("p", 2_000_000_000.0) is True
             assert store.consume_nonce("p", 2_000_000_000.0) is False
             assert store.remember_decision("k", "d1") is True

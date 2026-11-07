@@ -25,6 +25,7 @@ from tracesettle.guard.policy import DEFAULT_POLICY, PolicyConfig, ServicePolicy
 from tracesettle.guard.service import GuardService
 from tracesettle.guard.signer import ReferenceSigner, SignRequest
 from tracesettle.guard.state import (
+    SCHEMA_VERSION,
     DurableReplayStore,
     DurableRevocationStore,
     GuardStateStore,
@@ -525,7 +526,7 @@ def test_migration_from_v1_adds_the_window_index(tmp_path):
     conn.close()
 
     reopened = GuardStateStore(path)
-    assert reopened.schema_version() == 2
+    assert reopened.schema_version() == SCHEMA_VERSION
     assert reopened.is_nonce_consumed("keep-across-migration")
     indexes = {
         row[0]

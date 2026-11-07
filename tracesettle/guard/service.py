@@ -650,8 +650,10 @@ class GuardService:
         )
         return wrapper.evaluate(transaction, approval=approval)
 
-    def evaluate_payload(self, payload: dict[str, Any], *, simulated: bool = False) -> GuardDecision:
-        return self.evaluate(request_from_payload(payload, simulated=simulated))
+    def evaluate_payload(
+        self, payload: dict[str, Any], *, simulated: bool = False, approval: Any = None
+    ) -> GuardDecision:
+        return self.evaluate(request_from_payload(payload, simulated=simulated), approval=approval)
 
     # -- durable counters ---------------------------------------------------
 

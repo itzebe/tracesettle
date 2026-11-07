@@ -817,12 +817,12 @@ a bare interpreter.
 **1. Run the tests.**
 
 ```sh
-python -m pytest tests/ --collect-only -q   # 1705 tests collected
-python -m pytest tests/ -q                  # 1674 passed, 31 skipped
+python -m pytest tests/ --collect-only -q   # 1731 tests collected
+python -m pytest tests/ -q                  # 1700 passed, 31 skipped
 ```
-→ `1674 passed, 31 skipped`. The skips are the PostgreSQL integration
+→ `1700 passed, 31 skipped`. The skips are the PostgreSQL integration
 tests; set `TRACESETTLE_TEST_PG_DSN` to a real server to run them
-(**1698 passed, 7 skipped** — the remaining 7 are opt-in *live-infrastructure*
+(**1724 passed, 7 skipped** — the remaining 7 are opt-in *live-infrastructure*
 tests that need real provider credentials, a testnet key, or a TDX enclave
 harness, none of which a zero-budget local run has).
 
@@ -877,6 +877,37 @@ honest behaviour, never a verdict. Add `--json` for a machine-readable report; t
 command exits non-zero only on a real defect, not on an environmental limitation.
 The same matrix is served at `/api/guard/judge/scenarios`, and the browser view is
 `/evaluate` (with the guide at `/JUDGE_GUIDE`), both under the same opt-in flag.
+
+**2d. Connect your own agent to the boundary (opt-in, keyless).**
+
+With the public demonstration enabled, an agent you already operate can submit a
+payment intent to the real enforcement boundary. One call issues a short-lived,
+scoped **sandbox credential** — no account, no wallet, no funded key:
+
+```sh
+BASE=http://127.0.0.1:8080
+CRED=$(curl -sS -X POST $BASE/api/agent/connect \
+  -H 'Content-Type: application/json' -d '{"label":"my-agent"}')
+KEY=$(echo "$CRED" | python3 -c 'import sys,json;print(json.load(sys.stdin)["api_credential"])')
+
+# an approved destination -> ALLOW, with a transaction-bound authorization
+curl -sS -X POST $BASE/api/agent/evaluate -H "X-Sandbox-Credential: $KEY" \
+  -H 'Content-Type: application/json' -d '{"transaction":{"operation":"WITHDRAWAL",
+  "chain":"base","asset":"USDC","amount":"50","destination":"0x1111111111111111111111111111111111111111"}}'
+# -> { "decision": "ALLOW", "authorizes_signing": true, "authorization": {...} }
+
+# an unapproved destination -> BLOCK, no authorization, signer never reached
+curl -sS -X POST $BASE/api/agent/evaluate -H "X-Sandbox-Credential: $KEY" \
+  -H 'Content-Type: application/json' -d '{"transaction":{"operation":"WITHDRAWAL",
+  "chain":"base","asset":"USDC","amount":"50","destination":"0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"}}'
+# -> { "decision": "BLOCK", "authorizes_signing": false, "signer_calls": 0 }
+```
+
+The credential can only ever reach the **sandbox policy**; it cannot name an
+operator service, and execution uses the simulated executor (nothing is signed or
+broadcast). It is durable across restarts, expiring, revocable, and rate-limited.
+The contract is at `/api/agent/openapi.json`, the scope at `/api/agent/config`,
+and the browser button is **Connect your own agent** on `/evaluate`.
 
 **3. Prove the enforcement boundary: a permitted request executes, a suspicious
 one cannot.**
@@ -1303,7 +1334,7 @@ transaction request ──▶ │ guard/rules.py      7 controls, all run  │
                         │                     validate, then execute │
                         │ guard/audit.py      hash-chained records  │
                         │ guard/monitor.py    counters + incidents  │
-                        │ guard/invariants.py 54 checked guarantees │
+                        │ guard/invariants.py 55 checked guarantees │
                         └────────────────────┬─────────────────────┘
                                              │ ALLOW + authorization
                                              ▼
@@ -1361,6 +1392,8 @@ identical decisions.
 | `tracesettle/ui.py` | Standard-library web interface, guard routes, console. |
 | `tracesettle/evaluate.py` | Public, keyless independent-evaluation page (`/evaluate`) and the shared doc-page shell. |
 | `tracesettle/judge.py` | The independent evaluation scenario matrix, run offline or served at `/api/guard/judge/scenarios`. |
+| `tracesettle/agentapi.py` | The agent-facing sandbox integration API (`/api/agent/*`): connect, evaluate, execute, approval, evidence, revoke. |
+| `tracesettle/guard/sandbox.py` | Scoped sandbox credentials and the fixed, enforced sandbox policy behind the agent surface. |
 | `tracesettle/markdown.py` | Minimal Markdown renderer used for `/JUDGE_GUIDE`. |
 | `tracesettle/ratelimit.py` | Token buckets for per-IP and per-host limits. |
 | `tracesettle/cache.py` | Bounded TTL cache with single-flight. |
@@ -1379,7 +1412,7 @@ identical decisions.
 | `tracesettle/guard/safeguards.py` | Durable security safeguards: the learning loop's store (SQLite). |
 | `tracesettle/guard/learning.py` | The learning loop: derive a lesson, apply safeguards (only ever tightening). |
 | `tracesettle/guard/state_pg.py` | Optional PostgreSQL backend: shared nonces, counters, revocations, idempotency. |
-| `tracesettle/guard/invariants.py` | The fifty-four structural guarantees, checked by execution. |
+| `tracesettle/guard/invariants.py` | The fifty-five structural guarantees, checked by execution. |
 | `tracesettle/guard/api.py` | Guard HTTP routing and JSON serialization. |
 | `tracesettle/guard/console.py` | The security operations console page. |
 | `docs/TRANSACTION_SECURITY.md` | The security layer in full, including what it does not do. |
@@ -1723,7 +1756,7 @@ immutable commit SHA (not a moving tag), and cancels superseded runs.
 ## Tests
 
 ```sh
-python3 -m pytest tests/ -q          # 1674 passed, 31 skipped (1698 passed, 7 skipped with PostgreSQL)
+python3 -m pytest tests/ -q          # 1700 passed, 31 skipped (1724 passed, 7 skipped with PostgreSQL)
 python3 -m pytest tests/test_guard_authorization.py -q
 python3 -m pytest tests/test_guard_invariants.py -q
 python3 -m pytest tests/test_guard_end_to_end.py -q
