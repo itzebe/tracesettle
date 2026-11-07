@@ -944,6 +944,12 @@ async function loadNear() {
           : '<span class="small">n/a</span>') +
         "</dd></div>" +
         (states ? '<p class="small mono">' + esc(states) + "</p>" : "") +
+        (info.provider_policy_layer
+          ? '<div class="note ' + (info.provider_policy_layer.applied ? "ok" : "sim") + '">' +
+            "<strong>Provider policy (independent layer):</strong> " +
+            esc(info.provider_policy_layer.applied ? "applied" : "not applied") + " — " +
+            esc(info.provider_policy_layer.note) + "</div>"
+          : "") +
         '<div class="note sim">' +
         esc(info.attestation_note || info.note || "Custody evidence is not available.") + "</div></div>";
     } catch (err) { custEl.innerHTML = '<div class="note bad">' + esc(err.message) + "</div>"; }

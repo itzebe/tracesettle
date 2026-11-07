@@ -573,6 +573,34 @@ OUTLAYER_TIMEOUT_SECONDS = float(
     os.environ.get("TRACESETTLE_OUTLAYER_TIMEOUT_SECONDS", "30") or "30"
 )
 
+#: Whether the independent NEAR provider (Agent API) policy must be in force
+#: before a custody operation is authorized. On by default: the provider policy
+#: is a *second*, independent layer, and OutLayer's wallet policy is not a
+#: substitute for it. Set to ``0`` only where the provider policy is known not to
+#: apply; the layer then reports itself as not applied rather than passing
+#: silently.
+OUTLAYER_REQUIRE_PROVIDER_POLICY = (
+    os.environ.get("TRACESETTLE_OUTLAYER_REQUIRE_PROVIDER_POLICY", "1").strip().lower()
+    not in {"0", "false", "no", "off"}
+)
+
+#: The agent id the provider policy is read for on the custody path. Defaults to
+#: the shared ``TRACESETTLE_NEAR_AGENT_ID`` so the policy read and the agent
+#: authorization refer to the same agent.
+OUTLAYER_PROVIDER_POLICY_AGENT_ID = (
+    os.environ.get("TRACESETTLE_OUTLAYER_PROVIDER_POLICY_AGENT_ID", "").strip()
+    or NEAR_AGENT_ID
+)
+
+#: Maximum age (seconds) of a provider policy on the custody path. Defaults to
+#: ten minutes, matching the provider's documented policy-change cooldown: a
+#: policy older than this (or one that carries no ``as_of`` at all) is refused as
+#: not current, so a stale policy cannot authorize a payment. Set to ``0`` to
+#: disable the bound.
+OUTLAYER_PROVIDER_POLICY_MAX_AGE_SECONDS = int(
+    os.environ.get("TRACESETTLE_OUTLAYER_PROVIDER_POLICY_MAX_AGE_SECONDS", "600") or "600"
+)
+
 #: Whether the TEE attestation route is enabled. Off by default: it makes an
 #: outbound request to the attestation endpoint, so enabling it is an explicit
 #: operator decision rather than something a public bind turns on silently.

@@ -507,6 +507,69 @@ def test_custody_tee_signing_invariant_notices_an_accepting_attestation_verifier
         catt.verify_custody_attestation = original
 
 
+def test_custody_provider_policy_invariant_notices_a_loosening_combiner():
+    """Mutation check: if the provider policy could loosen the guard decision, the
+    invariant must fail.
+
+    The mutation makes the combine step ignore the gate's verdict entirely - the
+    exact "policy that is not in force still authorizes" overstatement the
+    invariant exists to catch.
+    """
+    from tracesettle.guard import invariants as inv
+    from tracesettle.near import outlayer_execution as ox
+
+    original = ox.combine_provider_policy
+
+    def loosening(decision, gate_decision):  # noqa: ANN001
+        # The mutation: return the guard decision untouched.
+        return decision
+
+    ox.combine_provider_policy = loosening
+    try:
+        result = inv.INVARIANTS["custody_provider_policy_only_tightens"]()
+        assert result.holds is False
+    finally:
+        ox.combine_provider_policy = original
+
+
+def test_custody_provider_policy_invariant_notices_a_fail_open_layer():
+    """Mutation check: a required layer with no adapter must not authorize.
+
+    The mutation makes ``prepare`` skip the "required but not constructed"
+    refusal, so the operation would fall back to the operator policy alone - the
+    silent fail-open the invariant guards against.
+    """
+    from tracesettle.guard import invariants as inv
+    from tracesettle.near import outlayer_execution as ox
+
+    original = ox.OutLayerCustodyBoundary.prepare
+
+    def permissive(self, *, service_id, destination, amount_human, request_id=None,
+                   idempotency_key=None):  # noqa: ANN001
+        # The mutation: drop the required-layer refusal by pretending it is not
+        # required for the duration of the call.
+        required = self._require_provider_policy
+        self._require_provider_policy = False
+        try:
+            return original(
+                self,
+                service_id=service_id,
+                destination=destination,
+                amount_human=amount_human,
+                request_id=request_id,
+                idempotency_key=idempotency_key,
+            )
+        finally:
+            self._require_provider_policy = required
+
+    ox.OutLayerCustodyBoundary.prepare = permissive
+    try:
+        result = inv.INVARIANTS["custody_provider_policy_only_tightens"]()
+        assert result.holds is False
+    finally:
+        ox.OutLayerCustodyBoundary.prepare = original
+
+
 def test_service_facing_route_invariant_notices_an_ungated_route():
     """Mutation check: dropping a route from the gate set must fail the invariant.
 

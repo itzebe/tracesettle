@@ -56,6 +56,11 @@ from .custody_attestation import (
     combine_evidence,
     verify_custody_attestation,
 )
+from .provider_policy_gate import (
+    ProviderPolicyDecision,
+    ProviderPolicyGate,
+    combine_provider_policy,
+)
 from .outlayer import (
     ProviderOutcome,
     OutLayerCustodyProvider,
@@ -139,6 +144,9 @@ class PreparedCustodyTransfer:
     binding: dict[str, str] = field(default_factory=dict)
     transaction_digest: str = ""
     idempotency_key: str = ""
+    #: The provider-policy verdict that gates this operation, if the operator
+    #: requires one. ``None`` means the provider policy was not consulted.
+    provider_policy: ProviderPolicyDecision | None = None
 
     @property
     def authorized(self) -> bool:
@@ -160,6 +168,9 @@ class PreparedCustodyTransfer:
             "binding": dict(self.binding),
             "transaction_digest": self.transaction_digest,
             "idempotency_key": self.idempotency_key,
+            "provider_policy": (
+                self.provider_policy.to_dict() if self.provider_policy is not None else None
+            ),
         }
 
 
@@ -354,6 +365,9 @@ class OutLayerCustodyBoundary:
         sleep: Any | None = None,
         identity: Any | None = None,
         approved_measurements: Any | None = None,
+        policy_adapter: Any | None = None,
+        provider_policy_agent_id: str = "",
+        require_provider_policy: bool = False,
     ) -> None:
         self.guard = guard_service
         self.provider = provider
@@ -367,6 +381,23 @@ class OutLayerCustodyBoundary:
         #: configured": approval is then recorded as *not checked*, never as
         #: approved.
         self._approved_measurements = approved_measurements
+        #: The independent NEAR provider-policy layer. When a policy adapter is
+        #: supplied the gate reads the provider policy and can only tighten the
+        #: guard's decision. With no adapter the layer is not applied (the
+        #: operator policy alone decides), which is reported honestly in
+        #: :meth:`info` rather than implied to be in force.
+        self._policy_adapter = policy_adapter
+        self._provider_policy_agent_id = provider_policy_agent_id
+        self._require_provider_policy = bool(require_provider_policy)
+        self._policy_gate = (
+            ProviderPolicyGate(
+                policy_adapter,
+                agent_id=provider_policy_agent_id,
+                require=self._require_provider_policy,
+            )
+            if policy_adapter is not None and provider_policy_agent_id
+            else None
+        )
 
     # -- identity -----------------------------------------------------------
 
@@ -396,6 +427,36 @@ class OutLayerCustodyBoundary:
                 "The OutLayer Agent Custody signing API exposes no per-operation TDX quote, "
                 "so TEE signing cannot be cryptographically established for a custody "
                 "transfer. Settlement is verified independently through the NEAR RPC."
+            ),
+            "provider_policy_layer": (
+                {
+                    "applied": True,
+                    "agent_id": self._provider_policy_agent_id,
+                    "required": self._require_provider_policy,
+                    "note": (
+                        "The independent NEAR provider (Agent API) policy is read and must be "
+                        "in force before an operation is authorized; it can only tighten the "
+                        "guard's decision."
+                    ),
+                }
+                if self._policy_gate is not None
+                else {
+                    "applied": False,
+                    "required": self._require_provider_policy,
+                    "note": (
+                        "The independent NEAR provider policy is REQUIRED but no policy "
+                        "adapter or agent id is configured, so every operation is refused. "
+                        "Set TRACESETTLE_NEAR_AGENT_API_URL/_KEY, or set "
+                        "TRACESETTLE_OUTLAYER_REQUIRE_PROVIDER_POLICY=0 to run without the "
+                        "provider-policy layer."
+                        if self._require_provider_policy
+                        else (
+                            "No provider-policy adapter is configured, so the independent NEAR "
+                            "provider policy is NOT consulted; the operator policy alone decides. "
+                            "Set TRACESETTLE_NEAR_AGENT_API_URL/_KEY to enable it."
+                        )
+                    ),
+                }
             ),
             "evidence_states": [s.value for s in CustodyEvidenceState],
             "note": (
@@ -479,6 +540,22 @@ class OutLayerCustodyBoundary:
             transaction_digest=digest,
         )
         decision = self.guard.evaluate(request)
+        # The independent NEAR provider-policy layer. It runs *after* the guard
+        # and can only tighten the decision: a policy that is not in force, not
+        # readable, stale, or frozen yields HOLD/BLOCK, and any authorization the
+        # guard issued is discarded so no token can reach a signer.
+        provider_policy: ProviderPolicyDecision | None = None
+        if self._policy_gate is not None:
+            provider_policy = self._policy_gate.evaluate()
+            decision = combine_provider_policy(decision, provider_policy)
+        elif self._require_provider_policy:
+            # Required but not constructed (no adapter or no agent id). Refuse
+            # rather than fall back to the operator policy alone, which would
+            # silently drop the second layer the operator asked for.
+            raise CustodyError(
+                "the independent NEAR provider policy is required but no policy adapter or "
+                "agent id is configured; refusing to authorize without the second policy layer"
+            )
         prepared = PreparedCustodyTransfer(
             network=self.network,
             wallet_account=wallet_account,
@@ -505,6 +582,7 @@ class OutLayerCustodyBoundary:
             ),
             transaction_digest=digest,
             idempotency_key=idempotency_key_for(digest),
+            provider_policy=provider_policy,
         )
         return prepared
 

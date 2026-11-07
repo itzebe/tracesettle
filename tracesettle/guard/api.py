@@ -1223,6 +1223,11 @@ class GuardAPI:
                 "prepare_id": prepare_id,
                 "operation": "custody-transfer",
                 "prepared": prepared.to_dict(),
+                "provider_policy": (
+                    prepared.provider_policy.to_dict()
+                    if prepared.provider_policy is not None
+                    else None
+                ),
                 "note": (
                     "the operation was evaluated; it reaches the provider only through "
                     "/custody/execute and only when the decision is ALLOW"
@@ -1281,6 +1286,14 @@ class GuardAPI:
                 "amount_near": str(prepared.amount_human),
                 "destination": prepared.destination,
                 "checks": [{"name": c.name, "ok": c.ok} for c in execution.verification.checks],
+                # Provider-policy provenance: what policy gated this operation, where
+                # it came from, and whether it was in force. Public identifiers and
+                # the derived state only - never a secret.
+                "provider_policy": (
+                    prepared.provider_policy.to_dict()
+                    if prepared.provider_policy is not None
+                    else None
+                ),
             },
         )
         return ApiResponse(200, execution.to_dict())

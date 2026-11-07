@@ -1667,6 +1667,7 @@ def _build_custody_boundary(guard_service: GuardService) -> Any:
     from .near.networks import NetworkError, network_config
     from .near.outlayer import OutLayerConfig, OutLayerCustodyProvider
     from .near.outlayer_execution import OutLayerCustodyBoundary
+    from .near.policy import PolicyAdapter
     from .near.rpc import NearRpc
 
     provider_config = OutLayerConfig(
@@ -1684,11 +1685,26 @@ def _build_custody_boundary(guard_service: GuardService) -> Any:
         max_attempts=config.MAX_ATTEMPTS,
     )
     provider = OutLayerCustodyProvider(provider_config, client=client)
+    # The independent NEAR provider (Agent API) policy. It is a second layer,
+    # separate from OutLayer's own wallet policy, and is required by default. The
+    # adapter reads live policy only when a base URL and key are configured;
+    # otherwise the gate reports the policy as unreadable and fails closed.
+    policy_adapter = PolicyAdapter(
+        base_url=config.NEAR_AGENT_API_URL,
+        api_key=config.NEAR_AGENT_API_KEY,
+        http_client=client,
+        expected_host=config.NEAR_AGENT_API_EXPECTED_HOST,
+        expected_agent_id=config.OUTLAYER_PROVIDER_POLICY_AGENT_ID,
+        max_age_seconds=config.OUTLAYER_PROVIDER_POLICY_MAX_AGE_SECONDS,
+    )
     return OutLayerCustodyBoundary(
         guard_service,
         provider,
         network=net_config.network,
         rpc=NearRpc(net_config, client=client),
+        policy_adapter=policy_adapter,
+        provider_policy_agent_id=config.OUTLAYER_PROVIDER_POLICY_AGENT_ID,
+        require_provider_policy=config.OUTLAYER_REQUIRE_PROVIDER_POLICY,
     )
 
 

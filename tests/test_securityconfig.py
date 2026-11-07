@@ -355,6 +355,37 @@ def test_outlayer_enabled_with_full_configuration_starts(monkeypatch):
         OUTLAYER_API_KEY="wk_test_000000000000000000000000000000000000",
         OUTLAYER_NETWORK="testnet",
         NEAR_EXECUTION_ENABLED=True,
+        OUTLAYER_REQUIRE_PROVIDER_POLICY=False,
+    )
+    profile = _validate("127.0.0.1")
+    assert profile.public_binding is False
+
+
+def test_outlayer_requiring_the_provider_policy_without_an_api_is_refused(monkeypatch):
+    """A required provider policy with no Agent API would be dead on arrival."""
+    _with_config(
+        monkeypatch,
+        OUTLAYER_ENABLED=True,
+        OUTLAYER_API_KEY="wk_test_000000000000000000000000000000000000",
+        OUTLAYER_NETWORK="testnet",
+        NEAR_EXECUTION_ENABLED=True,
+        OUTLAYER_REQUIRE_PROVIDER_POLICY=True,
+        NEAR_AGENT_API_URL=None,
+    )
+    with pytest.raises(ConfigurationError) as exc:
+        _validate("127.0.0.1")
+    assert "TRACESETTLE_NEAR_AGENT_API_URL" in str(exc.value)
+
+
+def test_outlayer_with_the_provider_policy_and_an_api_starts(monkeypatch):
+    _with_config(
+        monkeypatch,
+        OUTLAYER_ENABLED=True,
+        OUTLAYER_API_KEY="wk_test_000000000000000000000000000000000000",
+        OUTLAYER_NETWORK="testnet",
+        NEAR_EXECUTION_ENABLED=True,
+        OUTLAYER_REQUIRE_PROVIDER_POLICY=True,
+        NEAR_AGENT_API_URL="https://provider.invalid",
     )
     profile = _validate("127.0.0.1")
     assert profile.public_binding is False

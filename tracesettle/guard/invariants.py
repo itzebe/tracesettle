@@ -3288,6 +3288,107 @@ def _custody_tee_signing_requires_bound_attestation_and_settlement():
     )
 
 
+def _custody_provider_policy_only_tightens():
+    """The provider-policy layer can only tighten the guard's decision.
+
+    Two probes: (a) a policy that is *not in force* turns an otherwise-authorized
+    custody operation into a non-ALLOW decision and the provider is never
+    reached; (b) a policy that *is* in force still authorizes, so the check is
+    not a blanket refusal.
+    """
+    from ..near.outlayer_execution import CustodyError
+    from ..near.policy import PolicyAdapter
+    from ..near.provider_policy_gate import ProviderPolicyGate
+
+    name = "custody_provider_policy_only_tightens"
+
+    def _adapter(body):
+        class _C:
+            def get_json(self, url, params=None, headers=None):
+                class _R:
+                    ok = True
+                    http_status = 200
+                    status = "SourceStatus.OK"
+
+                _R.data = body
+                return _R()
+
+        return PolicyAdapter(
+            base_url="https://provider.invalid",
+            api_key="k",
+            http_client=_C(),
+            expected_host="provider.invalid",
+        )
+
+    base = {
+        "agent_id": "treasury-agent",
+        "revision": 3,
+        "status": "APPLIED",
+        "provider_policy_synced": True,
+        "native": {"near": {"sign_message": False, "transfer": True, "call": False}},
+    }
+
+    def _boundary_with(body):
+        boundary, provider = _custody_boundary()
+        boundary._policy_gate = ProviderPolicyGate(_adapter(body), agent_id="treasury-agent")
+        return boundary, provider
+
+    # (a) a policy that is not applied must not authorize, and must not reach the
+    # provider.
+    not_applied = dict(base, status="REQUESTED")
+    boundary, provider = _boundary_with(not_applied)
+    prepared = boundary.prepare(
+        service_id="treasury-agent", destination=_CUSTODY_DEST, amount_human="0.5"
+    )
+    if prepared.authorized:
+        return InvariantResult(
+            name, False, "a policy that is not in force still authorized the operation"
+        )
+    try:
+        boundary.execute(prepared)
+    except CustodyError:
+        pass
+    if provider.transfers:
+        return InvariantResult(
+            name, False, "an operation blocked by the provider policy reached the provider"
+        )
+
+    # (b) a policy that is in force and enables the native transfer still allows.
+    boundary, _ = _boundary_with(base)
+    ok = boundary.prepare(
+        service_id="treasury-agent", destination=_CUSTODY_DEST, amount_human="0.5"
+    )
+    if not ok.authorized:
+        return InvariantResult(
+            name, False, "an in-force policy that enables the transfer did not authorize"
+        )
+
+    # (c) a *required* layer that was never constructed must refuse, not fall back
+    # to the operator policy alone.
+    boundary, provider = _custody_boundary()
+    boundary._require_provider_policy = True
+    try:
+        boundary.prepare(
+            service_id="treasury-agent", destination=_CUSTODY_DEST, amount_human="0.5"
+        )
+    except CustodyError:
+        pass
+    else:
+        return InvariantResult(
+            name,
+            False,
+            "a required provider policy with no adapter authorized the operation",
+        )
+
+    return InvariantResult(
+        name,
+        True,
+        "a policy that is not in force blocks execution before the provider is reached; "
+        "an in-force policy that enables the transfer still authorizes; a required layer "
+        "with no adapter refuses rather than falling back",
+    )
+
+
 def _service_facing_routes_require_a_credential() -> InvariantResult:
     """Every route that consults the authenticated identity is gated by it.
 
@@ -3780,6 +3881,7 @@ INVARIANTS: dict[str, Callable[[], InvariantResult]] = {
     "custody_tee_signing_requires_bound_attestation_and_settlement": (
         _custody_tee_signing_requires_bound_attestation_and_settlement
     ),
+    "custody_provider_policy_only_tightens": _custody_provider_policy_only_tightens,
     "service_facing_routes_require_a_credential": (
         _service_facing_routes_require_a_credential
     ),
@@ -3843,6 +3945,7 @@ INVARIANT_DESCRIPTIONS: dict[str, str] = {
     "custody_provider_success_is_never_verified_without_chain_evidence": "A custody provider's success status never yields an independently-verified settlement without decisive on-chain evidence from the NEAR RPC.",
     "custody_authorization_is_bound_to_the_sent_operation": "A custody authorization is bound to the exact operation sent; substituting the recipient, amount, asset, network or service after authorization is refused before the provider is reached.",
     "custody_tee_signing_requires_bound_attestation_and_settlement": "TEE signing is claimed only when a genuine TDX attestation is cryptographically bound to the exact authorized operation and signing key and independent NEAR RPC settlement verification also holds; a provider success or an unbound quote never reaches TEE_SIGNING_VERIFIED.",
+    "custody_provider_policy_only_tightens": "The independent NEAR provider (Agent API) policy gates a custody operation and can only tighten the guard's decision: a policy that is not in force, is stale, unreadable, frozen, or does not enable the native transfer blocks execution before the provider is reached, and an in-force policy that enables the transfer still authorizes.",
     "service_facing_routes_require_a_credential": "Every guard route that consults the authenticated service identity is gated by the credential registry: with a registry configured, a request with no credential is refused (401) before any work, so a caller cannot adopt another service's identity by editing a field.",
     "public_demo_never_exposes_a_state_changing_route": "The keyless public demonstration is an exact allowlist of read-only routes; it never evaluates, signs, broadcasts or mutates state, and enabling it does not relax the API-key requirement on any sensitive route.",
     "agent_surface_is_sandbox_scoped": "The agent integration is sandbox-scoped: a sandbox credential resolves to a sandbox- identity, the sandbox policy registers no operator service, a cross-service request is refused, and the approval secret is separate from the API credential.",

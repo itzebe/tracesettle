@@ -2174,3 +2174,68 @@ settlement engine is untouched; runtime stays standard-library only.
   afterward), `/demo` runs the six-scene narrative, and the keyless public
   demonstration at `/api/guard/near/agent-demo` proves the block with a zero
   signer-call count. Verified live on production (`tracesettle-navy.vercel.app`).
+
+## Independent NEAR provider-policy gate for custody (2026-11-06, branch `feat/tee-agent-payment-execution`)
+
+Adds a **second, independent** policy layer in front of a custody transfer, so a
+custody operation is gated by two policies that are not substitutes for each
+other. Runtime stays standard-library only; no authorization rule was weakened.
+
+- **New module `tracesettle/near/provider_policy_gate.py`.** `ProviderPolicyGate`
+  reads the agent's NEAR Intents **Agent API** policy (via
+  `near/policy.PolicyAdapter`) and requires it to be *in force*. It runs **after**
+  the guard and can only **tighten** the decision (`combine_provider_policy`).
+  When it does not pass, any authorization the guard issued is discarded, so no
+  token can reach a signer.
+- **Two layers, stated precisely.** OutLayer's own wallet policy governs what its
+  custody wallet will sign; the Agent API policy is what the agent's operator
+  authorized the agent to do. Neither is trusted to be in force without being read
+  and checked.
+- **Vocabulary maps to the guard's.** `IN_FORCE` → `ALLOW`; an explicit provider
+  denial (`FROZEN`, `NATIVE_TRANSFER_DISABLED`) → `BLOCK`; every failure to
+  *establish* the policy (`NOT_IN_FORCE`, `UNAVAILABLE`, `MALFORMED`,
+  `UNAUTHENTICATED`, `NOT_FOUND`, `STALE`, `AGENT_MISMATCH`, `UNCONFIGURED`) →
+  `HOLD`. `HOLD` *is* the guard's "cannot establish" state; it never authorizes.
+- **Fail closed at two levels.** (1) `prepare()` refuses when the policy is
+  *required* but no adapter/agent id was constructed — it must not fall back to
+  the operator policy alone. (2) `securityconfig.validate_startup` refuses a
+  start-up where `TRACESETTLE_OUTLAYER_ENABLED` requires the provider policy but
+  `TRACESETTLE_NEAR_AGENT_API_URL` is unset, naming the variable. There is no
+  override.
+- **Default on.** `TRACESETTLE_OUTLAYER_REQUIRE_PROVIDER_POLICY` defaults to `1`;
+  `TRACESETTLE_OUTLAYER_PROVIDER_POLICY_AGENT_ID` defaults to `NEAR_AGENT_ID`;
+  `TRACESETTLE_OUTLAYER_PROVIDER_POLICY_MAX_AGE_SECONDS` (default 600) bounds
+  policy freshness. With no adapter the layer reports `applied: false` honestly
+  in `info()` rather than implying it is in force.
+- **Provenance travels with the operation.** `PreparedCustodyTransfer` carries the
+  `ProviderPolicyDecision`; `/custody/prepare` and `/custody/execute` return it,
+  and the console's NEAR tab renders the layer's applied/not-applied state. Public
+  identifiers and derived state only — never a secret.
+- **New invariant (56 total): `custody_provider_policy_only_tightens`.** Three
+  probes: a not-in-force policy does not authorize and never reaches the provider;
+  an in-force policy that enables `native.near.transfer` still authorizes; a
+  *required* layer with no adapter refuses. Mutation-tested two ways
+  (`test_custody_provider_policy_invariant_notices_a_loosening_combiner` patches
+  `outlayer_execution.combine_provider_policy`; the fail-open test patches
+  `OutLayerCustodyBoundary.prepare`). Both must fail when the guard is weakened.
+- **Defect found and fixed while reviewing.** The first draft built the gate only
+  when an adapter *and* an agent id were present, so a required-but-unconfigured
+  layer silently fell back to the operator policy alone (fail open). `prepare()`
+  now refuses in that case, `require_provider_policy` defaults to `False` for
+  direct construction (operator-policy-only) and `True` on the configured path,
+  and `info()` states the refusal. Regression tests:
+  `test_a_required_provider_policy_with_no_adapter_refuses`,
+  `test_custody_without_a_policy_adapter_is_unaffected`.
+- **Console defect fixed.** The custody panel's provider-policy line used
+  double-escaped quotes inside a Python string, which collapsed to a JavaScript
+  syntax error and broke the whole inline script (every panel stopped loading).
+  `tests/test_guard_ui.py::test_console_script_is_valid_javascript` caught it;
+  fixed with single-quoted JS string literals.
+- **Tests:** 1720 passed, 31 skipped (1751 collected; 1744 with PostgreSQL). New
+  `tests/test_near_provider_policy_gate.py` (15), 2 invariant mutation tests, 3
+  `securityconfig` tests, 1 `guard/api` provenance assertion. pyflakes clean;
+  compileall OK; offline demo byte-identical (`4864f13c…`); agent demo
+  byte-identical (`d23f8b52…`).
+- **Not live-verified:** no Agent API credential is configured in the zero-budget
+  environment, so the live read path is integration-tested only. This is stated
+  in the README rather than implied to be production-proven.
