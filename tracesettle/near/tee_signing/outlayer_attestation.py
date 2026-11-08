@@ -253,7 +253,7 @@ def fetch_attestation(
 
     base = host or attestation_api_host(network)
     url = f"{base}/attestations/by-tx/{transaction_hash}"
-    client = http or HttpClient(timeout=20.0, attempts=2)
+    client = http or HttpClient(timeout=20.0, max_attempts=2)
     result = client.get_json(url)
     if result.status is not SourceStatus.OK or not isinstance(result.data, dict):
         raise OutLayerAttestationError(

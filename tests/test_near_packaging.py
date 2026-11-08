@@ -490,6 +490,31 @@ def test_the_attestation_verifier_answers_from_a_package_only_copy(tmp_path):
     assert line == "RESULT:True:INDEPENDENTLY_VERIFIED", line
 
 
+def test_the_attested_signing_provenance_answers_from_a_package_only_copy(tmp_path):
+    """The end-to-end TEE-signing proof must run inside the image (package only)."""
+    root = _package_only_copy(tmp_path)
+    out = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "tracesettle",
+            "signing-provenance",
+            "verify",
+            "--run",
+            "tracesettle/near/fixtures/onchain_tee_run.json",
+            "--attestation",
+            "tracesettle/near/fixtures/onchain_tee_attestation.json",
+        ],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert "TEE_SIGNING_VERIFIED" in out.stdout
+    assert "RESULT: PASS" in out.stdout
+
+
 def test_the_pinned_guest_artifact_ships_in_the_package():
     """The approved build bytes must be in the image so the hash can be checked."""
     artifact = PACKAGE_ROOT / "near/tee_signing/guest/signing-module/dist/tracesettle-signing-module-wasm.wasm"
