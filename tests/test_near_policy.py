@@ -492,3 +492,88 @@ def test_authenticate_never_returns_the_key():
     adapter = PolicyAdapter(base_url="https://example.invalid", api_key="super-secret", http_client=client)
     auth = adapter.authenticate()
     assert "super-secret" not in json.dumps(auth.to_dict())
+
+
+# --- agent discovery (GET /v1/agents) --------------------------------------
+
+
+def test_list_agents_parses_the_documented_agent_view_shape():
+    body = {
+        "data": [
+            {"id": "a" * 64, "name": "trader", "status": "ACTIVE", "archived": False, "deleted": False},
+            {"id": "b" * 64, "name": "archived-one", "status": "ARCHIVED", "archived": True, "deleted": False},
+        ],
+        "next_cursor": None,
+    }
+    client = _FakeClient(_FakeResult(ok=True, data=body, http_status=200))
+    adapter = PolicyAdapter(base_url="https://example.invalid", api_key="secret", http_client=client)
+    listing = adapter.list_agents()
+    assert listing.availability is PolicyAvailability.AVAILABLE
+    assert len(listing.agents) == 2
+    assert listing.agents[0].agent_id == "a" * 64
+    assert listing.agents[0].status == "ACTIVE"
+    assert listing.agents[1].archived is True
+    assert listing.next_cursor is None
+    assert client.calls == ["https://example.invalid/v1/agents"]
+    assert client.headers[0]["X-API-Key"] == "secret"
+
+
+def test_list_agents_reports_an_empty_list_honestly():
+    client = _FakeClient(_FakeResult(ok=True, data={"data": [], "next_cursor": None}, http_status=200))
+    adapter = PolicyAdapter(base_url="https://example.invalid", api_key="secret", http_client=client)
+    listing = adapter.list_agents()
+    assert listing.availability is PolicyAvailability.AVAILABLE
+    assert listing.agents == ()
+    assert "0 accessible agent" in listing.detail
+
+
+def test_list_agents_refuses_without_a_key_and_never_calls_the_provider():
+    class _Never:
+        def get_json(self, url, params=None, headers=None):
+            raise AssertionError("must not call the provider without a key")
+
+    adapter = PolicyAdapter(base_url="https://example.invalid", api_key=None, http_client=_Never())
+    listing = adapter.list_agents()
+    assert listing.availability is PolicyAvailability.UNAUTHENTICATED
+    assert listing.agents == ()
+
+
+def test_list_agents_reports_unauthenticated_on_401():
+    client = _FakeClient(_FakeResult(ok=False, http_status=401, status="SourceStatus.UNAUTHORIZED"))
+    adapter = PolicyAdapter(base_url="https://example.invalid", api_key="bad", http_client=client)
+    listing = adapter.list_agents()
+    assert listing.availability is PolicyAvailability.UNAUTHENTICATED
+
+
+def test_list_agents_reports_unavailable_on_a_transport_failure():
+    class _Boom:
+        def get_json(self, url, params=None, headers=None):
+            raise TimeoutError("no route")
+
+    adapter = PolicyAdapter(base_url="https://example.invalid", api_key="secret", http_client=_Boom())
+    listing = adapter.list_agents()
+    assert listing.availability is PolicyAvailability.UNAVAILABLE
+
+
+def test_list_agents_reports_malformed_when_data_is_not_an_array():
+    client = _FakeClient(_FakeResult(ok=True, data={"data": "nope"}, http_status=200))
+    adapter = PolicyAdapter(base_url="https://example.invalid", api_key="secret", http_client=client)
+    listing = adapter.list_agents()
+    assert listing.availability is PolicyAvailability.MALFORMED
+
+
+def test_list_agents_never_returns_the_key():
+    body = {"data": [{"id": "a" * 64, "name": "trader", "status": "ACTIVE"}], "next_cursor": None}
+    client = _FakeClient(_FakeResult(ok=True, data=body, http_status=200))
+    adapter = PolicyAdapter(base_url="https://example.invalid", api_key="super-secret", http_client=client)
+    listing = adapter.list_agents()
+    assert "super-secret" not in json.dumps(listing.to_dict())
+
+
+def test_list_agents_skips_entries_without_an_id():
+    body = {"data": [{"name": "no-id"}, {"id": "a" * 64, "status": "ACTIVE"}], "next_cursor": None}
+    client = _FakeClient(_FakeResult(ok=True, data=body, http_status=200))
+    adapter = PolicyAdapter(base_url="https://example.invalid", api_key="secret", http_client=client)
+    listing = adapter.list_agents()
+    assert len(listing.agents) == 1
+    assert listing.agents[0].agent_id == "a" * 64

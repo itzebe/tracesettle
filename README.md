@@ -145,7 +145,9 @@ Where each capability stands:
   (`NEAR_INTENTS_AGENT_API_URL` / `NEAR_INTENTS_AGENT_API_KEY`) are accepted as
   aliases. Authenticate a configured key (read-only, free) with
   `python3 -m tracesettle provider auth`; the key is read only from the
-  environment and is never printed. See `evidence/mission30/`.
+  environment and is never printed. Discover an accessible agent with
+  `python3 -m tracesettle provider agents` (the documented `GET /v1/agents`).
+  See `evidence/mission30/` and `evidence/mission31/`.
 - **TEE:** no TEE *confidentiality* protection is claimed for execution, and the
   default path does not require one (see
   [`docs/TEE_RESEARCH.md`](docs/TEE_RESEARCH.md)). Two honest capabilities are

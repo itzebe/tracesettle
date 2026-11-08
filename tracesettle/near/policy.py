@@ -628,6 +628,53 @@ class ProviderAuth:
         }
 
 
+@dataclass(frozen=True)
+class AgentSummary:
+    """One agent the authenticated partner can access (``GET /v1/agents``).
+
+    Only non-secret provider identifiers are carried. No wallet, balance or
+    signing material is included.
+    """
+
+    agent_id: str
+    name: str | None = None
+    status: str | None = None
+    archived: bool = False
+    deleted: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "agent_id": self.agent_id,
+            "name": self.name,
+            "status": self.status,
+            "archived": self.archived,
+            "deleted": self.deleted,
+        }
+
+
+@dataclass(frozen=True)
+class AgentList:
+    """The result of listing agents: availability + the agents, if any."""
+
+    availability: PolicyAvailability
+    agents: tuple[AgentSummary, ...] = ()
+    next_cursor: str | None = None
+    detail: str = ""
+    endpoint: str | None = None
+    http_status: int | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "availability": self.availability.value,
+            "detail": self.detail,
+            "endpoint": self.endpoint,
+            "http_status": self.http_status,
+            "count": len(self.agents),
+            "agents": [a.to_dict() for a in self.agents],
+            "next_cursor": self.next_cursor,
+        }
+
+
 class PolicyAdapter:
     """Reads an agent policy from the Agent API, or from a labelled fixture.
 
@@ -837,6 +884,91 @@ class PolicyAdapter:
             api_key_id=api_key_id,
             tenant_id=tenant_id,
             detail="authenticated against the Agent API",
+            endpoint=endpoint,
+            http_status=status,
+        )
+
+    def list_agents(self) -> AgentList:
+        """List the agents the authenticated partner can access.
+
+        Read-only, free, and **not** a payment action. It is the documented
+        ``GET /v1/agents`` endpoint (``ApiKey``-gated), the only way to discover
+        an agent id without inventing one. A provider that returns no accessible
+        agent is reported as an empty list, never an error: authentication does
+        not imply policy authorization, and the caller must still read (and
+        verify) the agent's policy.
+        """
+        if not self.base_url or self._http is None:
+            return AgentList(
+                availability=PolicyAvailability.UNCONFIGURED,
+                detail=(
+                    "No Agent API base URL is configured. Set TRACESETTLE_NEAR_AGENT_API_URL "
+                    "and TRACESETTLE_NEAR_AGENT_API_KEY to list agents."
+                ),
+            )
+        if not self._api_key:
+            return AgentList(
+                availability=PolicyAvailability.UNAUTHENTICATED,
+                detail=(
+                    "No Agent API key is configured. The provider requires X-API-Key; refusing "
+                    "to make an unauthenticated agent list call."
+                ),
+            )
+        endpoint = f"{self.base_url}/v1/agents"
+        try:
+            result = self._http.get_json(endpoint, headers={"X-API-Key": self._api_key})
+        except Exception as exc:  # noqa: BLE001 - any transport failure is "unavailable"
+            return AgentList(
+                availability=PolicyAvailability.UNAVAILABLE,
+                detail=f"agent list request failed: {type(exc).__name__}",
+                endpoint=endpoint,
+            )
+        status = getattr(result, "http_status", None)
+        source_status = getattr(result, "status", None)
+        body = getattr(result, "data", None)
+        if status in (401, 403) or str(source_status) == "SourceStatus.UNAUTHORIZED":
+            return AgentList(
+                availability=PolicyAvailability.UNAUTHENTICATED,
+                detail="the provider refused the request (missing or wrong credentials)",
+                endpoint=endpoint,
+                http_status=status,
+            )
+        if not getattr(result, "ok", False) or not isinstance(body, dict):
+            return AgentList(
+                availability=PolicyAvailability.UNAVAILABLE,
+                detail=f"the provider returned an unusable response (status {status})",
+                endpoint=endpoint,
+                http_status=status,
+            )
+        data = body.get("data")
+        if not isinstance(data, list):
+            return AgentList(
+                availability=PolicyAvailability.MALFORMED,
+                detail="the provider agent list did not contain a 'data' array",
+                endpoint=endpoint,
+                http_status=status,
+            )
+        agents: list[AgentSummary] = []
+        for entry in data:
+            if not isinstance(entry, dict):
+                continue
+            agent_id = str(entry.get("id") or "").strip()
+            if not agent_id:
+                continue
+            agents.append(
+                AgentSummary(
+                    agent_id=agent_id,
+                    name=(str(entry["name"]) if entry.get("name") else None),
+                    status=(str(entry["status"]) if entry.get("status") else None),
+                    archived=bool(entry.get("archived", False)),
+                    deleted=bool(entry.get("deleted", False)),
+                )
+            )
+        return AgentList(
+            availability=PolicyAvailability.AVAILABLE,
+            agents=tuple(agents),
+            next_cursor=(str(body["next_cursor"]) if body.get("next_cursor") else None),
+            detail=f"{len(agents)} accessible agent(s)",
             endpoint=endpoint,
             http_status=status,
         )

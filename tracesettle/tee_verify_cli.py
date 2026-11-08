@@ -316,6 +316,38 @@ def cmd_provider_auth(args: argparse.Namespace) -> int:
     return _emit(payload, as_json=args.json, title="agent api authentication", ok=auth.authenticated)
 
 
+def cmd_provider_agents(args: argparse.Namespace) -> int:
+    """List the agents the authenticated partner can access (``GET /v1/agents``).
+
+    Read-only and free. It is the only way to discover an agent id without
+    inventing one. Authentication does **not** imply policy authorization: an
+    empty list is reported honestly, and the caller must still read (and verify)
+    the agent's policy. The key is read only from the environment and never
+    printed.
+    """
+    from . import config
+    from .httpclient import HttpClient
+    from .near.policy import PolicyAdapter
+
+    base_url = args.base_url or config.NEAR_AGENT_API_URL
+    adapter = PolicyAdapter(
+        base_url=base_url,
+        api_key=config.NEAR_AGENT_API_KEY,
+        http_client=HttpClient(),
+        expected_host=config.NEAR_AGENT_API_EXPECTED_HOST,
+    )
+    listing = adapter.list_agents()
+    payload = listing.to_dict()
+    payload["base_url_configured"] = bool(base_url)
+    payload["key_configured"] = bool(config.NEAR_AGENT_API_KEY)
+    return _emit(
+        payload,
+        as_json=args.json,
+        title="accessible agents",
+        ok=listing.availability.value == "AVAILABLE",
+    )
+
+
 def cmd_chain_verify(args: argparse.Namespace) -> int:
     data = json.loads(Path(args.record).read_text(encoding="utf-8"))
     chain = EvidenceChain.from_dict(data)
@@ -456,6 +488,11 @@ def add_reviewer_subcommands(sub: argparse._SubParsersAction) -> None:  # type: 
     pa.add_argument("--base-url", default="", help="override TRACESETTLE_NEAR_AGENT_API_URL")
     pa.add_argument("--json", action="store_true")
     pa.set_defaults(func=cmd_provider_auth)
+
+    plist = pauth_sub.add_parser("agents", help="list accessible agents (GET /v1/agents)")
+    plist.add_argument("--base-url", default="", help="override TRACESETTLE_NEAR_AGENT_API_URL")
+    plist.add_argument("--json", action="store_true")
+    plist.set_defaults(func=cmd_provider_agents)
 
     prov = sub.add_parser(
         "signing-provenance",

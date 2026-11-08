@@ -212,3 +212,35 @@ def test_signing_provenance_refuses_a_swapped_transaction(tmp_path):
     assert proc.returncode != 0
     assert "RESULT: PASS" not in proc.stdout
     assert "TEE_SIGNING_VERIFIED" not in proc.stdout
+
+
+def test_provider_agents_fails_closed_without_configuration():
+    proc = _run_env({}, "provider", "agents", "--json")
+    assert proc.returncode != 0
+    payload = json.loads(proc.stdout)
+    assert payload["availability"] == "UNCONFIGURED"
+    assert payload["count"] == 0
+    assert "No Agent API base URL" in payload["detail"]
+
+
+def test_provider_agents_fails_closed_without_a_key():
+    proc = _run_env(
+        {"TRACESETTLE_NEAR_AGENT_API_URL": "https://api.agentsonintents.com"},
+        "provider", "agents", "--json",
+    )
+    assert proc.returncode != 0
+    payload = json.loads(proc.stdout)
+    assert payload["availability"] == "UNAUTHENTICATED"
+    assert "No Agent API key" in payload["detail"]
+
+
+def test_provider_agents_never_prints_the_key():
+    proc = _run_env(
+        {
+            "NEAR_INTENTS_AGENT_API_URL": "http://127.0.0.1:1",
+            "NEAR_INTENTS_AGENT_API_KEY": "super-secret-value-xyz",
+        },
+        "provider", "agents", "--json",
+    )
+    assert "super-secret-value-xyz" not in proc.stdout
+    assert "super-secret-value-xyz" not in proc.stderr
