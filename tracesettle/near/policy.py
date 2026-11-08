@@ -197,6 +197,9 @@ class IntentsPolicy:
     destinations_mode: str = "any"
     destinations: tuple[DestinationRule, ...] = ()
     budget_usd: Decimal | None = None
+    #: Budget already spent (USD), read from the provider's usage view. ``None``
+    #: when the provider supplies no usage. Never inferred from the budget.
+    budget_spent_usd: Decimal | None = None
     timelock_ms: int | None = None
     schedule: dict[str, Any] | None = None
     native: dict[str, dict[str, bool]] = field(default_factory=dict)
@@ -256,6 +259,9 @@ class IntentsPolicy:
             "destinations_mode": self.destinations_mode,
             "destinations": [d.to_dict() for d in self.destinations],
             "budget_usd": None if self.budget_usd is None else str(self.budget_usd),
+            "budget_spent_usd": (
+                None if self.budget_spent_usd is None else str(self.budget_spent_usd)
+            ),
             "timelock_ms": self.timelock_ms,
             "schedule": self.schedule,
             "native": self.native,
@@ -337,9 +343,9 @@ def _dec(value: Any, field_name: str) -> Decimal | None:
     return parsed
 
 
-def _limits_from(raw: Any) -> PolicyLimits:
+def _limits_from(raw: Any, max_actions_override: Any = None) -> PolicyLimits:
     if raw is None:
-        return PolicyLimits()
+        raw = {}
     if not isinstance(raw, dict):
         raise PolicyParseError("policy.limits must be an object")
     out: dict[str, dict[str, Decimal]] = {w: {} for w in LIMIT_WINDOWS}
@@ -351,7 +357,10 @@ def _limits_from(raw: Any) -> PolicyLimits:
             parsed = _dec(amount, f"policy.limits.{window}.{asset_id}")
             if parsed is not None:
                 out[window][str(asset_id)] = parsed
-    max_actions = raw.get("max_actions_per_hour")
+    # The documented Policy carries ``max_actions_per_hour`` beside ``limits``;
+    # a flat fixture may instead nest it under ``limits``. Either is accepted,
+    # the explicit sibling value taking precedence.
+    max_actions = max_actions_override if max_actions_override is not None else raw.get("max_actions_per_hour")
     if max_actions is not None:
         if isinstance(max_actions, bool) or not isinstance(max_actions, int) or max_actions < 0:
             raise PolicyParseError(
@@ -413,12 +422,68 @@ def _native_from(raw: Any) -> dict[str, dict[str, bool]]:
             out.setdefault(chain_name, {})[method] = False
         for method, enabled in methods.items():
             method_name = str(method).strip().lower()
-            out.setdefault(chain_name, {})[method_name] = bool(enabled)
+            out.setdefault(chain_name, {})[method_name] = _native_method_on(enabled)
     return out
+
+
+def _native_method_on(enabled: Any) -> bool:
+    """Whether a native method switch is on.
+
+    ``transfer`` is a boolean. ``sign_message`` / ``call`` /
+    ``sign_transaction`` are arrays of permitted message prefixes, contract
+    ids, or selectors: an **empty** array is off, a non-empty array is on. A
+    plain boolean is also accepted. Anything else is off, never assumed on.
+    """
+    if isinstance(enabled, bool):
+        return enabled
+    if isinstance(enabled, (list, tuple)):
+        return len(enabled) > 0
+    return False
+
+
+def _budget_from(body: dict[str, Any], usage: Any) -> tuple[Decimal | None, Decimal | None]:
+    """The policy's budget and, separately, its already-spent amount (USD).
+
+    The documented ``Policy.budget`` is an object of window amounts
+    (``daily_usd`` / ``weekly_usd`` / ``monthly_usd``); the tightest set window
+    is the effective budget. A flat fixture may instead carry a scalar
+    ``budget_usd``. The provider's *usage* is read only from ``usage.budget``
+    (the ``BudgetView``), never from the policy's own budget object.
+    """
+    budget = _dec(body.get("budget_usd"), "policy.budget_usd")
+    if budget is None:
+        raw_budget = body.get("budget")
+        if isinstance(raw_budget, dict):
+            for window in ("daily_usd", "weekly_usd", "monthly_usd"):
+                parsed = _dec(raw_budget.get(window), f"policy.budget.{window}")
+                if parsed is not None:
+                    budget = parsed if budget is None else min(budget, parsed)
+        elif raw_budget is not None:
+            budget = _dec(raw_budget, "policy.budget")
+    spent: Decimal | None = None
+    if isinstance(usage, dict):
+        usage_budget = usage.get("budget")
+        if isinstance(usage_budget, dict):
+            for window in ("daily", "weekly", "monthly"):
+                entry = usage_budget.get(window)
+                if isinstance(entry, dict):
+                    parsed = _dec(entry.get("spent_usd"), "usage.budget.spent_usd")
+                    if parsed is not None:
+                        spent = parsed if spent is None else max(spent, parsed)
+    return budget, spent
 
 
 def parse_policy(raw: Any) -> IntentsPolicy:
     """Parse a provider policy document into an :class:`IntentsPolicy`.
+
+    Two documented shapes are accepted. The live endpoint
+    ``GET /v1/agents/{agent_id}/policy`` returns a **PolicyView** whose
+    lifecycle fields (``status``, ``provider_policy_synced``, ``revision``,
+    ``policy_hash``, ``applied_at``) sit at the top level and whose rules are
+    nested under ``policy`` (a **Policy**). A flat document (used by local
+    fixtures and the offline demonstration) carries both in one object. When
+    both are present the nested ``Policy`` provides the rules and the envelope
+    provides the lifecycle.
 
     Strict: an unexpected shape raises :class:`PolicyParseError` rather than
     being coerced into a permissive default.
@@ -426,23 +491,32 @@ def parse_policy(raw: Any) -> IntentsPolicy:
     if not isinstance(raw, dict):
         raise PolicyParseError("policy must be a JSON object")
 
-    # The provider nests the policy under 'policy' in some responses; accept both.
-    body = raw.get("policy") if isinstance(raw.get("policy"), dict) else raw
+    # A PolicyView nests the rules under 'policy'; a flat document does not.
+    nested = raw.get("policy")
+    body = nested if isinstance(nested, dict) else raw
+    view = raw
 
-    agent_id = str(body.get("agent_id", raw.get("agent_id", "")) or "").strip()
-    revision_raw = body.get("revision", raw.get("revision", 0))
+    def field(name: str, default: Any = None) -> Any:
+        # Rules come from the nested Policy when present; lifecycle falls back
+        # to the flat document so both shapes parse.
+        if name in body:
+            return body[name]
+        return view.get(name, default)
+
+    agent_id = str(body.get("agent_id", view.get("agent_id", "")) or "").strip()
+    revision_raw = field("revision", 0)
     try:
         revision = int(revision_raw)
     except (TypeError, ValueError) as exc:
         raise PolicyParseError("policy.revision must be an integer") from exc
 
-    status_raw = str(body.get("status", "UNKNOWN")).strip().upper()
+    status_raw = str(field("status", "UNKNOWN")).strip().upper()
     try:
         status = PolicyStatus(status_raw)
     except ValueError:
         status = PolicyStatus.UNKNOWN
 
-    synced = body.get("provider_policy_synced")
+    synced = field("provider_policy_synced")
     provider_synced = bool(synced) if synced is not None else False
 
     actions_raw = body.get("actions") or []
@@ -469,6 +543,8 @@ def parse_policy(raw: Any) -> IntentsPolicy:
     if schedule is not None and not isinstance(schedule, dict):
         raise PolicyParseError("policy.schedule must be an object")
 
+    budget_usd, budget_spent_usd = _budget_from(body, view.get("usage"))
+
     return IntentsPolicy(
         agent_id=agent_id,
         revision=revision,
@@ -480,15 +556,18 @@ def parse_policy(raw: Any) -> IntentsPolicy:
         asset_ids=asset_ids,
         confidential=bool(body.get("confidential", False)),
         owner_approval=bool(body.get("owner_approval", False)),
-        limits=_limits_from(body.get("limits")),
+        limits=_limits_from(body.get("limits"), body.get("max_actions_per_hour")),
         destinations_mode=destinations_mode,
         destinations=destinations,
-        budget_usd=_dec(body.get("budget_usd", body.get("budget")), "policy.budget_usd"),
+        budget_usd=budget_usd,
+        budget_spent_usd=budget_spent_usd,
         timelock_ms=timelock,
         schedule=schedule,
         native=native,
-        policy_hash=(str(body["policy_hash"]) if body.get("policy_hash") else None),
-        as_of=(str(body["as_of"]) if body.get("as_of") else None),
+        policy_hash=(str(field("policy_hash")) if field("policy_hash") else None),
+        # Freshness: the documented PolicyView exposes ``applied_at``; a fixture
+        # may carry ``as_of``. Either names when the revision became current.
+        as_of=(str(field("as_of") or field("applied_at")) if (field("as_of") or field("applied_at")) else None),
         raw=body,
     )
 
@@ -520,6 +599,32 @@ class PolicyRead:
             "endpoint": self.endpoint,
             "local_fixture": self.local_fixture,
             "policy": self.policy.to_dict() if self.policy else None,
+        }
+
+
+@dataclass(frozen=True)
+class ProviderAuth:
+    """The result of authenticating against the Agent API (``GET /v1/whoami``).
+
+    Carries only the provider's own non-secret identifiers. The API key itself
+    is never stored, logged, or returned.
+    """
+
+    authenticated: bool
+    api_key_id: str | None = None
+    tenant_id: str | None = None
+    detail: str = ""
+    endpoint: str | None = None
+    http_status: int | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "authenticated": self.authenticated,
+            "api_key_id": self.api_key_id,
+            "tenant_id": self.tenant_id,
+            "detail": self.detail,
+            "endpoint": self.endpoint,
+            "http_status": self.http_status,
         }
 
 
@@ -665,6 +770,75 @@ class PolicyAdapter:
             policy=policy,
             detail="policy read from the provider and verified (host, agent, freshness)",
             endpoint=endpoint,
+        )
+
+    def authenticate(self) -> ProviderAuth:
+        """Authenticate the configured key against the Agent API (``GET /v1/whoami``).
+
+        Read-only and free. Distinguishes a valid key (200 with identifiers),
+        invalid/retired credentials (401/403), an unavailable provider
+        (5xx/timeout), and an unconfigured adapter. The key is sent only as the
+        ``X-API-Key`` header and is never logged or returned; only the
+        provider's own ``api_key_id``/``tenant_id`` are surfaced.
+        """
+        if not self.base_url or self._http is None:
+            return ProviderAuth(
+                authenticated=False,
+                detail=(
+                    "No Agent API base URL is configured. Set TRACESETTLE_NEAR_AGENT_API_URL "
+                    "and TRACESETTLE_NEAR_AGENT_API_KEY to authenticate."
+                ),
+            )
+        if not self._api_key:
+            return ProviderAuth(
+                authenticated=False,
+                detail=(
+                    "No Agent API key is configured. The provider requires X-API-Key; refusing "
+                    "to make an unauthenticated whoami call."
+                ),
+            )
+        endpoint = f"{self.base_url}/v1/whoami"
+        try:
+            result = self._http.get_json(endpoint, headers={"X-API-Key": self._api_key})
+        except Exception as exc:  # noqa: BLE001 - any transport failure is "unavailable"
+            return ProviderAuth(
+                authenticated=False,
+                detail=f"whoami request failed: {type(exc).__name__}",
+                endpoint=endpoint,
+            )
+        status = getattr(result, "http_status", None)
+        source_status = getattr(result, "status", None)
+        body = getattr(result, "data", None)
+        if status in (401, 403) or str(source_status) == "SourceStatus.UNAUTHORIZED":
+            return ProviderAuth(
+                authenticated=False,
+                detail="the provider rejected the key (invalid or retired credentials)",
+                endpoint=endpoint,
+                http_status=status,
+            )
+        if not getattr(result, "ok", False) or not isinstance(body, dict):
+            return ProviderAuth(
+                authenticated=False,
+                detail=f"the provider did not return an identity document (status {status})",
+                endpoint=endpoint,
+                http_status=status,
+            )
+        api_key_id = str(body.get("api_key_id") or "").strip() or None
+        tenant_id = str(body.get("tenant_id") or "").strip() or None
+        if not api_key_id and not tenant_id:
+            return ProviderAuth(
+                authenticated=False,
+                detail="the provider response carried no identity fields",
+                endpoint=endpoint,
+                http_status=status,
+            )
+        return ProviderAuth(
+            authenticated=True,
+            api_key_id=api_key_id,
+            tenant_id=tenant_id,
+            detail="authenticated against the Agent API",
+            endpoint=endpoint,
+            http_status=status,
         )
 
     def _freshness(self, policy: "IntentsPolicy") -> str | None:

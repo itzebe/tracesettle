@@ -139,7 +139,13 @@ Where each capability stands:
 - **NEAR Intents provider reads (tokens, quote, status):** Mainnet verified
   read-only against the public provider endpoints. Live provider-*policy*
   integration is **not** claimed: it is unverified unless an operator configures
-  `TRACESETTLE_NEAR_AGENT_API_URL` and the read succeeds.
+  `TRACESETTLE_NEAR_AGENT_API_URL` and the read succeeds. The Agent API adapter
+  parses the provider's documented `PolicyView` envelope (lifecycle fields at the
+  top level, rules under `policy`), and the provider's own documented env names
+  (`NEAR_INTENTS_AGENT_API_URL` / `NEAR_INTENTS_AGENT_API_KEY`) are accepted as
+  aliases. Authenticate a configured key (read-only, free) with
+  `python3 -m tracesettle provider auth`; the key is read only from the
+  environment and is never printed. See `evidence/mission30/`.
 - **TEE:** no TEE *confidentiality* protection is claimed for execution, and the
   default path does not require one (see
   [`docs/TEE_RESEARCH.md`](docs/TEE_RESEARCH.md)). Two honest capabilities are

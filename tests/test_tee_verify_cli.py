@@ -29,6 +29,21 @@ def _run(*args: str) -> subprocess.CompletedProcess:
     )
 
 
+def _run_env(env: dict, *args: str) -> subprocess.CompletedProcess:
+    """Run with a clean environment plus ``env`` so ambient vars cannot leak in."""
+    import os
+
+    base = {k: v for k, v in os.environ.items() if not k.startswith(("TRACESETTLE_", "NEAR_INTENTS_"))}
+    base.update(env)
+    return subprocess.run(
+        [sys.executable, "-m", "tracesettle", *args],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        env=base,
+    )
+
+
 def test_guest_verify_passes_on_the_committed_guest():
     proc = _run("guest", "verify")
     assert proc.returncode == 0, proc.stdout + proc.stderr
@@ -136,6 +151,54 @@ def test_signing_provenance_passes_on_the_real_tee_capture():
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "TEE_SIGNING_VERIFIED" in proc.stdout
     assert "RESULT: PASS" in proc.stdout
+
+
+def test_provider_auth_fails_closed_without_configuration():
+    proc = _run_env({}, "provider", "auth", "--json")
+    assert proc.returncode != 0
+    payload = json.loads(proc.stdout)
+    assert payload["authenticated"] is False
+    assert payload["base_url_configured"] is False
+    assert "No Agent API base URL" in payload["detail"]
+
+
+def test_provider_auth_fails_closed_without_a_key():
+    proc = _run_env(
+        {"TRACESETTLE_NEAR_AGENT_API_URL": "https://api.agentsonintents.com"},
+        "provider", "auth", "--json",
+    )
+    assert proc.returncode != 0
+    payload = json.loads(proc.stdout)
+    assert payload["authenticated"] is False
+    assert payload["base_url_configured"] is True
+    assert payload["key_configured"] is False
+    assert "No Agent API key" in payload["detail"]
+
+
+def test_provider_auth_accepts_the_providers_documented_env_names():
+    """The provider's own env names (NEAR_INTENTS_AGENT_*) must be honoured."""
+    proc = _run_env(
+        {"NEAR_INTENTS_AGENT_API_URL": "https://api.agentsonintents.com"},
+        "provider", "auth", "--json",
+    )
+    payload = json.loads(proc.stdout)
+    # No key supplied, but the base URL from the documented name was read.
+    assert payload["base_url_configured"] is True
+    assert payload["authenticated"] is False
+
+
+def test_provider_auth_never_prints_the_key():
+    # An unreachable local address, so this never makes an external call: the
+    # point is only that the key is never echoed, whatever the transport does.
+    proc = _run_env(
+        {
+            "NEAR_INTENTS_AGENT_API_URL": "http://127.0.0.1:1",
+            "NEAR_INTENTS_AGENT_API_KEY": "super-secret-value-xyz",
+        },
+        "provider", "auth", "--json",
+    )
+    assert "super-secret-value-xyz" not in proc.stdout
+    assert "super-secret-value-xyz" not in proc.stderr
 
 
 def test_signing_provenance_refuses_a_swapped_transaction(tmp_path):

@@ -308,11 +308,22 @@ GUARD_APPROVAL_KEY = os.environ.get("TRACESETTLE_GUARD_APPROVAL_KEY") or None
 
 #: Base URL of the NEAR Intents Agent API, e.g. https://<host>. Unset disables
 #: live policy reads (the loopback default); a local fixture is used instead.
-NEAR_AGENT_API_URL = os.environ.get("TRACESETTLE_NEAR_AGENT_API_URL") or None
+#: The provider's own documented name (``NEAR_INTENTS_AGENT_API_URL``) is also
+#: accepted, so an operator can use the names from the provider's docs.
+NEAR_AGENT_API_URL = (
+    os.environ.get("TRACESETTLE_NEAR_AGENT_API_URL")
+    or os.environ.get("NEAR_INTENTS_AGENT_API_URL")
+    or None
+)
 
 #: Agent API key. Only its presence is inspected here; the value is read by the
-#: adapter. Never logged, never returned, never committed.
-NEAR_AGENT_API_KEY = os.environ.get("TRACESETTLE_NEAR_AGENT_API_KEY") or None
+#: adapter. Never logged, never returned, never committed. The provider's own
+#: documented name (``NEAR_INTENTS_AGENT_API_KEY``) is also accepted.
+NEAR_AGENT_API_KEY = (
+    os.environ.get("TRACESETTLE_NEAR_AGENT_API_KEY")
+    or os.environ.get("NEAR_INTENTS_AGENT_API_KEY")
+    or None
+)
 
 #: Optional path to a local policy fixture (JSON). When set, the wrapper can be
 #: exercised offline with no provider call. Fixtures are clearly labelled.

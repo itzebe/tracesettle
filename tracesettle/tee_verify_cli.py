@@ -290,6 +290,32 @@ def _action_bytes(action: dict[str, Any]) -> bytes:
 # -- evidence chain ----------------------------------------------------------
 
 
+def cmd_provider_auth(args: argparse.Namespace) -> int:
+    """Authenticate against the NEAR Intents Agent API and report the identity.
+
+    Read-only and free (``GET /v1/whoami``). The key is read only from the
+    environment (``TRACESETTLE_NEAR_AGENT_API_KEY``); it is never taken from the
+    command line, never logged, and never printed. Only the provider's own
+    non-secret ``api_key_id``/``tenant_id`` are shown.
+    """
+    from . import config
+    from .httpclient import HttpClient
+    from .near.policy import PolicyAdapter
+
+    base_url = args.base_url or config.NEAR_AGENT_API_URL
+    adapter = PolicyAdapter(
+        base_url=base_url,
+        api_key=config.NEAR_AGENT_API_KEY,
+        http_client=HttpClient(),
+        expected_host=config.NEAR_AGENT_API_EXPECTED_HOST,
+    )
+    auth = adapter.authenticate()
+    payload = auth.to_dict()
+    payload["base_url_configured"] = bool(base_url)
+    payload["key_configured"] = bool(config.NEAR_AGENT_API_KEY)
+    return _emit(payload, as_json=args.json, title="agent api authentication", ok=auth.authenticated)
+
+
 def cmd_chain_verify(args: argparse.Namespace) -> int:
     data = json.loads(Path(args.record).read_text(encoding="utf-8"))
     chain = EvidenceChain.from_dict(data)
@@ -420,6 +446,16 @@ def add_reviewer_subcommands(sub: argparse._SubParsersAction) -> None:  # type: 
     cv.add_argument("record", help="a JSON evidence-chain record")
     cv.add_argument("--json", action="store_true")
     cv.set_defaults(func=cmd_chain_verify)
+
+    pauth = sub.add_parser(
+        "provider",
+        help="authenticate against the NEAR Intents Agent API (read-only, free)",
+    )
+    pauth_sub = pauth.add_subparsers(dest="provider_command", required=True)
+    pa = pauth_sub.add_parser("auth", help="call GET /v1/whoami and report the identity")
+    pa.add_argument("--base-url", default="", help="override TRACESETTLE_NEAR_AGENT_API_URL")
+    pa.add_argument("--json", action="store_true")
+    pa.set_defaults(func=cmd_provider_auth)
 
     prov = sub.add_parser(
         "signing-provenance",

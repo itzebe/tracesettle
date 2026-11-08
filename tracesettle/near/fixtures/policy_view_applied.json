@@ -1,0 +1,94 @@
+{
+  "_provenance": "synthetic",
+  "_note": "Reproduces the documented PolicyView shape of GET /v1/agents/{agent_id}/policy exactly as published in the provider's live OpenAPI (api.agentsonintents.com/openapi.json, 2026-11-08): lifecycle fields at the top level, the rules nested under 'policy', and the usage view under 'usage'. Not live provider state. The native transfer array forms match the documented Policy.native schema.",
+  "wallet_id": "demo-agent-wallet.near",
+  "revision": 7,
+  "policy_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+  "status": "APPLIED",
+  "applied_at": "2026-11-08T00:00:00Z",
+  "transaction_hash": "SyntheticTxHash",
+  "provider_policy_synced": true,
+  "cooldowns": {
+    "policy_change_available_at": null,
+    "unfreeze_available_at": null
+  },
+  "policy": {
+    "frozen": false,
+    "actions": [
+      "swap",
+      "transfer",
+      "withdraw"
+    ],
+    "confidential": false,
+    "owner_approval": false,
+    "assets": "any",
+    "limits": {
+      "per_transaction": {
+        "nep141:usdc.near": "100000000"
+      },
+      "daily": {
+        "nep141:usdc.near": "500000000"
+      }
+    },
+    "max_actions_per_hour": 20,
+    "destinations": {
+      "mode": "only",
+      "list": [
+        {
+          "action": "withdraw",
+          "chain": "base",
+          "address": "0x1111111111111111111111111111111111111111",
+          "memo": null
+        },
+        {
+          "action": "withdraw",
+          "chain": "base",
+          "address": "0x2222222222222222222222222222222222222222",
+          "memo": null
+        },
+        {
+          "action": "transfer",
+          "address": "alice.near",
+          "confidential": false
+        }
+      ]
+    },
+    "budget": {
+      "daily_usd": "500.00",
+      "weekly_usd": null,
+      "monthly_usd": null
+    },
+    "timelock_ms": 0,
+    "schedule": null,
+    "native": {
+      "near": {
+        "sign_message": [],
+        "transfer": false,
+        "call": []
+      },
+      "evm": {
+        "sign_typed_data": [],
+        "sign_message": [],
+        "sign_transaction": []
+      },
+      "solana": {
+        "sign_message": [],
+        "sign_transaction": []
+      }
+    }
+  },
+  "usage": {
+    "budget": {
+      "daily": {
+        "limit_usd": "500.00",
+        "spent_usd": "0",
+        "remaining_usd": "500.00",
+        "resets_at": null
+      }
+    },
+    "timelock": {
+      "delay_ms": 0,
+      "scheduled_count": 0
+    }
+  }
+}
