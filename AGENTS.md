@@ -2509,3 +2509,68 @@ A real Intel TDX enclave now signs a real NEAR **testnet** transaction on a
   is established by independently re-reading the chain. The relying party for the
   enclave is OutLayer and the guest is identified by a pinned `sha256`, not a
   reproducible build. See `docs/TEE_ONCHAIN_SIGNING.md`.
+
+## Mission 27 — durable TEE signature evidence (2026-11-08)
+
+An independent investigation into whether TRACESETTLE durably preserves enough
+cryptographic evidence to re-verify a signing event **after a process restart**.
+It did not: this mission found and fixed the defect and proved the fixed path.
+
+- **The defect (CRITICAL for the durability claim).** `SubmissionRecord.to_dict()`
+  omitted `signed_b64`, and no signature algorithm was stored. `SubmissionLedger.put`
+  persists `to_json()` -> `to_dict()`, so the SQLite blob never carried the signed
+  bytes and `from_json()` read `""` back. Consequences, proven against a real
+  close/reopen: `reconstruct_transaction` returned `None` after a restart (Mission
+  22 recovery silently capped at `CONFIRMED`, never `VERIFIED`), and the durable
+  evidence chain could not recover the signature from the bytes, so its ed25519
+  re-verification was **skipped** and reported only as a limitation. Mission 26's
+  regression test passed because it used an **in-memory** ledger within one
+  process and never restarted the store.
+- **Fix — `tracesettle/near/ledger.py`.** Persist `signed_b64` and a new
+  `signature_algorithm`; `put()` refuses to overwrite recorded signed bytes with
+  different bytes (`SubmissionLedgerError`), for SQLite **and** the in-memory
+  store (the latter now stores a JSON copy, so a caller mutating a record it read
+  cannot change what is stored — previously it kept an object reference).
+- **Fix — `tracesettle/near/pipeline.py`.** `_record_facts()` recovers the
+  digest, signature and public key from the durable bytes via the strict,
+  round-trip-checked `txdecode` decoder, cross-checked against the record;
+  `_build_chain` sources facts from the record as well as the prepared operation
+  (so a rebuilt chain no longer records an empty `public_key`); new
+  **`verify_recorded_signature(tx_hash)`** recomputes the digest from the
+  persisted bytes and independently re-verifies ed25519 from the record alone.
+- **Fix — `tracesettle/near/tee_signing/evidence_chain.py`.** The SIGNATURE stage
+  carries `signature_algorithm`; `_check_signature_over_digest` verifies with the
+  named algorithm and **refuses** one the product cannot verify (never checks with
+  the wrong rule).
+- **Surfaces.** `GET /api/guard/near/execution/signature/<tx>` returns the
+  re-verification; `.../chain/<tx>` embeds it. The console NEAR tab gains a
+  **Durable signature evidence** panel that lists the separate claims — a valid
+  signature is shown as such, and provider/TEE/build/settlement are shown as "not
+  established here" when the durable record does not carry that evidence. A valid
+  signature never renders as TEE-verified.
+- **New invariant (63 total; 22 NEAR)**
+  `near_recorded_signature_survives_a_restart`: it drives a real pipeline against
+  a SQLite ledger, closes and reopens the store, re-verifies the signature from
+  the persisted bytes, tampers one byte and requires the refusal. Mutation-tested
+  twice (`test_durable_signature_invariant_notices_persistence_being_dropped` —
+  removing `signed_b64` from `to_dict` fails it with "the signed bytes were not
+  persisted"; `test_durable_signature_invariant_notices_a_verifier_that_accepts_anything`).
+- **Tests.** 1931 -> **1934 passed, 34 skipped** (filesystem-only; 1968
+  collected). New `tests/test_near_durable_signature.py` (29) plus new API and
+  console tests and the two invariant mutations. pyflakes clean; compileall OK;
+  offline demo byte-identical (md5 `4864f13c…`); near demo byte-identical
+  (`fc2949ef…`).
+- **Evidence.** `evidence/mission27/` — `signature_data_flow.md`,
+  `durable_evidence_contract.md`, `restart_verification.json` (generated from a
+  real close/reopen: `digest_source: recomputed_from_persisted_signed_bytes`,
+  `b58_of_digest_equals_tx_hash: true`, all five checks hold),
+  `adversarial_test_results.md`, `reproducible_build_regression.md`,
+  `limitations.md`.
+- **Reproducible build (Mission 26) preserved.** `python3 -m tracesettle guest
+  verify` -> `RESULT: PASS`; `tests/test_near_reproducible_build.py` 11 passed; no
+  approved hash or canonical prefix changed.
+- **Honest scope.** A durable signature proves the signature is cryptographically
+  valid for the exact authorized transaction — it does **not** prove genuine TEE
+  execution, provider identity, approved build or settlement; those are separate
+  claims with separate evidence and are reported separately. No live enclave
+  signature was produced (the OutLayer route is paid); no mainnet; no cost.

@@ -950,7 +950,7 @@ refusal is provable: the executor is never called unless the outcome was `ALLOW`
 | H | Native tx wrongly assumed protected by an Intents-only policy | policy-scope rejection |
 | I | Provider reports success without independent evidence | `UNKNOWN` / `UNAVAILABLE` |
 
-Twenty NEAR-specific structural guarantees join the invariant set, each
+Twenty-two NEAR-specific structural guarantees join the invariant set, each
 mutation-tested: `near_policy_must_be_in_force`,
 `near_policy_selection_is_not_client_controlled`,
 `near_native_scope_gap_is_always_stated`,
@@ -1003,12 +1003,12 @@ a bare interpreter.
 **1. Run the tests.**
 
 ```sh
-python -m pytest tests/ --collect-only -q   # 1854 tests collected
-python -m pytest tests/ -q                  # 1821 passed, 34 skipped
+python -m pytest tests/ --collect-only -q   # 1968 tests collected
+python -m pytest tests/ -q                  # 1934 passed, 34 skipped
 ```
-→ `1821 passed, 34 skipped`. The skips are the PostgreSQL integration
+→ `1934 passed, 34 skipped`. The skips are the PostgreSQL integration
 tests; set `TRACESETTLE_TEST_PG_DSN` to a real server to run them
-(**1824 passed, 9 skipped** — the remaining 9 are opt-in *live-infrastructure*
+(**1958 passed, 10 skipped** — the remaining 10 are opt-in *live-infrastructure*
 tests that need real provider credentials, a testnet key, a TDX enclave
 harness, or a live OutLayer signing credential, none of which a zero-budget
 local run has).
@@ -1143,7 +1143,7 @@ curl -sS -X POST http://127.0.0.1:8080/api/guard/sign \
 curl -sS http://127.0.0.1:8080/api/guard/invariants \
   | python3 -c 'import sys,json;d=json.load(sys.stdin);print("all hold:",d["all_hold"]);[print(" ",i["name"]) for i in d["invariants"]]'
 ```
-→ `all hold: True` and the sixty-one invariant names, including the twenty NEAR
+→ `all hold: True` and the sixty-three invariant names, including the twenty-two NEAR
 ones (`near_policy_must_be_in_force`, `near_native_scope_gap_is_always_stated`,
 `near_function_call_key_cannot_transfer_near`,
 `near_unrecognised_access_key_never_allows`,
@@ -1539,7 +1539,7 @@ transaction request ──▶ │ guard/rules.py      7 controls, all run  │
                         │                     validate, then execute │
                         │ guard/audit.py      hash-chained records  │
                         │ guard/monitor.py    counters + incidents  │
-                        │ guard/invariants.py 62 checked guarantees │
+                        │ guard/invariants.py 63 checked guarantees │
                         └────────────────────┬─────────────────────┘
                                              │ ALLOW + authorization
                                              ▼
@@ -1617,7 +1617,7 @@ identical decisions.
 | `tracesettle/guard/safeguards.py` | Durable security safeguards: the learning loop's store (SQLite). |
 | `tracesettle/guard/learning.py` | The learning loop: derive a lesson, apply safeguards (only ever tightening). |
 | `tracesettle/guard/state_pg.py` | Optional PostgreSQL backend: shared nonces, counters, revocations, idempotency. |
-| `tracesettle/guard/invariants.py` | The sixty-one structural guarantees, checked by execution. |
+| `tracesettle/guard/invariants.py` | The sixty-three structural guarantees, checked by execution. |
 | `tracesettle/guard/api.py` | Guard HTTP routing and JSON serialization. |
 | `tracesettle/guard/console.py` | The security operations console page. |
 | `docs/TRANSACTION_SECURITY.md` | The security layer in full, including what it does not do. |

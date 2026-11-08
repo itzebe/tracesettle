@@ -368,6 +368,22 @@ CONSOLE_HTML = """<!DOCTYPE html>
     </div>
 
     <div class="panel">
+      <h2>Durable signature evidence</h2>
+      <p class="small">After a restart, the only thing that can be re-checked is what was
+        <em>persisted</em>. This panel reads the durable submission records and, for a chosen
+        transaction, recomputes the NEAR digest from the exact signed bytes and re-runs the ed25519
+        verification over it — no re-signing, no re-sending, no in-memory reconstruction. Each claim
+        is reported separately, because a valid signature alone is not proof of genuine TEE
+        execution.</p>
+      <div class="row" style="gap:8px;flex-wrap:wrap;align-items:center">
+        <input id="sig-tx" class="act" type="text" placeholder="transaction hash"
+               aria-label="Transaction hash to re-verify" style="min-width:22rem" />
+        <button class="act" type="button" id="sig-verify">Re-verify recorded signature</button>
+      </div>
+      <div id="near-signature"></div>
+    </div>
+
+    <div class="panel">
       <h2>Verifiable execution (Intel TDX attestation)</h2>
       <p class="small">The NEAR AI Cloud gateway runs inside an Intel TDX confidential VM. TraceSettle
         fetches the gateway's <strong>real</strong> hardware quote and verifies it locally against the
@@ -869,6 +885,7 @@ async function loadNear() {
   attacksEl.innerHTML = "";
   loadWallet();
   loadTrustedChain();
+  loadSignatureEvidence();
   try {
     const scope = await api("GET", "/api/guard/near/policy-scope");
     const rows = Object.keys(scope.scope).map((name) => {
@@ -1112,6 +1129,73 @@ async function loadTrustedChain() {
       "<th>What it does</th></tr></thead><tbody>" + rows + "</tbody></table>" +
       '<div class="note sim">' + esc(exec.note || "") + "</div>";
   } catch (err) { el.innerHTML = '<div class="note bad">' + esc(err.message) + "</div>"; }
+}
+
+function renderSignatureVerdict(v) {
+  const claim = (label, state, note) =>
+    '<tr><td>' + esc(label) + '</td><td>' + state + '</td><td class="small">' +
+    esc(note || "") + "</td></tr>";
+  const yes = '<span class="small ok">yes</span>';
+  const no = '<span class="small bad">no</span>';
+  const byName = {};
+  (v.checks || []).forEach((c) => { byName[c.name] = c; });
+  const held = (name) => byName[name] && byName[name].holds;
+  const rows =
+    claim("Authorization verified", v.signer_id && v.receiver_id ? yes : no,
+      "the signed bytes name signer " + (v.signer_id || "—") + " and receiver " +
+      (v.receiver_id || "—")) +
+    claim("Original signed bytes persisted", held("signed_bytes_present") ? yes : no,
+      "the durable record holds the exact signed bytes") +
+    claim("Transaction digest recomputed", held("digest_recomputed") ? yes : no,
+      v.digest_source === "recomputed_from_persisted_signed_bytes"
+        ? "sha256 recomputed from the persisted unsigned bytes"
+        : "not recomputed") +
+    claim("Signature independently verified", held("signature_verifies_over_digest") ? yes : no,
+      "ed25519 signature re-checked over the recomputed digest under the signer key") +
+    claim("Signed bytes match the record", held("record_matches_signed_bytes") ? yes : no,
+      "the decoded signer, receiver, amount and destination agree with the record") +
+    claim("Provider identity verified", no,
+      "not established here — the durable record does not carry a verified provider identity") +
+    claim("TEE attestation verified", no,
+      "not established here — a valid signature alone is not proof of genuine TEE execution") +
+    claim("Approved build verified", no, "see the TEE signing boundary panel") +
+    claim("Transaction broadcast confirmed", no,
+      "not established here — see the settlement verification for the on-chain result") +
+    claim("Settlement independently verified", no,
+      "not established here — the on-chain record is verified by the settlement panel");
+  const digest = v.transaction_digest
+    ? '<div class="kv small"><dt>Transaction digest</dt><dd class="mono small">' + esc(v.transaction_digest) + "</dd>" +
+      "<dt>Signer public key</dt><dd class='mono small'>" + esc(v.public_key || "—") + "</dd>" +
+      "<dt>Signature algorithm</dt><dd>" + esc(v.signature_algorithm || "—") + "</dd></div>"
+    : "";
+  const verdict = v.verified
+    ? '<div class="note ok">The signature is cryptographically valid for this exact NEAR transaction, ' +
+      "verified from the persisted bytes alone.</div>"
+    : '<div class="note bad">Not verified: ' + esc((v.failures || [v.state]).join(", ")) + "</div>";
+  return verdict + digest +
+    '<table class="table"><thead><tr><th>Claim</th><th>State</th><th>Basis</th></tr></thead><tbody>' +
+    rows + "</tbody></table>";
+}
+
+async function loadSignatureEvidence() {
+  const el = document.getElementById("near-signature");
+  const btn = document.getElementById("sig-verify");
+  if (!el || !btn) return;
+  el.innerHTML = '<div class="note sim">Enter a transaction hash from a durable submission ' +
+    "record to re-verify its recorded signature from the persisted bytes.</div>";
+  btn.onclick = async () => {
+    const tx = (document.getElementById("sig-tx").value || "").trim();
+    if (!tx) { el.innerHTML = '<div class="note bad">Enter a transaction hash.</div>'; return; }
+    el.innerHTML = loading("Re-verifying from the durable record…");
+    try {
+      const data = await api("GET", "/api/guard/near/execution/signature/" + encodeURIComponent(tx));
+      if (!data.enabled) {
+        el.innerHTML = '<div class="note sim">' + esc(data.note || "No durable pipeline is configured.") + "</div>";
+        return;
+      }
+      el.innerHTML = renderSignatureVerdict(data.verification || {});
+    } catch (err) { el.innerHTML = '<div class="note bad">' + esc(err.message) + "</div>"; }
+  };
 }
 
 async function loadNearBehaviours() {

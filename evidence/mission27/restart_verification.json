@@ -1,0 +1,102 @@
+{
+  "generated_by": "tests/test_near_durable_signature.py + demo run (real code paths; RPC transport substituted)",
+  "durability_model": "SQLite ledger + evidence-chain store closed and reopened from the same files",
+  "transaction_hash": "2ek4WJevFsMYXdjhUSVYXp7fj2uT3ic2SYcBE6THZpPK",
+  "run_state": "SETTLED",
+  "settlement_state": "VERIFIED",
+  "durable_record_fields": {
+    "signed_b64_present": true,
+    "signed_b64_chars": 260,
+    "signature_algorithm": "ed25519",
+    "signer_id": "agent.testnet",
+    "receiver_id": "alice.testnet",
+    "amount_base": "1000000000000000000000000",
+    "destination": "alice.testnet"
+  },
+  "post_restart_signature_verification": {
+    "tx_hash": "2ek4WJevFsMYXdjhUSVYXp7fj2uT3ic2SYcBE6THZpPK",
+    "signer_id": "agent.testnet",
+    "receiver_id": "alice.testnet",
+    "amount_base": "1000000000000000000000000",
+    "destination": "alice.testnet",
+    "signature_algorithm": "ed25519",
+    "verified": true,
+    "state": "VERIFIED",
+    "checks": [
+      {
+        "name": "signed_bytes_present",
+        "holds": true,
+        "detail": "260 base64 chars"
+      },
+      {
+        "name": "digest_recomputed",
+        "holds": true,
+        "detail": "sha256 of the persisted unsigned bytes"
+      },
+      {
+        "name": "decode_round_trips",
+        "holds": true,
+        "detail": "the bytes re-serialize to the same bytes"
+      },
+      {
+        "name": "signature_verifies_over_digest",
+        "holds": true,
+        "detail": "ed25519 signature re-verified over the recomputed digest"
+      },
+      {
+        "name": "record_matches_signed_bytes",
+        "holds": true,
+        "detail": "the decoded fields agree with the durable record"
+      }
+    ],
+    "transaction_digest": "sha256:1886dd8e3ba4df1d7473b46d27ccc408f40671fd2e557235b4fa54cde88d4aaa",
+    "digest_source": "recomputed_from_persisted_signed_bytes",
+    "public_key": "ed25519:FAe4sisG95oZ42w7buUn5qEE4TAnfTTFPiguZUHmhiF",
+    "failures": []
+  },
+  "post_restart_chain_binding": {
+    "bound": true,
+    "failures": [],
+    "checks": [
+      {
+        "name": "transaction_digest_agrees",
+        "holds": true,
+        "detail": "['sha256:1886dd8e3ba4df1d7473b46d27ccc408f40671fd2e557235b4fa54cde88d4aaa', 'sha256:1886dd8e3ba4df1d7473b46d27ccc408f40671fd2e557235b4fa54cde88d4aaa', 'sha256:1886dd8e3ba4df1d7473b46d27ccc408f40671fd2e557235b4fa54cde88d4aaa', 'sha256:1886dd8e3ba4df1d7473b46d27ccc408f40671fd2e557235b4fa54cde88d4aaa', 'sha256:1886dd8e3ba4df1d7473b46d27ccc408f40671fd2e557235b4fa54cde88d4aaa']"
+      },
+      {
+        "name": "network_agrees",
+        "holds": true,
+        "detail": "['testnet', 'testnet', 'testnet', 'testnet']"
+      },
+      {
+        "name": "receiver_agrees",
+        "holds": true,
+        "detail": "['alice.testnet', 'alice.testnet']"
+      },
+      {
+        "name": "amount_agrees",
+        "holds": true,
+        "detail": "['1000000000000000000000000', '1000000000000000000000000']"
+      },
+      {
+        "name": "signer_public_key_agrees",
+        "holds": true,
+        "detail": "['ed25519:FAe4sisG95oZ42w7buUn5qEE4TAnfTTFPiguZUHmhiF', 'ed25519:FAe4sisG95oZ42w7buUn5qEE4TAnfTTFPiguZUHmhiF']"
+      },
+      {
+        "name": "broadcast_hash_agrees",
+        "holds": true,
+        "detail": "['2ek4WJevFsMYXdjhUSVYXp7fj2uT3ic2SYcBE6THZpPK', '2ek4WJevFsMYXdjhUSVYXp7fj2uT3ic2SYcBE6THZpPK', '2ek4WJevFsMYXdjhUSVYXp7fj2uT3ic2SYcBE6THZpPK']"
+      },
+      {
+        "name": "signature_verifies_over_the_digest",
+        "holds": true,
+        "detail": "ed25519 signature re-verified over the recorded digest"
+      }
+    ]
+  },
+  "digest_binding": {
+    "digest_recomputed_from_persisted_bytes": "sha256:1886dd8e3ba4df1d7473b46d27ccc408f40671fd2e557235b4fa54cde88d4aaa",
+    "b58_of_digest_equals_tx_hash": true
+  }
+}

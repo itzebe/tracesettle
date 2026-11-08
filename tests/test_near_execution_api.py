@@ -540,6 +540,49 @@ def test_the_chain_route_reports_disabled_without_a_store():
     assert resp.payload["chain"] is None
 
 
+def test_the_chain_route_includes_an_independent_signature_reverification():
+    """The chain view must carry the from-durable-bytes signature verdict."""
+    api, rpc = _api_with_chain()
+    tx_hash = _settle(api, rpc)
+    resp = api.dispatch("GET", f"/api/guard/near/execution/chain/{tx_hash}", {}, None)
+    assert resp.status == 200
+    verdict = resp.payload["signature_verification"]
+    assert verdict["verified"] is True, verdict
+    assert verdict["digest_source"] == "recomputed_from_persisted_signed_bytes"
+
+
+def test_the_signature_route_reverifies_from_the_durable_record():
+    api, rpc = _api_with_chain()
+    tx_hash = _settle(api, rpc)
+    resp = api.dispatch("GET", f"/api/guard/near/execution/signature/{tx_hash}", {}, None)
+    assert resp.status == 200
+    assert resp.payload["enabled"] is True
+    verdict = resp.payload["verification"]
+    assert verdict["verified"] is True
+    assert verdict["signer_id"] == SIGNER
+    assert verdict["public_key"].startswith("ed25519:")
+    # No key material is ever in a response.
+    assert "private" not in str(resp.payload).lower()
+
+
+def test_the_signature_route_reports_not_found_for_an_unknown_transaction():
+    api, _ = _api_with_chain()
+    resp = api.dispatch("GET", "/api/guard/near/execution/signature/NOPE", {}, None)
+    assert resp.status == 200
+    assert resp.payload["verification"]["verified"] is False
+    assert resp.payload["verification"]["state"] == "NOT_FOUND"
+
+
+def test_the_signature_route_reports_disabled_without_a_pipeline():
+    guard = make_guard(near_policy())
+    rpc = FakeNearRpc(NETWORKS[NearNetwork.TESTNET])
+    boundary = NearExecutionBoundary(guard, NETWORKS[NearNetwork.TESTNET], rpc=rpc)
+    api = GuardAPI(guard, near_execution=boundary)
+    resp = api.dispatch("GET", "/api/guard/near/execution/signature/anything", {}, None)
+    assert resp.status == 200
+    assert resp.payload["enabled"] is False
+
+
 def test_the_chain_list_route_reports_every_stored_chain():
     api, rpc = _api_with_chain()
     tx_hash = _settle(api, rpc)

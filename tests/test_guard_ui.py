@@ -608,6 +608,20 @@ def test_console_near_tab_shows_the_trusted_signing_chain():
     assert "not configured" in html
 
 
+def test_console_near_tab_shows_durable_signature_evidence():
+    """The console must expose the from-durable-bytes re-verification honestly."""
+    with running_server() as base:
+        _, body, _ = _request("GET", base + "/console")
+    html = _html(body)
+    assert "Durable signature evidence" in html
+    assert "/api/guard/near/execution/signature/" in html
+    # The claims are listed separately, so a valid signature is not conflated
+    # with TEE execution or settlement.
+    assert "Signature independently verified" in html
+    assert "TEE attestation verified" in html
+    assert "not established here" in html
+
+
 def test_console_near_demo_destinations_match_the_real_default_policy():
     """The console's one-click demo must use a destination the real policy approves.
 
