@@ -450,3 +450,56 @@ def test_judge_guide_is_shipped_in_the_image():
     for dockerfile in ("Dockerfile", "Dockerfile.vercel"):
         text = (REPO_ROOT / dockerfile).read_text(encoding="utf-8")
         assert "COPY JUDGE_GUIDE.md" in text, f"{dockerfile} does not ship the judge guide"
+
+
+def test_reviewer_cli_runs_from_a_package_only_copy(tmp_path):
+    """An auditor runs the CLI inside the image, which has only ``tracesettle/``.
+
+    The build identity, the toolchain pin, and the attestation fixture must all
+    ship with the package, or the reviewer commands fail in production.
+    """
+    root = _package_only_copy(tmp_path)
+    out = subprocess.run(
+        [sys.executable, "-m", "tracesettle", "guest", "verify"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert "RESULT: PASS" in out.stdout
+
+
+def test_the_attestation_verifier_answers_from_a_package_only_copy(tmp_path):
+    root = _package_only_copy(tmp_path)
+    script = (
+        "from tracesettle.near.tee_signing.outlayer_attestation "
+        "import verify_outlayer_attestation\n"
+        "import json, pathlib\n"
+        "p = pathlib.Path('tracesettle/near/fixtures/onchain_tee_attestation.json')\n"
+        "rec = json.loads(p.read_text())\n"
+        "v = verify_outlayer_attestation(rec['attestation'], network='testnet',\n"
+        "    tx_result=rec['tx_result'])\n"
+        "print('RESULT:' + str(v.verified) + ':' + str(v.level))\n"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", script], cwd=root, capture_output=True, text=True, timeout=180
+    )
+    assert out.returncode == 0, out.stderr
+    line = [ln for ln in out.stdout.splitlines() if ln.startswith("RESULT:")][-1]
+    assert line == "RESULT:True:INDEPENDENTLY_VERIFIED", line
+
+
+def test_the_pinned_guest_artifact_ships_in_the_package():
+    """The approved build bytes must be in the image so the hash can be checked."""
+    artifact = PACKAGE_ROOT / "near/tee_signing/guest/signing-module/dist/tracesettle-signing-module-wasm.wasm"
+    assert artifact.is_file()
+    import hashlib
+
+    assert hashlib.sha256(artifact.read_bytes()).hexdigest() == (
+        "eb705a61554fc9823e9e11a61aa0192d2d9fdf51280379098c1b480c025dd6d0"
+    )
+    # The dockerignore excludes only the build *output* directory, never dist/.
+    text = (REPO_ROOT / ".dockerignore").read_text(encoding="utf-8")
+    assert "signing-module/target/" in text
+    assert "dist" not in text

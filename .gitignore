@@ -66,3 +66,10 @@ build/
 
 # Rust guest build output (rebuilt by tracesettle/near/tee_signing/guest/signing-module/build.sh)
 tracesettle/near/tee_signing/guest/signing-module/target/
+
+# The pinned TEE guest artifacts ARE committed: they are the trust anchor whose
+# sha256 an operator pins as the approved build, so a reviewer must be able to
+# check the bytes without a Rust toolchain. CI rebuilds them from source with the
+# pinned rustc and proves the rebuild is byte-identical to what is committed here.
+!tracesettle/near/tee_signing/guest/signing-module/dist/
+!tracesettle/near/tee_signing/guest/signing-module/dist/*.wasm

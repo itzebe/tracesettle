@@ -1649,14 +1649,23 @@ def _build_near_execution(guard_service: GuardService) -> Any:
     # memory. The pipeline never holds a key - the caller signs.
     from .near.ledger import SubmissionLedger
     from .near.pipeline import NearExecutionPipeline
+    from .near.tee_signing import EvidenceChainStore
 
     try:
         ledger = SubmissionLedger(config.NEAR_LEDGER_DB)
     except Exception as exc:  # noqa: BLE001 - a broken ledger must not start
         raise RuntimeError(f"TRACESETTLE_NEAR_LEDGER_DB: {exc}") from exc
+    # The durable evidence chain. Same rule: a configured store that cannot be
+    # opened is a hard failure, never a silent fallback to memory, so a
+    # deployment that promises an inspectable chain actually keeps one.
+    try:
+        chain_store = EvidenceChainStore(config.NEAR_CHAIN_DB)
+    except Exception as exc:  # noqa: BLE001 - a broken chain store must not start
+        raise RuntimeError(f"TRACESETTLE_NEAR_CHAIN_DB: {exc}") from exc
     boundary.pipeline = NearExecutionPipeline(
         boundary,
         ledger=ledger,
+        chain_store=chain_store,
         finality_attempts=config.NEAR_FINALITY_ATTEMPTS,
         finality_delay=config.NEAR_FINALITY_DELAY_SECONDS,
     )

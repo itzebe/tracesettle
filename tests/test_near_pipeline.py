@@ -35,6 +35,8 @@ from tracesettle.near.pipeline import (
     SigningError,
 )
 from tracesettle.near.networks import NearNetwork
+from tracesettle.near.tee_signing.evidence_chain import verify_chain_bindings
+from tracesettle.near.txbuild import NearTransaction
 from tracesettle.near.verify import SettlementState
 
 
@@ -539,3 +541,126 @@ def test_submit_signed_is_idempotent():
     assert second.recovered is True
     assert len(rpc.broadcasts) == 1, "a duplicate wallet submission must not re-broadcast"
     assert second.tx_hash == first.tx_hash
+
+
+# -- evidence chain -----------------------------------------------------------
+
+
+def _pipeline_with_chain(boundary, ledger=None, chain_store=None):
+    from tracesettle.near.tee_signing.evidence_chain import EvidenceChainStore
+
+    return NearExecutionPipeline(
+        boundary,
+        ledger=ledger or SubmissionLedger(),
+        chain_store=chain_store or EvidenceChainStore(),
+    )
+
+
+def test_a_verified_settlement_produces_a_bound_evidence_chain():
+    boundary, rpc = make_boundary()
+    pipeline = _pipeline_with_chain(boundary)
+    prepared = _prepare(boundary)
+    rpc.send_result = result_for(prepared.transaction, finality="FINAL")
+    rpc.tx_status_result = result_for(prepared.transaction, finality="FINAL")
+
+    result = pipeline.execute(prepared, CountingSigner(prepared.transaction.public_key))
+    assert result.state == SubmissionState.SETTLED
+
+    report = pipeline.verify_evidence_chain(result.tx_hash)
+    assert report is not None
+    assert report["bound"], report["failures"]
+    assert report["transaction_digest"] == prepared.transaction.payload_fingerprint()
+    assert report["chain_digest"].startswith("sha256:")
+
+
+def test_the_chain_names_every_stage_of_a_full_run():
+    boundary, rpc = make_boundary()
+    pipeline = _pipeline_with_chain(boundary)
+    prepared = _prepare(boundary)
+    rpc.send_result = result_for(prepared.transaction, finality="FINAL")
+    rpc.tx_status_result = result_for(prepared.transaction, finality="FINAL")
+    result = pipeline.execute(prepared, CountingSigner(prepared.transaction.public_key))
+
+    chain = pipeline.chain_store.get(result.tx_hash)
+    assert chain is not None
+    for stage in ("AUTHORIZATION", "PREPARED_TRANSACTION", "SIGNATURE", "BROADCAST", "SETTLEMENT"):
+        assert stage in chain.stages, f"{stage} was not recorded"
+    assert chain.stages["SETTLEMENT"]["all_checks_passed"] is True
+
+
+def test_a_chain_survives_a_restart_when_it_has_a_path(tmp_path):
+    from tracesettle.near.tee_signing.evidence_chain import EvidenceChainStore
+
+    db = str(tmp_path / "chains.db")
+    boundary, rpc = make_boundary()
+    pipeline = _pipeline_with_chain(boundary, chain_store=EvidenceChainStore(db))
+    prepared = _prepare(boundary)
+    rpc.send_result = result_for(prepared.transaction, finality="FINAL")
+    rpc.tx_status_result = result_for(prepared.transaction, finality="FINAL")
+    result = pipeline.execute(prepared, CountingSigner(prepared.transaction.public_key))
+    pipeline.chain_store.close()
+
+    reopened = EvidenceChainStore(db)
+    try:
+        chain = reopened.get(result.tx_hash)
+        assert chain is not None
+        from tracesettle.near.tee_signing.evidence_chain import verify_chain_bindings
+
+        assert verify_chain_bindings(chain).bound
+    finally:
+        reopened.close()
+
+
+def test_no_chain_is_stored_when_none_is_configured():
+    boundary, rpc = make_boundary()
+    pipeline = _pipeline(boundary)
+    prepared = _prepare(boundary)
+    rpc.send_result = result_for(prepared.transaction, finality="FINAL")
+    rpc.tx_status_result = result_for(prepared.transaction, finality="FINAL")
+    result = pipeline.execute(prepared, CountingSigner(prepared.transaction.public_key))
+    assert pipeline.chain_store is None
+    assert pipeline.verify_evidence_chain(result.tx_hash) is None
+
+
+def test_the_durable_chain_carries_a_re_verifiable_signature():
+    """The pipeline's stored chain must let a reviewer re-verify the signature.
+
+    The chain records a ``signature_verified`` flag, but a flag is a claim. The
+    pipeline now recovers the signature from the exact signed bytes the ledger
+    holds, so ``verify_chain_bindings`` re-runs the ed25519 check over the
+    recorded digest rather than trusting the flag.
+    """
+    boundary, rpc = make_boundary()
+    pipeline = _pipeline_with_chain(boundary)
+    prepared = _prepare(boundary)
+    rpc.send_result = result_for(prepared.transaction, finality="FINAL")
+    rpc.tx_status_result = result_for(prepared.transaction, finality="FINAL")
+    result = pipeline.execute(prepared, CountingSigner(prepared.transaction.public_key))
+
+    chain = pipeline.chain_store.get(result.tx_hash)
+    assert chain is not None
+    sig_stage = chain.stages["SIGNATURE"]
+    assert sig_stage.get("signature_b64"), "the signature was not recovered into the chain"
+    binding = verify_chain_bindings(chain)
+    by_name = {c["name"]: c for c in binding.checks}
+    assert by_name["signature_verifies_over_the_digest"]["holds"] is True
+    assert binding.bound, binding.failures
+
+
+def test_the_recovered_chain_signature_matches_the_signed_bytes():
+    """The recovered signature must be the one actually over the signed bytes."""
+    import base64
+
+    boundary, rpc = make_boundary()
+    pipeline = _pipeline_with_chain(boundary)
+    prepared = _prepare(boundary)
+    rpc.send_result = result_for(prepared.transaction, finality="FINAL")
+    rpc.tx_status_result = result_for(prepared.transaction, finality="FINAL")
+    result = pipeline.execute(prepared, CountingSigner(prepared.transaction.public_key))
+
+    record = pipeline.ledger.get(result.tx_hash)
+    signed = base64.b64decode(record.signed_b64)
+    chain = pipeline.chain_store.get(result.tx_hash)
+    recovered = base64.b64decode(chain.stages["SIGNATURE"]["signature_b64"])
+    assert recovered == NearTransaction.signature_from_signed(signed)
+    assert recovered == signed[-64:]

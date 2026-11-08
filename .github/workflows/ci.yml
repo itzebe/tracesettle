@@ -509,8 +509,11 @@ jobs:
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           # Pinned by SHA, the action requires the toolchain explicitly (a tag
-          # would otherwise carry it).
-          toolchain: stable
+          # would otherwise carry it). The channel is pinned to the exact release
+          # the approved artifact was built with: the compiler commit is embedded
+          # in the wasm's `producers` section and the codegen differs between
+          # releases, so `stable` would not reproduce the recorded bytes.
+          toolchain: "1.99.1"
           targets: wasm32-wasip2
 
       # The guest composes the NEAR digest itself, inside the enclave. Its Borsh
@@ -522,15 +525,21 @@ jobs:
         working-directory: tracesettle/near/tee_signing/guest/signing-module
         run: cargo test --release --quiet
 
-      - name: Build the guest for wasm32-wasip2
+      # The reproducible-build claim, checked rather than asserted: the pinned
+      # toolchain must rebuild the *exact* bytes whose sha256 an operator pins as
+      # the approved build. A silent change to the source, the WIT, the manifest,
+      # the lockfile, the profile or the compiler changes the hash and fails here.
+      - name: Reproducible build — the artifact must hash to the approved identity
         working-directory: tracesettle/near/tee_signing/guest/signing-module
         run: |
           set -eu
-          cargo build --release --target wasm32-wasip2 --no-default-features --features wasm
-          wasm="target/wasm32-wasip2/release/tracesettle-signing-module.wasm"
-          test -f "$wasm"
-          # The worker hands out no keys without the manifest custom section, and
-          # every call needs the signing-keys import.
-          grep -qa 'outlayer.manifest' "$wasm"
-          grep -qa 'outlayer:signing-keys' "$wasm"
-          echo "guest wasm built: $(stat -c%s "$wasm") bytes, sha256 $(sha256sum "$wasm" | cut -d' ' -f1)"
+          rustc --version
+          bash build.sh
+          # build.sh writes both variants; `guest verify` compares each rebuilt
+          # artifact to build_identity.json (hash, size, inputs, toolchain pin).
+          cd "$GITHUB_WORKSPACE"
+          python3 -m tracesettle guest verify --variant wasm
+          python3 -m tracesettle guest verify --variant project
+
+      - name: Reviewer CLI verifies the on-chain attestation (offline)
+        run: python3 -m tracesettle attestation verify --record tracesettle/near/fixtures/onchain_tee_attestation.json

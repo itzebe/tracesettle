@@ -1,0 +1,31 @@
+{
+  "artifact_present": true,
+  "checks": [
+    {
+      "detail": "inputs 224f93f7356cb3a4\u2026 vs recorded 224f93f7356cb3a4\u2026",
+      "holds": true,
+      "name": "build_inputs_match"
+    },
+    {
+      "detail": "rust-toolchain.toml pins 1.99.1",
+      "holds": true,
+      "name": "toolchain_pinned"
+    },
+    {
+      "detail": "observed eb705a61554fc982\u2026 vs recorded eb705a61554fc982\u2026",
+      "holds": true,
+      "name": "artifact_sha256"
+    },
+    {
+      "detail": "186462 bytes",
+      "holds": true,
+      "name": "artifact_size"
+    }
+  ],
+  "failures": [],
+  "holds": true,
+  "input_digest": "224f93f7356cb3a4a874c95ed7833fdc0b90f7ebd39d63a39a7676d53aae63f9",
+  "observed_sha256": "eb705a61554fc9823e9e11a61aa0192d2d9fdf51280379098c1b480c025dd6d0",
+  "recorded_input_digest": "224f93f7356cb3a4a874c95ed7833fdc0b90f7ebd39d63a39a7676d53aae63f9",
+  "recorded_sha256": "eb705a61554fc9823e9e11a61aa0192d2d9fdf51280379098c1b480c025dd6d0"
+}

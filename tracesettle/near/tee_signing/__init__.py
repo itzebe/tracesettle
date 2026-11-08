@@ -59,6 +59,29 @@ from .onchain import (
     OnChainTeeError,
     OutLayerOnChainSigningProvider,
 )
+from .build_verify import (
+    BuildVerdict,
+    ReproducibleBuildError,
+    build_input_digest,
+    verify_build,
+)
+from .evidence_chain import (
+    ChainBinding,
+    EvidenceChain,
+    EvidenceChainError,
+    EvidenceChainStore,
+    build_evidence_chain,
+    verify_chain_bindings,
+)
+from .outlayer_attestation import (
+    AttestationClaim as OutLayerAttestationClaim,
+    OutLayerAttestationError,
+    OutLayerAttestationVerdict,
+    attestation_api_host,
+    fetch_attestation,
+    task_hash_v1,
+    verify_outlayer_attestation,
+)
 
 __all__ = [
     "SIGNING_DOMAIN",
@@ -82,4 +105,21 @@ __all__ = [
     "OnChainTeeConfig",
     "OnChainTeeError",
     "OutLayerOnChainSigningProvider",
+    "BuildVerdict",
+    "ReproducibleBuildError",
+    "build_input_digest",
+    "verify_build",
+    "ChainBinding",
+    "EvidenceChain",
+    "EvidenceChainError",
+    "EvidenceChainStore",
+    "build_evidence_chain",
+    "verify_chain_bindings",
+    "OutLayerAttestationClaim",
+    "OutLayerAttestationError",
+    "OutLayerAttestationVerdict",
+    "attestation_api_host",
+    "fetch_attestation",
+    "task_hash_v1",
+    "verify_outlayer_attestation",
 ]

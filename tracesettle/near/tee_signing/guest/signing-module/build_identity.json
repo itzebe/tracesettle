@@ -1,0 +1,33 @@
+{
+  "_note": "The approved-build identity of the TraceSettle TEE signing guest. The sha256 values are what an operator pins as the approved build; the toolchain and profile are the exact inputs that reproduce them. See evidence/mission26/reproducible_build.md.",
+  "target": "wasm32-wasip2",
+  "toolchain": "1.99.1",
+  "profile": "release",
+  "artifacts": {
+    "wasm": {
+      "file": "dist/tracesettle-signing-module-wasm.wasm",
+      "features": "wasm",
+      "manifest": "manifest-wasm.json",
+      "sha256": "eb705a61554fc9823e9e11a61aa0192d2d9fdf51280379098c1b480c025dd6d0",
+      "size_bytes": 186462,
+      "used_by_live_run": true,
+      "input_digest": "224f93f7356cb3a4a874c95ed7833fdc0b90f7ebd39d63a39a7676d53aae63f9"
+    },
+    "project": {
+      "file": "dist/tracesettle-signing-module.wasm",
+      "features": "project",
+      "manifest": "manifest.json",
+      "sha256": "7ff8fbcb6748159729f5c6b4ff5659ba99d3c5c906ecc9d1bde7478e37f57691",
+      "size_bytes": 186438,
+      "used_by_live_run": false,
+      "input_digest": "224f93f7356cb3a4a874c95ed7833fdc0b90f7ebd39d63a39a7676d53aae63f9"
+    }
+  },
+  "live_run": {
+    "network": "testnet",
+    "execution_tx_hash": "9aqdmyBq4GE7zhvnwHcgGVU9mfyUrx4KbKRG26TuierY",
+    "attested_wasm_sha256": "eb705a61554fc9823e9e11a61aa0192d2d9fdf51280379098c1b480c025dd6d0",
+    "published_url": "https://work-1-iujlibhgxzczwmem.prod-runtime.all-hands.dev/tracesettle-signing-module-wasm.wasm",
+    "published_url_status_2026_11_08": "unreachable (HTTP 502) - a temporary host; the approved-build identity is established by the reproducible rebuild, not by that URL"
+  }
+}

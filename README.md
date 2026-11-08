@@ -733,6 +733,67 @@ Config: `TRACESETTLE_TEE_SIGNING`, `TRACESETTLE_TEE_SIGNING_OWNER`,
 real configured state; the demo `python3 demo/near_tee_signing_demo.py` (9/9)
 exercises the boundary with a deterministic stand-in provider.
 
+### Independent trust: reproducible build, attestation, and evidence chain
+
+The signing boundary above claims an enclave signed the bytes. Mission 26 makes
+each part of that claim **independently inspectable**, and adds a reviewer CLI so
+a third party can re-check it without running the product.
+
+- **Reproducible build.** The guest's bytes are not merely pinned by sha256 — the
+  same source, `Cargo.lock`, profile and **compiler** reproduce them byte for
+  byte. `rust-toolchain.toml` pins rustc `1.99.1`; a clean `cargo clean && bash
+  build.sh` rebuilds `eb705a61554fc982…` exactly (the compiler commit is embedded
+  in the wasm, so a different rustc is a different build by design). The compiler
+  also embeds the absolute path of each dependency source it reads, so `build.sh`
+  remaps the builder's `CARGO_HOME` to the fixed prefix baked into the approved
+  artifact — otherwise the same source built in another directory would produce a
+  different hash (this was a real defect: the first CI run caught it, because CI's
+  `/home/runner/.cargo` did not match the committed `/home/openhands/.cargo`).
+  `python3 -m tracesettle guest verify` checks the inputs, the toolchain pin and
+  the artifact hash from the shipped package; CI runs `build.sh` and then `guest
+  verify`, so a silent change to any input fails the build. See
+  `evidence/mission26/reproducible_build.md`.
+- **Independent attestation verification.** OutLayer publishes the execution's
+  TDX quote at a **free, unauthenticated** endpoint. `tracesettle/near/tee_signing/
+  outlayer_attestation.py` fetches it and checks nine separate claims — quote
+  authenticity against the pinned Intel root, the `report_data` Task-Hash
+  commitment recomputed from the record's own fields, the worker measurement
+  against the quote, **on-chain worker approval** (`worker.outlayer.testnet`),
+  the attested build against the operator's pin, the execution binding, and the
+  input/output payload hashes against the on-chain transaction. A verified quote
+  alone is never enough. See `evidence/mission26/attestation_verification.md`.
+- **Evidence chain.** Authorization → prepared transaction → TEE execution →
+  attestation → signature → broadcast → finality → settlement are assembled into
+  one durable record (`EvidenceChain`) whose bindings are re-checkable: the signed
+  digest equals the authorized digest, the receiver and amount equal the
+  authorized ones, the signer key matches the attestation, the broadcast hash is
+  the hash of the exact signed bytes, and the settlement names the same
+  transaction. A substituted digest, receiver, amount, network, signer or
+  settlement **breaks** the chain. The chain is persisted by the pipeline when a
+  store is configured, and `GET /api/guard/near/execution/chain/<tx>` returns the
+  binding check. The real 2026-11-07 run's own numbers assemble into one bound
+  chain (digest `sha256:0cd37928…`); see `evidence/mission26/evidence_chain.md`.
+- **Reviewer CLI.** `python3 -m tracesettle {guest,attestation,signature,chain}
+  verify …` lets an independent reviewer reproduce the build identity, verify the
+  attestation, recompute the transaction digest and verify the ed25519 signature
+  over it, and check the evidence-chain bindings — all offline against the
+  committed captures. The commands exit non-zero on any failure.
+
+```bash
+python3 -m tracesettle guest verify
+python3 -m tracesettle attestation verify \
+    --record tracesettle/near/fixtures/onchain_tee_attestation.json
+# The signing record is the sign_transaction output inside the run capture:
+python3 -c "import json;print(json.dumps(json.load(open('tracesettle/near/fixtures/onchain_tee_run.json'))['sign_transaction']['output']))" > /tmp/signing.json
+python3 -m tracesettle signature verify /tmp/signing.json
+python3 -m tracesettle chain verify <evidence-chain.json>
+```
+
+The `signature verify` command recomputes `sha256(unsigned_bytes)` and reports the
+on-chain hash: for the Mission 25 run that is
+`F27Erv42DhGhaTqNXPhsf5KXedfQvP3cd1Vbz9aZnQPj`, signed by
+`ed25519:H3dd94sk1df1t2PVyQWjD9cyzDAKh2WceAFmP3tWdC2a`.
+
 ### Wallet-mediated flow (the wallet signs and sends)
 
 The server-side boundary above is for an operator who wants TRACESETTLE to build
@@ -1478,7 +1539,7 @@ transaction request ──▶ │ guard/rules.py      7 controls, all run  │
                         │                     validate, then execute │
                         │ guard/audit.py      hash-chained records  │
                         │ guard/monitor.py    counters + incidents  │
-                        │ guard/invariants.py 61 checked guarantees │
+                        │ guard/invariants.py 62 checked guarantees │
                         └────────────────────┬─────────────────────┘
                                              │ ALLOW + authorization
                                              ▼

@@ -29,6 +29,10 @@ from . import borsh
 from .assets import NearAsset, to_base_units
 from .networks import NearNetwork
 
+#: The borsh ``SignedTransaction`` trailer length: a 1-byte ed25519 signature
+#: tag plus the 64 signature bytes. See ``borsh.signature_ed25519``.
+SIGNATURE_TRAILER_LEN = 1 + 64
+
 #: Default gas attached to an NEP-141 ``ft_transfer`` (30 TGas is the standard
 #: allowance for a simple FT transfer; the extra headroom covers the storage
 #: check). Never invented per-call: a fixed, documented value.
@@ -107,6 +111,34 @@ class NearTransaction:
 
     def signed_b64(self, signature_raw64: bytes) -> str:
         return base64.b64encode(self.signed_bytes(signature_raw64)).decode("ascii")
+
+    @staticmethod
+    def unsigned_from_signed(signed: bytes) -> bytes:
+        """Recover the unsigned transaction from borsh ``SignedTransaction`` bytes.
+
+        The signature trailer is ``tag(1 byte) + 64 signature bytes``, so the
+        transaction is everything before the last 65 bytes. This is the single
+        definition of that boundary; deriving the digest elsewhere by a different
+        arithmetic would silently disagree.
+        """
+        return signed[: -SIGNATURE_TRAILER_LEN]
+
+    @staticmethod
+    def unsigned_from_signed_b64(signed_b64: str) -> bytes:
+        return NearTransaction.unsigned_from_signed(base64.b64decode(signed_b64))
+
+    @staticmethod
+    def signature_from_signed(signed: bytes) -> bytes:
+        """The 64 raw signature bytes from borsh ``SignedTransaction`` bytes.
+
+        The trailer is ``tag(1 byte) + 64 signature bytes``, so the signature is
+        the last 64 bytes. The inverse of :meth:`unsigned_from_signed`; the two
+        share ``SIGNATURE_TRAILER_LEN`` so neither can drift by an arithmetic
+        error. Returns ``b""`` for input too short to carry a signature.
+        """
+        if len(signed) <= SIGNATURE_TRAILER_LEN:
+            return b""
+        return signed[-64:]
 
     def guard_amount(self) -> Decimal:
         """The transfer amount the authorization is bound to.

@@ -457,3 +457,107 @@ def test_tee_signing_never_reports_a_tee_claim_it_did_not_verify():
         "verifies"
     ]
     assert info.payload["measurement_pinned"] is False
+
+
+# -- evidence-chain routes ----------------------------------------------------
+
+
+def _api_with_chain(chain_store=None):
+    from tracesettle.near.ledger import SubmissionLedger
+    from tracesettle.near.pipeline import NearExecutionPipeline
+    from tracesettle.near.tee_signing import EvidenceChainStore
+
+    guard = make_guard(near_policy())
+    rpc = FakeNearRpc(NETWORKS[NearNetwork.TESTNET])
+    boundary = NearExecutionBoundary(guard, NETWORKS[NearNetwork.TESTNET], rpc=rpc)
+    boundary.pipeline = NearExecutionPipeline(
+        boundary,
+        ledger=SubmissionLedger(),
+        chain_store=chain_store if chain_store is not None else EvidenceChainStore(),
+    )
+    return GuardAPI(guard, near_execution=boundary), rpc
+
+
+def _settle(api, rpc):
+    prepared = _post(api, "/api/guard/near/execution/prepare", _prepare_body())
+    tx_hash = prepared.payload["transaction"]["tx_hash"]
+    from tracesettle.base58 import b58decode
+
+    signature = base64.b64encode(ed25519.sign(b58decode(tx_hash), TEST_SEED)).decode()
+    rpc.send_result = {
+        "final_execution_status": "FINAL",
+        "status": {"SuccessValue": ""},
+        "transaction": {
+            "hash": tx_hash,
+            "signer_id": SIGNER,
+            "receiver_id": RECIPIENT,
+            "nonce": prepared.payload["transaction"]["nonce"],
+            "actions": [{"Transfer": {"deposit": str(10**24)}}],
+        },
+        "transaction_outcome": {
+            "block_hash": prepared.payload["transaction"]["block_hash"],
+            "outcome": {"logs": []},
+        },
+        "receipts_outcome": [],
+    }
+    submitted = _post(
+        api,
+        "/api/guard/near/execution/submit",
+        {"prepare_id": prepared.payload["prepare_id"], "signature": signature},
+    )
+    assert submitted.status == 200, submitted.payload
+    return submitted.payload["tx_hash"]
+
+
+def test_the_chain_route_reports_a_bound_chain():
+    api, rpc = _api_with_chain()
+    tx_hash = _settle(api, rpc)
+    resp = api.dispatch("GET", f"/api/guard/near/execution/chain/{tx_hash}", {}, None)
+    assert resp.status == 200
+    assert resp.payload["enabled"] is True
+    assert resp.payload["binding"]["bound"] is True, resp.payload["binding"]["failures"]
+    chain = resp.payload["chain"]
+    assert chain["tx_hash"] == tx_hash
+    assert chain["stages"]["SETTLEMENT"]["all_checks_passed"] is True
+    # The reviewer view must not carry key material.
+    assert "private" not in str(resp.payload).lower()
+
+
+def test_the_chain_route_404s_for_an_unknown_transaction():
+    api, _ = _api_with_chain()
+    resp = api.dispatch("GET", "/api/guard/near/execution/chain/NOPE", {}, None)
+    assert resp.status == 404
+
+
+def test_the_chain_route_reports_disabled_without_a_store():
+    guard = make_guard(near_policy())
+    rpc = FakeNearRpc(NETWORKS[NearNetwork.TESTNET])
+    boundary = NearExecutionBoundary(guard, NETWORKS[NearNetwork.TESTNET], rpc=rpc)
+    api = GuardAPI(guard, near_execution=boundary)  # no pipeline / no chain store
+    resp = api.dispatch("GET", "/api/guard/near/execution/chain/anything", {}, None)
+    assert resp.status == 200
+    assert resp.payload["enabled"] is False
+    assert resp.payload["chain"] is None
+
+
+def test_the_chain_list_route_reports_every_stored_chain():
+    api, rpc = _api_with_chain()
+    tx_hash = _settle(api, rpc)
+    resp = api.dispatch("GET", "/api/guard/near/execution/chains", {}, None)
+    assert resp.status == 200
+    assert resp.payload["enabled"] is True
+    hashes = {c["tx_hash"] for c in resp.payload["chains"]}
+    assert tx_hash in hashes
+    assert all(c["bound"] for c in resp.payload["chains"])
+
+
+def test_the_chain_route_never_confirms_an_unauthorized_run():
+    # A refused operation never reaches the chain, so the reviewer route has
+    # nothing to show: the absence is the honest answer.
+    api, _ = _api_with_chain()
+    blocked = _post(
+        api, "/api/guard/near/execution/prepare", _prepare_body(receiver_id="attacker.testnet")
+    )
+    assert blocked.payload["authorized"] is False
+    resp = api.dispatch("GET", "/api/guard/near/execution/chains", {}, None)
+    assert resp.payload["chains"] == []

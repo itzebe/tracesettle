@@ -439,3 +439,92 @@ def test_http_lifecycle_routes_are_absent_without_the_flag(monkeypatch):
         status, body = _post(base + "/api/guard/near/lifecycle", {"transaction": {}})
         assert status == 404
         assert "not enabled" in json.dumps(body)
+
+
+# --- real HTTP: the evidence chain is inspectable through the server --------
+
+
+def test_http_evidence_chain_route_is_reachable_and_bound(monkeypatch):
+    """The reviewer route must answer over a real socket, not only via dispatch.
+
+    A route registered in ``GuardAPI`` but not reachable through the server's
+    dispatch would pass every direct-call test and fail in the product. This
+    drives the real server: a settled transaction's chain is read back and its
+    bindings re-checked by the route itself.
+    """
+    import base64
+
+    from near_helpers import (
+        RECIPIENT,
+        SIGNER,
+        TEST_SEED,
+        make_boundary,
+    )
+    from tracesettle.base58 import b58decode
+    from tracesettle.near import ed25519
+    from tracesettle.near.ledger import SubmissionLedger
+    from tracesettle.near.pipeline import NearExecutionPipeline
+    from tracesettle.near.tee_signing import EvidenceChainStore
+
+    boundary, rpc = make_boundary()
+    boundary.pipeline = NearExecutionPipeline(
+        boundary, ledger=SubmissionLedger(), chain_store=EvidenceChainStore()
+    )
+    # The server builds its own boundary from config; substitute ours so the
+    # route and the test share one chain store. Nothing else is faked.
+    monkeypatch.setattr("tracesettle.ui._build_near_execution", lambda _service: boundary)
+
+    with running_server() as base:
+        status, prepared = _post(
+            base + "/api/guard/near/execution/prepare",
+            {
+                "service_id": "treasury-agent",
+                "account_id": SIGNER,
+                "public_key": "ed25519:" + _b58(ed25519.public_key(TEST_SEED)),
+                "receiver_id": RECIPIENT,
+                "asset": "near:native",
+                "amount": "1",
+            },
+        )
+        assert status == 200, prepared
+        tx_hash = prepared["transaction"]["tx_hash"]
+        signature = base64.b64encode(ed25519.sign(b58decode(tx_hash), TEST_SEED)).decode()
+        rpc.send_result = {
+            "final_execution_status": "FINAL",
+            "status": {"SuccessValue": ""},
+            "transaction": {
+                "hash": tx_hash,
+                "signer_id": SIGNER,
+                "receiver_id": RECIPIENT,
+                "nonce": prepared["transaction"]["nonce"],
+                "actions": [{"Transfer": {"deposit": str(10**24)}}],
+            },
+            "transaction_outcome": {
+                "block_hash": prepared["transaction"]["block_hash"],
+                "outcome": {"logs": []},
+            },
+            "receipts_outcome": [],
+        }
+        status, submitted = _post(
+            base + "/api/guard/near/execution/submit",
+            {"prepare_id": prepared["prepare_id"], "signature": signature},
+        )
+        assert status == 200, submitted
+
+        status, body = _get(base + f"/api/guard/near/execution/chain/{tx_hash}")
+        assert status == 200, body
+        assert body["enabled"] is True
+        assert body["binding"]["bound"] is True, body["binding"]["failures"]
+        assert body["chain"]["tx_hash"] == tx_hash
+        assert body["chain"]["stages"]["SETTLEMENT"]["all_checks_passed"] is True
+        assert "private" not in json.dumps(body).lower()
+
+        status, listing = _get(base + "/api/guard/near/execution/chains")
+        assert status == 200
+        assert tx_hash in {c["tx_hash"] for c in listing["chains"]}
+
+
+def _b58(raw: bytes) -> str:
+    from near_helpers import b58encode
+
+    return b58encode(raw)

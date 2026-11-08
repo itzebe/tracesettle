@@ -32,6 +32,32 @@ fi
 rustup target add "$TARGET" 2>/dev/null || true
 mkdir -p dist
 
+# The compiler embeds the absolute path of every dependency source it reads
+# (cargo's registry cache) into the artifact, so a build under a different
+# CARGO_HOME produces different bytes even with identical source, lockfile and
+# compiler. Remap the builder's cargo home to the fixed prefix baked into the
+# approved artifact, so the bytes identify the *inputs*, not the machine that
+# built them.
+#
+# The prefix below is not a preference: it is the cargo-home prefix the approved
+# artifact `eb705a61554fc982…` was compiled under (the Mission 25 build
+# environment), and that hash is what the on-chain TEE run attested. The crate's
+# own directory is not embedded, so CARGO_HOME is the only machine-specific
+# input — measured with `--remap-path-prefix` from two different homes.
+CANONICAL_CARGO_HOME="${TRACESETTLE_BUILD_CARGO_HOME:-/home/openhands/.cargo}"
+if [ -n "${CARGO_HOME:-}" ]; then
+    ACTUAL_CARGO_HOME="$CARGO_HOME"
+elif [ -n "${HOME:-}" ]; then
+    ACTUAL_CARGO_HOME="$HOME/.cargo"
+else
+    ACTUAL_CARGO_HOME=""
+fi
+if [ -n "$ACTUAL_CARGO_HOME" ] && [ "$ACTUAL_CARGO_HOME" != "$CANONICAL_CARGO_HOME" ]; then
+    REMAP="--remap-path-prefix=$ACTUAL_CARGO_HOME=$CANONICAL_CARGO_HOME"
+    export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }$REMAP"
+    echo "Path remap: $ACTUAL_CARGO_HOME -> $CANONICAL_CARGO_HOME"
+fi
+
 build() {
     local variant=$1 features=$2 out="dist/tracesettle-signing-module$3.wasm"
     echo ""

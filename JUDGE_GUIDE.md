@@ -81,7 +81,11 @@ machine-readable contract is at `/api/agent/openapi.json` and the scope at
 | The signer that refuses before executing | `tracesettle/guard/signer.py` |
 | NEAR settlement verification | `tracesettle/near/verify.py` |
 | TEE signing boundary (OutLayer Signing Keys) | `tracesettle/near/tee_signing/` |
-| Structural invariants (60) | `tracesettle/guard/invariants.py` |
+| Reproducible-build identity + verifier | `tracesettle/near/tee_signing/build_verify.py` |
+| Independent attestation verifier | `tracesettle/near/tee_signing/outlayer_attestation.py` |
+| Authorization→settlement evidence chain | `tracesettle/near/tee_signing/evidence_chain.py` |
+| The reviewer CLI | `tracesettle/tee_verify_cli.py` |
+| Structural invariants (62) | `tracesettle/guard/invariants.py` |
 
 ## What the ten scenarios prove
 
@@ -120,8 +124,44 @@ python3 -m tracesettle serve --host 127.0.0.1 --port 8000 &
 curl -s localhost:8000/api/guard/invariants | python3 -m json.tool | tail -5
 ```
 
-60 structural invariants are asserted by execution, not by prose. Each one is mutation-tested: a
+62 structural invariants are asserted by execution, not by prose. Each one is mutation-tested: a
 checker that cannot fail is treated as a defect. You can also read the statements next to the results.
+
+## Verify the enclave trust chain yourself (no key, no network)
+
+The TEE signing claim is inspectable with the shipped captures and the reviewer CLI. Every command
+below runs offline and exits non-zero on any failure.
+
+```bash
+# 1. The build identity. The pinned rustc must reproduce the approved bytes.
+python3 -m tracesettle guest verify
+
+# 2. The attestation. Verifies the TDX quote to the pinned Intel root, the
+#    report_data Task-Hash commitment, the worker measurement, the on-chain
+#    worker approval, and the input/output payload hashes.
+python3 -m tracesettle attestation verify \
+    --record tracesettle/near/fixtures/onchain_tee_attestation.json
+
+# 3. The signature. Recomputes sha256(unsigned_bytes) and verifies ed25519 over
+#    it, and reports the on-chain transaction hash the signature produces.
+python3 -c "import json;print(json.dumps(json.load(open('tracesettle/near/fixtures/onchain_tee_run.json'))['sign_transaction']['output']))" > /tmp/signing.json
+python3 -m tracesettle signature verify /tmp/signing.json
+
+# 4. The evidence chain. Re-checks that authorization, the exact signed bytes,
+#    the attestation, the broadcast hash and the settlement all name one
+#    transaction.
+python3 -m tracesettle chain verify <evidence-chain.json>
+```
+
+To rebuild the guest bytes yourself you need Rust; the pinned toolchain is in
+`rust-toolchain.toml` and the full procedure is in
+`evidence/mission26/reproducible_build.md`. Without Rust, step 1 still checks the
+recorded identity, the toolchain pin, and — because the approved bytes are
+committed — the artifact hash.
+
+The evidence chain is also on the running site: `GET /api/guard/near/execution/chain/<tx_hash>`
+returns a stored chain with its binding verdict, and `GET /api/guard/near/execution/chains` lists them.
+The build, attestation and signature commands are offline reviewer tools; they are not HTTP routes.
 
 ## Run the full test suite
 
