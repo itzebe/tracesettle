@@ -1,0 +1,114 @@
+{
+  "amount_yocto": 100000000000000000000000,
+  "approved_wasm_sha256": "eb705a61554fc9823e9e11a61aa0192d2d9fdf51280379098c1b480c025dd6d0",
+  "attestation_fetched": true,
+  "balance_delta": 100000000000000000000000,
+  "cost_usd": 0,
+  "execution_tx": "GMpwjDeTXo57PjfmNcXMq6sqFD3F8RwJxfTZ67SJ6nTQ",
+  "fresh_signing_performed": true,
+  "mainnet": false,
+  "network": "testnet",
+  "provenance": {
+    "attestation_level": "INDEPENDENTLY_VERIFIED",
+    "attestation_verified": true,
+    "checks": [
+      {
+        "detail": "252 signed bytes",
+        "holds": true,
+        "name": "signed_bytes_parse"
+      },
+      {
+        "detail": "recomputed sha256:628abe3882566ad3746a54eda17c82d2b35aca7bdbd6a20941b1b7af6d07d529 vs recorded sha256:628abe3882566ad3746a54eda17c82d2b35aca7bdbd6a20941b1b7af6d07d529",
+        "holds": true,
+        "name": "digest_matches_signed_bytes"
+      },
+      {
+        "detail": "b58(digest) = 7dffFM6trTHVRUEBYXVnLscASersQA29RktWfSmvnMZ2",
+        "holds": true,
+        "name": "tx_hash_is_b58_of_digest"
+      },
+      {
+        "detail": "ed25519 signature verified over the recomputed digest",
+        "holds": true,
+        "name": "signature_verifies_over_digest"
+      },
+      {
+        "detail": "a receipt SuccessValue hashes to the attested output hash 7da73eb03d985695268be022\u2026",
+        "holds": true,
+        "name": "enclave_output_hash_binds_the_receipt"
+      },
+      {
+        "detail": "the attested output, parsed, equals the signing output field-for-field",
+        "holds": true,
+        "name": "attested_output_is_this_signing_output"
+      },
+      {
+        "detail": "INDEPENDENTLY_VERIFIED",
+        "holds": true,
+        "name": "attestation_verified"
+      }
+    ],
+    "enclave_output_hash": "7da73eb03d985695268be022e9b5e4409366e093084b66f29b3fda361273558a",
+    "failures": [],
+    "level": "TEE_SIGNING_VERIFIED",
+    "note": "",
+    "public_key": "ed25519:H3dd94sk1df1t2PVyQWjD9cyzDAKh2WceAFmP3tWdC2a",
+    "recomputed_output_hash": "7da73eb03d985695268be022e9b5e4409366e093084b66f29b3fda361273558a",
+    "tee_signing_verified": true,
+    "transaction_digest": "sha256:628abe3882566ad3746a54eda17c82d2b35aca7bdbd6a20941b1b7af6d07d529",
+    "tx_hash": "7dffFM6trTHVRUEBYXVnLscASersQA29RktWfSmvnMZ2",
+    "verified": true
+  },
+  "recipient": "ts-m29-dca6d7.testnet",
+  "restart_reverification": {
+    "amount_base": "100000000000000000000000",
+    "checks": [
+      {
+        "detail": "336 base64 chars",
+        "holds": true,
+        "name": "signed_bytes_present"
+      },
+      {
+        "detail": "sha256 of the persisted unsigned bytes",
+        "holds": true,
+        "name": "digest_recomputed"
+      },
+      {
+        "detail": "the bytes re-serialize to the same bytes",
+        "holds": true,
+        "name": "decode_round_trips"
+      },
+      {
+        "detail": "ed25519 signature re-verified over the recomputed digest",
+        "holds": true,
+        "name": "signature_verifies_over_digest"
+      },
+      {
+        "detail": "the decoded fields agree with the durable record",
+        "holds": true,
+        "name": "record_matches_signed_bytes"
+      }
+    ],
+    "destination": "ts-m29-dca6d7.testnet",
+    "digest_source": "recomputed_from_persisted_signed_bytes",
+    "failures": [],
+    "public_key": "ed25519:H3dd94sk1df1t2PVyQWjD9cyzDAKh2WceAFmP3tWdC2a",
+    "receiver_id": "ts-m29-dca6d7.testnet",
+    "signature_algorithm": "ed25519",
+    "signer_id": "ee678ff2b2243fa83e63582f7e017027470be84c55f8deaef87f72244f1a6fb7",
+    "state": "VERIFIED",
+    "transaction_digest": "sha256:628abe3882566ad3746a54eda17c82d2b35aca7bdbd6a20941b1b7af6d07d529",
+    "tx_hash": "7dffFM6trTHVRUEBYXVnLscASersQA29RktWfSmvnMZ2",
+    "verified": true
+  },
+  "served_wasm_sha256": "eb705a61554fc9823e9e11a61aa0192d2d9fdf51280379098c1b480c025dd6d0",
+  "settlement_ok": true,
+  "signature_verifies_over_authorized_digest": true,
+  "submission_ok": true,
+  "tee_account": "ee678ff2b2243fa83e63582f7e017027470be84c55f8deaef87f72244f1a6fb7",
+  "tee_public_key": "ed25519:H3dd94sk1df1t2PVyQWjD9cyzDAKh2WceAFmP3tWdC2a",
+  "transaction_digest": "sha256:628abe3882566ad3746a54eda17c82d2b35aca7bdbd6a20941b1b7af6d07d529",
+  "transaction_hash": "7dffFM6trTHVRUEBYXVnLscASersQA29RktWfSmvnMZ2",
+  "worker_approval_detail": "worker.outlayer.testnet.is_measurements_approved -> True",
+  "worker_approved": true
+}

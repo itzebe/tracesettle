@@ -1,0 +1,35 @@
+{
+  "mission": 27,
+  "method": "cross-process restart: sign in process A, verify in a fresh python -c process B",
+  "network": "testnet",
+  "mainnet": false,
+  "network_calls": 0,
+  "phase_a": {
+    "tx_hash": "2ek4WJevFsMYXdjhUSVYXp7fj2uT3ic2SYcBE6THZpPK",
+    "signer": "agent.testnet",
+    "receiver": "alice.testnet"
+  },
+  "phase_b_fresh_process": {
+    "verified": true,
+    "state": "VERIFIED",
+    "transaction_digest": "sha256:1886dd8e3ba4df1d7473b46d27ccc408f40671fd2e557235b4fa54cde88d4aaa",
+    "digest_source": "recomputed_from_persisted_signed_bytes",
+    "public_key": "ed25519:FAe4sisG95oZ42w7buUn5qEE4TAnfTTFPiguZUHmhiF",
+    "checks": {
+      "signed_bytes_present": true,
+      "digest_recomputed": true,
+      "decode_round_trips": true,
+      "signature_verifies_over_digest": true,
+      "record_matches_signed_bytes": true
+    }
+  },
+  "phase_c_tampered_bytes_fail_closed": {
+    "verified": false,
+    "state": "UNVERIFIED",
+    "failures": [
+      "decode_round_trips",
+      "signature_verifies_over_digest",
+      "record_matches_signed_bytes"
+    ]
+  }
+}

@@ -1006,9 +1006,9 @@ a bare interpreter.
 python -m pytest tests/ --collect-only -q   # 1986 tests collected
 python -m pytest tests/ -q                  # 1952 passed, 34 skipped
 ```
-→ `1934 passed, 34 skipped`. The skips are the PostgreSQL integration
+→ `1952 passed, 34 skipped`. The skips are the PostgreSQL integration
 tests; set `TRACESETTLE_TEST_PG_DSN` to a real server to run them
-(**1958 passed, 10 skipped** — the remaining 10 are opt-in *live-infrastructure*
+(**1976 passed, 10 skipped** — the remaining 10 are opt-in *live-infrastructure*
 tests that need real provider credentials, a testnet key, a TDX enclave
 harness, or a live OutLayer signing credential, none of which a zero-budget
 local run has).
