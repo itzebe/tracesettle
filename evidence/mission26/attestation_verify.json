@@ -1,0 +1,74 @@
+{
+  "claims": [
+    {
+      "detail": "signature chain to the pinned Intel SGX Root CA",
+      "holds": true,
+      "name": "quote_authentic"
+    },
+    {
+      "detail": "report_data[0:32] = f91d8cd0e029775d719951ab7938abb545cfc8b84b1306671992e3696932d194",
+      "holds": true,
+      "name": "task_hash_bound"
+    },
+    {
+      "detail": "record 70ff63a49a8e12490ea4eba7\u2026 vs quote rt_mr3 70ff63a49a8e12490ea4eba7\u2026",
+      "holds": true,
+      "name": "worker_measurement_matches_quote"
+    },
+    {
+      "detail": "worker.outlayer.testnet.is_measurements_approved -> True",
+      "holds": true,
+      "name": "worker_measurement_approved"
+    },
+    {
+      "detail": "attested eb705a61554fc9823e9e11a6\u2026 vs approved eb705a61554fc9823e9e11a6\u2026",
+      "holds": true,
+      "name": "approved_build"
+    },
+    {
+      "detail": "the executed artifact is the one the record names",
+      "holds": true,
+      "name": "executed_wasm_matches_named_wasm"
+    },
+    {
+      "detail": "record names 9aqdmyBq4GE7zhvnwHcgGVU9mfyUrx4KbKRG26TuierY",
+      "holds": true,
+      "name": "execution_binding"
+    },
+    {
+      "detail": "sha256(input_data) equals the attested input hash",
+      "holds": true,
+      "name": "input_hash_bound"
+    },
+    {
+      "detail": "a receipt SuccessValue hashes to the attested output hash",
+      "holds": true,
+      "name": "output_hash_bound"
+    }
+  ],
+  "execution_tx_hash": "9aqdmyBq4GE7zhvnwHcgGVU9mfyUrx4KbKRG26TuierY",
+  "failures": [],
+  "input_hash": "f382d6ee6043f5a38eca6c5cfb1203a5244a2a05011ab56179719f554693b6d6",
+  "level": "INDEPENDENTLY_VERIFIED",
+  "measurement_approved": true,
+  "note": "",
+  "output_hash": "5ef45840e066e25e6ee75eab164242145246c3dc12658ff64bc8555e8f0555af",
+  "provider_trusted_only": false,
+  "quote_checks": {
+    "attestation_key_bound_to_qe": true,
+    "pck_chain_links_valid": true,
+    "pck_leaf_within_validity": true,
+    "qe_report_signed_by_pck_leaf": true,
+    "qe_vendor_id_is_intel": true,
+    "quote_signature_valid": true,
+    "root_is_self_signed": true,
+    "root_matches_pinned_intel_root": true
+  },
+  "quote_verified": true,
+  "report_data": "f91d8cd0e029775d719951ab7938abb545cfc8b84b1306671992e3696932d1940000000000000000000000000000000000000000000000000000000000000000",
+  "task_hash": "f91d8cd0e029775d719951ab7938abb545cfc8b84b1306671992e3696932d194",
+  "transaction_hash": "9aqdmyBq4GE7zhvnwHcgGVU9mfyUrx4KbKRG26TuierY",
+  "verified": true,
+  "wasm_hash": "eb705a61554fc9823e9e11a61aa0192d2d9fdf51280379098c1b480c025dd6d0",
+  "worker_measurement": "70ff63a49a8e12490ea4eba71272e9f7cb29ee5c33394c1b0f1b329ba5fdfdce3673a865f89e2e76723702d9d05bc726"
+}

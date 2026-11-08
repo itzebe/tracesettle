@@ -28,6 +28,17 @@ def b58decode(value: str) -> bytes | None:
     return b"\x00" * pad + body
 
 
+def b58encode(raw: bytes) -> str:
+    """Encode bytes as base58. The inverse of :func:`b58decode`."""
+    num = int.from_bytes(raw, "big")
+    out = ""
+    while num:
+        num, rem = divmod(num, 58)
+        out = BASE58_ALPHABET[rem] + out
+    pad = len(raw) - len(raw.lstrip(b"\x00"))
+    return "1" * pad + (out or "")
+
+
 def b58check_decode(value: str) -> bytes | None:
     """Decode a Base58Check string and return its payload, or ``None``.
 

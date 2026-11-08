@@ -28,6 +28,7 @@ produced inside an enclave.
 from __future__ import annotations
 
 import base64
+import hashlib
 import time
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -37,6 +38,12 @@ from . import ed25519
 from .execution import NearExecutionBoundary, PreparedOperation
 from .ledger import SubmissionLedger, SubmissionRecord, SubmissionState
 from .networks import NearNetwork
+from .tee_signing.evidence_chain import (
+    EvidenceChain,
+    EvidenceChainStore,
+    build_evidence_chain,
+    verify_chain_bindings,
+)
 from .txbuild import NearTransaction
 from .verify import SettlementState, SettlementVerification, verify_transaction
 
@@ -136,12 +143,16 @@ class NearExecutionPipeline:
         ledger: SubmissionLedger | None = None,
         finality_attempts: int = 8,
         finality_delay: float = 1.0,
+        chain_store: EvidenceChainStore | None = None,
     ) -> None:
         self.boundary = boundary
         self.ledger = ledger if ledger is not None else SubmissionLedger()
         self.config = boundary.config
         self.finality_attempts = finality_attempts
         self.finality_delay = finality_delay
+        #: Optional durable evidence chain. ``None`` means the pipeline does not
+        #: persist one; the chain is still built and attached to the result.
+        self.chain_store = chain_store
 
     # -- independent pre-sign checks --------------------------------------
 
@@ -390,6 +401,10 @@ class NearExecutionPipeline:
         record.settlement = verification.to_dict()
         self.ledger.put(record)
 
+        chain = self._build_chain(record, prepared, verification)
+        if chain is not None and self.chain_store is not None:
+            self.chain_store.put(chain)
+
         # Mirror the outcome onto the TEE execution record when one exists.
         if (
             prepared is not None
@@ -412,6 +427,125 @@ class NearExecutionPipeline:
                 "explorer_url": self.config.explorer_url(record.tx_hash),
             },
         )
+
+    # -- evidence chain ----------------------------------------------------
+
+    def _build_chain(
+        self,
+        record: SubmissionRecord,
+        prepared: PreparedOperation | None,
+        verification: SettlementVerification,
+    ) -> EvidenceChain | None:
+        """Assemble the authorization-to-settlement chain from the real facts.
+
+        Everything here is read from the objects the pipeline already holds. When
+        the prepared operation is absent (a recovery of a record we did not
+        rebuild) the earlier stages are simply absent — never invented.
+        """
+        digest = ""
+        authorization = None
+        transaction = None
+        if prepared is not None:
+            digest = prepared.transaction.payload_fingerprint()
+            auth = prepared.authorization
+            authorization = {
+                "id": prepared.authorization_id or getattr(auth, "authorization_id", ""),
+                "decision": prepared.decision.decision.value,
+                "policy_version": getattr(auth, "policy_version", ""),
+                "digest": getattr(auth, "fingerprint", ""),
+                "expiry": getattr(auth, "expires_at", ""),
+                "network": prepared.transaction.network.value,
+                "transaction_digest": digest,
+                "receiver_account": prepared.transaction.receiver_id,
+                "amount_base": str(prepared.transaction.amount_base),
+            }
+            transaction = {
+                "signer_id": prepared.transaction.signer_id,
+                "public_key": prepared.transaction.public_key,
+                "receiver_id": prepared.transaction.receiver_id,
+                "amount_base": str(prepared.transaction.amount_base),
+                "destination": prepared.transaction.destination,
+                "nonce": prepared.transaction.nonce,
+                "block_hash": prepared.transaction.block_hash,
+                "network": prepared.transaction.network.value,
+                "transaction_digest": digest,
+                "unsigned_bytes_sha256": digest.replace("sha256:", ""),
+            }
+        if not digest:
+            # Recover the digest from the exact signed bytes, which the record holds.
+            digest = (
+                "sha256:" + hashlib.sha256(self._unsigned_from_record(record)).hexdigest()
+                if record.signed_b64
+                else ""
+            )
+
+        signing = {
+            "route": "onchain",
+            "public_key": getattr(prepared.transaction, "public_key", "") if prepared else "",
+            "transaction_digest": digest,
+            "tx_hash": record.tx_hash,
+            # The record only holds ``signed_b64`` because ``accept_signature``
+            # verified the ed25519 signature over this transaction's hash and then
+            # consumed the single-use authorization. A record without signed bytes
+            # never passed that gate, so this is a recorded fact, not a proxy on
+            # how far settlement got.
+            "signature_verified": bool(record.signed_b64),
+        }
+        # Carry the signature itself, recovered from the exact signed bytes the
+        # ledger holds, so a reviewer can re-verify it rather than trust the
+        # ``signature_verified`` flag. ``accept_signature`` already checked it, so
+        # this is recovery of a recorded fact, not a new trust.
+        if record.signed_b64:
+            try:
+                raw_signature = NearTransaction.signature_from_signed(
+                    base64.b64decode(record.signed_b64)
+                )
+                if raw_signature:
+                    signing["signature_b64"] = base64.b64encode(raw_signature).decode("ascii")
+            except (ValueError, TypeError):
+                pass
+        chain = build_evidence_chain(
+            transaction_digest=digest,
+            authorization=authorization,
+            transaction=transaction,
+            signing=signing,
+            submission={"tx_hash": record.tx_hash, "state": record.state},
+            settlement={
+                "state": verification.state.value,
+                "tx_hash": record.tx_hash,
+                "receiver": record.receiver_id,
+                "amount_base": record.amount_base,
+                "all_checks_passed": verification.all_ok,
+                "failed_checks": [c.name for c in verification.failed_checks()],
+                "sources": [verification.source_status] if verification.source_status else [],
+            },
+            network=record.network,
+            tx_hash=record.tx_hash,
+        )
+        return chain
+
+    def _unsigned_from_record(self, record: SubmissionRecord) -> bytes:
+        """The exact signed transaction bytes, without the signature trailer."""
+        from .txbuild import NearTransaction
+
+        return NearTransaction.unsigned_from_signed_b64(record.signed_b64)
+
+    def verify_evidence_chain(self, tx_hash: str) -> dict[str, Any] | None:
+        """Re-check a stored chain's bindings. ``None`` when no chain is stored."""
+        if self.chain_store is None:
+            return None
+        chain = self.chain_store.get(tx_hash)
+        if chain is None:
+            return None
+        binding = verify_chain_bindings(chain)
+        return {
+            "tx_hash": chain.tx_hash,
+            "transaction_digest": chain.transaction_digest,
+            "chain_digest": chain.digest(),
+            "bound": binding.bound,
+            "checks": binding.checks,
+            "failures": binding.failures,
+        }
 
     # -- recovery ----------------------------------------------------------
 

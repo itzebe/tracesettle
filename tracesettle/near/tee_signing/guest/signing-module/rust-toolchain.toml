@@ -1,0 +1,10 @@
+[toolchain]
+# The guest artifact is toolchain-sensitive: a different rustc produces a
+# different wasm (the compiler commit is embedded in the `producers` section and
+# the codegen differs), so the approved-build identity is only reproducible with
+# the compiler that produced it. 1.99.1 is the version the published artifact
+# `eb705a61…` was built with; see evidence/mission26/reproducible_build.md.
+channel = "1.99.1"
+components = ["rustfmt"]
+targets = ["wasm32-wasip2"]
+profile = "minimal"

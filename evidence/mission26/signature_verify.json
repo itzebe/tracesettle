@@ -1,0 +1,11 @@
+{
+  "claimed_transaction_digest": "d04c4090dd83727874a059b2260d2fb7073155141c3cd91a4482e42ecf61aa8a",
+  "claimed_tx_hash": "F27Erv42DhGhaTqNXPhsf5KXedfQvP3cd1Vbz9aZnQPj",
+  "public_key": "ed25519:H3dd94sk1df1t2PVyQWjD9cyzDAKh2WceAFmP3tWdC2a",
+  "rebuilt_from_structured_request_matches": null,
+  "recomputed_digest_matches_claim": true,
+  "recomputed_transaction_digest": "d04c4090dd83727874a059b2260d2fb7073155141c3cd91a4482e42ecf61aa8a",
+  "recomputed_tx_hash": "F27Erv42DhGhaTqNXPhsf5KXedfQvP3cd1Vbz9aZnQPj",
+  "signature_verified_over_the_digest": true,
+  "signed_bytes_len": 255
+}

@@ -295,6 +295,10 @@ def build_parser() -> argparse.ArgumentParser:
     _add_store(revoke)
     revoke.set_defaults(func=_cmd_credentials_revoke)
 
+    from .tee_verify_cli import add_reviewer_subcommands
+
+    add_reviewer_subcommands(sub)
+
     return parser
 
 

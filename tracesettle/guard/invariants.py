@@ -4458,7 +4458,97 @@ def _near_onchain_tee_signing_reproduces_the_products_digest():
     )
 
 
+def _near_evidence_chain_reverifies_the_signature():
+    """The evidence chain must re-verify the signature, not only compare strings.
 
+    Probes, so the check is not a blanket refusal. It assembles the chain from the
+    real 2026-11-07 on-chain capture (``near/fixtures/onchain_tee_run.json``) and:
+
+    (a) requires the assembled chain to be ``bound`` with the signature check
+        present and holding — a signature that did not verify would fail here;
+    (b) tampers one signature byte (every string field unchanged) and requires the
+        chain to break — a check that only compared strings would pass this, so
+        the invariant fails if the cryptographic re-verification is removed.
+    """
+    import base64 as _b64
+    import json as _json
+    import pathlib as _pathlib
+
+    from ..near.tee_signing.evidence_chain import build_evidence_chain, verify_chain_bindings
+
+    name = "near_evidence_chain_reverifies_the_signature"
+    path = (
+        _pathlib.Path(__file__).resolve().parents[1]
+        / "near"
+        / "fixtures"
+        / "onchain_tee_run.json"
+    )
+    run = _json.loads(path.read_text(encoding="utf-8"))
+    sign = run["sign_transaction"]["output"]
+    settle = run["settlement"]
+    digest = sign["transaction_digest"]
+
+    def _assemble() -> object:
+        return build_evidence_chain(
+            transaction_digest=digest,
+            authorization={
+                "id": sign["authorization_id"],
+                "decision": "ALLOW",
+                "transaction_digest": digest,
+                "network": sign["network"],
+                "receiver_account": sign["receiver_id"],
+                "amount_base": sign["amount_base"],
+            },
+            transaction={
+                "signer_id": sign["signer_id"],
+                "public_key": sign["public_key"],
+                "receiver_id": sign["receiver_id"],
+                "amount_base": sign["amount_base"],
+                "network": sign["network"],
+                "transaction_digest": digest,
+            },
+            signing={
+                "public_key": sign["public_key"],
+                "approved_build": sign["approved_build"],
+                "network": sign["network"],
+                "transaction_digest": digest,
+                "signature_b64": sign["signature"],
+                "receiver_account": sign["receiver_id"],
+                "amount_base": sign["amount_base"],
+                "signature_verified": sign["signature_verified_in_guest"],
+                "tx_hash": sign["tx_hash"],
+            },
+            submission={"tx_hash": settle["tx_hash"]},
+            settlement={"tx_hash": settle["tx_hash"], "amount_base": str(settle["amount_yocto"])},
+            network=sign["network"],
+            tx_hash=sign["tx_hash"],
+        )
+
+    chain = _assemble()
+    binding = verify_chain_bindings(chain)
+    if not binding.bound:
+        return InvariantResult(name, False, f"the real capture did not assemble into a bound chain: {binding.failures}")
+    by_name = {c["name"]: c for c in binding.checks}
+    if "signature_verifies_over_the_digest" not in by_name or not by_name["signature_verifies_over_the_digest"]["holds"]:
+        return InvariantResult(name, False, "the chain did not re-verify the signature it carries")
+
+    tampered = _assemble()
+    raw = bytearray(_b64.b64decode(sign["signature"]))
+    raw[0] ^= 0x01
+    tampered.put("SIGNATURE", signature_b64=_b64.b64encode(bytes(raw)).decode())
+    if verify_chain_bindings(tampered).bound:
+        return InvariantResult(
+            name,
+            False,
+            "a chain carrying a signature that does not verify was still reported bound",
+        )
+
+    return InvariantResult(
+        name,
+        True,
+        "the real run's chain is bound with the signature re-verified over the recorded digest; a "
+        "single flipped signature byte breaks the chain though every string field still agrees",
+    )
 
 
 INVARIANTS: dict[str, Callable[[], InvariantResult]] = {
@@ -4571,6 +4661,9 @@ INVARIANTS: dict[str, Callable[[], InvariantResult]] = {
     "near_onchain_tee_signing_reproduces_the_products_digest": (
         _near_onchain_tee_signing_reproduces_the_products_digest
     ),
+    "near_evidence_chain_reverifies_the_signature": (
+        _near_evidence_chain_reverifies_the_signature
+    ),
     "service_facing_routes_require_a_credential": (
         _service_facing_routes_require_a_credential
     ),
@@ -4644,6 +4737,7 @@ INVARIANT_DESCRIPTIONS: dict[str, str] = {
     "agent_surface_is_sandbox_scoped": "The agent integration is sandbox-scoped: a sandbox credential resolves to a sandbox- identity, the sandbox policy registers no operator service, a cross-service request is refused, and the approval secret is separate from the API credential.",
     "hostile_input_never_crashes_the_guard": "A malformed request is always a decision or a typed refusal, never an unhandled exception: a non-token authorization, an absurd amount exponent and a non-string destination each fail closed.",
     "near_onchain_tee_signing_reproduces_the_products_digest": "The free on-chain TEE route binds the enclave's answer to the product's own digest: the product's transaction builder reproduces the live run's exact digest and hash from the enclave's recorded parameters, the provider parses the real captured answer, and an answer whose digest differs is refused.",
+    "near_evidence_chain_reverifies_the_signature": "The authorization-to-settlement evidence chain re-verifies the ed25519 signature it carries over the recorded digest, so a well-formed signature that does not actually verify breaks the chain even though every string field still agrees.",
 }
 
 

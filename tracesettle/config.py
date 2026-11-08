@@ -534,6 +534,14 @@ NEAR_EXECUTION_TTL_SECONDS = int(
 #: live in memory only; a deployment that broadcasts should set it.
 NEAR_LEDGER_DB = os.environ.get("TRACESETTLE_NEAR_LEDGER_DB", "").strip() or None
 
+#: The durable evidence-chain database (SQLite). When set, the pipeline writes one
+#: authorization-to-settlement record per submitted transaction, and the reviewer
+#: routes can read it back. Unset means chains live in memory only. The chain is
+#: what makes a submission independently inspectable: it binds the authorization,
+#: the exact signed bytes, the attestation, the broadcast hash and the settlement
+#: to one transaction identity.
+NEAR_CHAIN_DB = os.environ.get("TRACESETTLE_NEAR_CHAIN_DB", "").strip() or None
+
 #: How many times to poll the chain for a *final* execution status after a
 #: broadcast before giving up and reporting the last (possibly non-final) state.
 #: A broadcast commonly returns an optimistic status; polling resolves it to a

@@ -16,7 +16,7 @@ FIXTURE_DIR = pathlib.Path(__file__).resolve().parent.parent / "tracesettle" / "
 
 def test_near_invariants_are_registered():
     near = [name for name in inv.INVARIANTS if name.startswith("near_")]
-    assert len(near) == 20
+    assert len(near) == 21
     assert all(name in inv.INVARIANT_DESCRIPTIONS for name in near)
 
 
@@ -532,4 +532,23 @@ def test_onchain_tee_invariant_notices_a_provider_that_accepts_any_digest(monkey
 
     monkeypatch.setattr(onchain_mod.OutLayerOnChainSigningProvider, "_submit", echoing_submit)
     result = inv.INVARIANTS["near_onchain_tee_signing_reproduces_the_products_digest"]()
+    assert result.holds is False
+
+
+def test_evidence_chain_invariant_notices_a_string_only_check(monkeypatch):
+    """If the chain stopped re-verifying the signature, the invariant must fail.
+
+    The mutation neutralises only the cryptographic re-check: the stage strings
+    are still compared, so a chain carrying a signature that does not verify would
+    read as ``bound``. The invariant must notice that the cryptographic guarantee
+    was dropped.
+    """
+    from tracesettle.near.tee_signing import evidence_chain as ec_mod
+
+    monkeypatch.setattr(
+        ec_mod,
+        "_check_signature_over_digest",
+        lambda binding, sig: None,
+    )
+    result = inv.INVARIANTS["near_evidence_chain_reverifies_the_signature"]()
     assert result.holds is False

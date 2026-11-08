@@ -287,6 +287,11 @@ class GuardAPI:
         if path.startswith("/api/guard/near/execution/record/"):
             execution_id = path[len("/api/guard/near/execution/record/") :].strip("/")
             return self._near_execution_record(execution_id)
+        if path.startswith("/api/guard/near/execution/chain/"):
+            tx_hash = path[len("/api/guard/near/execution/chain/") :].strip("/")
+            return self._near_execution_chain(tx_hash)
+        if path == "/api/guard/near/execution/chains":
+            return self._near_execution_chains()
         if path == "/api/guard/near/lifecycle":
             return self._lifecycle_list(params)
         if path == "/api/guard/near/lifecycle/tokens":
@@ -963,6 +968,64 @@ class GuardAPI:
         if record is None:
             return ApiResponse(404, {"error": "unknown execution id"})
         return ApiResponse(200, {"enabled": True, "record": record.to_dict()})
+
+    def _near_execution_chain(self, tx_hash: str) -> ApiResponse:
+        """Return the stored evidence chain for one transaction, re-checked.
+
+        This is the reviewer's view: the assembled authorization-to-settlement
+        record plus the result of re-checking every binding between its stages.
+        ``bound`` is true only when each stage names the same transaction.
+        """
+        pipeline = getattr(self.near_execution, "pipeline", None) if self.near_execution else None
+        if pipeline is None or getattr(pipeline, "chain_store", None) is None:
+            return ApiResponse(
+                200,
+                {
+                    "enabled": False,
+                    "chain": None,
+                    "note": (
+                        "No evidence-chain store is configured. Set "
+                        "TRACESETTLE_NEAR_CHAIN_DB (or enable the NEAR execution "
+                        "boundary) to record authorization-to-settlement chains."
+                    ),
+                },
+            )
+        chain = pipeline.chain_store.get(tx_hash)
+        if chain is None:
+            return ApiResponse(404, {"error": "no evidence chain is stored for that tx hash"})
+        from ..near.tee_signing import verify_chain_bindings
+
+        binding = verify_chain_bindings(chain)
+        return ApiResponse(
+            200,
+            {
+                "enabled": True,
+                "chain": chain.to_dict(),
+                "binding": binding.to_dict(),
+            },
+        )
+
+    def _near_execution_chains(self) -> ApiResponse:
+        """List the stored evidence chains, each with its binding verdict."""
+        pipeline = getattr(self.near_execution, "pipeline", None) if self.near_execution else None
+        if pipeline is None or getattr(pipeline, "chain_store", None) is None:
+            return ApiResponse(200, {"enabled": False, "chains": []})
+        from ..near.tee_signing import verify_chain_bindings
+
+        chains = []
+        for chain in pipeline.chain_store.all():
+            binding = verify_chain_bindings(chain)
+            chains.append(
+                {
+                    "tx_hash": chain.tx_hash,
+                    "transaction_digest": chain.transaction_digest,
+                    "chain_digest": chain.digest(),
+                    "bound": binding.bound,
+                    "failures": binding.failures,
+                    "created_at": chain.created_at,
+                }
+            )
+        return ApiResponse(200, {"enabled": True, "chains": chains})
 
     def _near_execution_owner(self, authenticated_service_id: str | None) -> str:
         """The owner a prepared operation belongs to.
