@@ -4458,6 +4458,166 @@ def _near_onchain_tee_signing_reproduces_the_products_digest():
     )
 
 
+def _near_recorded_signature_survives_a_restart():
+    """The signing event must be independently re-verifiable after a process restart.
+
+    A real pipeline run is driven against a **SQLite** ledger, then the ledger is
+    closed and reopened from the same file (the durable state a fresh process
+    sees) and the signature is re-verified *from the persisted bytes alone* -
+    digest recomputed, ed25519 checked over it, record cross-checked.
+
+    The invariant fails if:
+    (a) the signed bytes are not persisted (a fresh process cannot see them);
+    (b) the reopened record cannot be re-verified, or a tampered byte is still
+        reported VERIFIED - so a verifier that accepts anything fails here;
+    (c) the durable evidence chain, rebuilt after the restart, no longer carries a
+        re-verifiable signature.
+    """
+    import base64 as _b64
+    import tempfile as _tempfile
+    import os as _os
+
+    from ..near.execution import NearExecutionBoundary
+    from ..near.networks import NETWORKS, NearNetwork
+    from ..near.pipeline import NearExecutionPipeline
+    from ..near.ledger import SubmissionLedger
+    from ..near.tee_signing.evidence_chain import EvidenceChainStore, verify_chain_bindings
+    from ..near import ed25519
+
+    name = "near_recorded_signature_survives_a_restart"
+    seed = bytes(range(32))
+    pub = "ed25519:" + _b58(ed25519.public_key(seed))
+    config = NETWORKS[NearNetwork.TESTNET]
+
+    class _Signer:
+        public_key = pub
+
+        def sign(self, message):
+            return ed25519.sign(message, seed)
+
+    def _result(prepared):
+        tx = prepared.transaction
+        return {
+            "final_execution_status": "FINAL",
+            "status": {"SuccessValue": ""},
+            "transaction": {
+                "hash": tx.tx_hash,
+                "signer_id": tx.signer_id,
+                "receiver_id": tx.receiver_id,
+                "nonce": tx.nonce,
+                "actions": [{"Transfer": {"deposit": str(tx.amount_base)}}],
+            },
+            "transaction_outcome": {"outcome": {"logs": []}},
+            "receipts_outcome": [],
+        }
+
+    tmp = _tempfile.mkdtemp()
+    ledger_path = _os.path.join(tmp, "ledger.db")
+    chain_path = _os.path.join(tmp, "chains.db")
+    guard = GuardService(
+        policy=_near_invariant_policy("ok.testnet"),
+        authority=AuthorizationAuthority(
+            key=_INVARIANT_KEY, key_id="i", ephemeral=False, replay_store=InMemoryReplayStore()
+        ),
+    )
+
+    rpc = _PermissionRpc(config, "FullAccess")
+    boundary = NearExecutionBoundary(guard, config, rpc=rpc)
+    pipeline = NearExecutionPipeline(
+        boundary, ledger=SubmissionLedger(ledger_path), chain_store=EvidenceChainStore(chain_path)
+    )
+    prepared = boundary.prepare(
+        service_id="svc",
+        account_id="agent.testnet",
+        public_key=pub,
+        receiver_id="ok.testnet",
+        asset_identifier="near:native",
+        amount_human="1",
+    )
+    if not prepared.authorized:
+        return InvariantResult(name, False, "the invariant could not be exercised: not authorized")
+    rpc.send_result = _result(prepared)
+    rpc.tx_status_result = _result(prepared)
+    pipeline.execute(prepared, _Signer())
+    tx_hash = prepared.transaction.tx_hash
+    pipeline.ledger.close()
+    pipeline.chain_store.close()
+
+    # A fresh process reads only the durable files.
+    ledger2 = SubmissionLedger(ledger_path)
+    chain2 = EvidenceChainStore(chain_path)
+    try:
+        record = ledger2.get(tx_hash)
+        if record is None:
+            return InvariantResult(name, False, "the record did not survive the restart")
+        if not record.signed_b64:
+            return InvariantResult(
+                name, False, "the signed bytes were not persisted; a restart cannot re-verify them"
+            )
+        pipeline2 = NearExecutionPipeline(
+            NearExecutionBoundary(guard, config, rpc=_PermissionRpc(config, "FullAccess")),
+            ledger=ledger2,
+            chain_store=chain2,
+        )
+        verdict = pipeline2.verify_recorded_signature(tx_hash)
+        if not verdict.get("verified"):
+            return InvariantResult(
+                name,
+                False,
+                "a recorded signature could not be independently re-verified after a restart: "
+                + str(verdict.get("failures")),
+            )
+
+        # (b) a tampered signature byte must not verify.
+        tampered = SubmissionLedger()
+        rec2 = ledger2.get(tx_hash)
+        raw = bytearray(_b64.b64decode(rec2.signed_b64))
+        raw[-1] ^= 0x01
+        rec2.signed_b64 = _b64.b64encode(bytes(raw)).decode("ascii")
+        tampered.put(rec2)
+        p3 = NearExecutionPipeline(
+            NearExecutionBoundary(guard, config, rpc=_PermissionRpc(config, "FullAccess")),
+            ledger=tampered,
+        )
+        if p3.verify_recorded_signature(tx_hash).get("verified"):
+            return InvariantResult(
+                name, False, "a tampered signature was reported VERIFIED after a restart"
+            )
+
+        # (c) the durable chain rebuilt after the restart carries a re-verifiable
+        #     signature.
+        chain = chain2.get(tx_hash)
+        if chain is None:
+            return InvariantResult(name, False, "the evidence chain did not survive the restart")
+        sig = chain.stages.get("SIGNATURE", {})
+        if not sig.get("signature_b64") or not sig.get("public_key"):
+            return InvariantResult(
+                name,
+                False,
+                "the durable chain lost the signature or signer key across the restart",
+            )
+        binding = verify_chain_bindings(chain)
+        by_name = {c["name"]: c["holds"] for c in binding.checks}
+        if not binding.bound or by_name.get("signature_verifies_over_the_digest") is not True:
+            return InvariantResult(
+                name,
+                False,
+                "the reopened chain is not bound with a re-verified signature: "
+                + str(binding.failures),
+            )
+    finally:
+        ledger2.close()
+        chain2.close()
+
+    return InvariantResult(
+        name,
+        True,
+        "the exact signed bytes survive a restart; a fresh process recomputes the digest and "
+        "re-verifies the ed25519 signature from them, a tampered byte is refused, and the durable "
+        "evidence chain still carries a re-verifiable signature",
+    )
+
+
 def _near_evidence_chain_reverifies_the_signature():
     """The evidence chain must re-verify the signature, not only compare strings.
 
@@ -4664,6 +4824,9 @@ INVARIANTS: dict[str, Callable[[], InvariantResult]] = {
     "near_evidence_chain_reverifies_the_signature": (
         _near_evidence_chain_reverifies_the_signature
     ),
+    "near_recorded_signature_survives_a_restart": (
+        _near_recorded_signature_survives_a_restart
+    ),
     "service_facing_routes_require_a_credential": (
         _service_facing_routes_require_a_credential
     ),
@@ -4738,6 +4901,7 @@ INVARIANT_DESCRIPTIONS: dict[str, str] = {
     "hostile_input_never_crashes_the_guard": "A malformed request is always a decision or a typed refusal, never an unhandled exception: a non-token authorization, an absurd amount exponent and a non-string destination each fail closed.",
     "near_onchain_tee_signing_reproduces_the_products_digest": "The free on-chain TEE route binds the enclave's answer to the product's own digest: the product's transaction builder reproduces the live run's exact digest and hash from the enclave's recorded parameters, the provider parses the real captured answer, and an answer whose digest differs is refused.",
     "near_evidence_chain_reverifies_the_signature": "The authorization-to-settlement evidence chain re-verifies the ed25519 signature it carries over the recorded digest, so a well-formed signature that does not actually verify breaks the chain even though every string field still agrees.",
+    "near_recorded_signature_survives_a_restart": "The exact signed transaction bytes are durably persisted, so after a process restart a fresh instance recomputes the NEAR digest from them and independently re-verifies the ed25519 signature over it; a tampered byte is refused and the durable evidence chain still carries a re-verifiable signature.",
 }
 
 

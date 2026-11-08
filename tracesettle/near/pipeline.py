@@ -44,7 +44,8 @@ from .tee_signing.evidence_chain import (
     build_evidence_chain,
     verify_chain_bindings,
 )
-from .txbuild import NearTransaction
+from .txbuild import SIGNATURE_TRAILER_LEN, NearTransaction
+from .txdecode import decode_signed_b64
 from .verify import SettlementState, SettlementVerification, verify_transaction
 
 
@@ -242,6 +243,7 @@ class NearExecutionPipeline:
             amount_base=str(tx.amount_base),
             destination=tx.destination,
             signed_b64=signed_b64,
+            signature_algorithm="ed25519",
             idempotency_key=idempotency_key,
         )
         self.ledger.put(record)
@@ -285,6 +287,7 @@ class NearExecutionPipeline:
             amount_base=str(tx.amount_base),
             destination=tx.destination,
             signed_b64=signed_b64,
+            signature_algorithm="ed25519",
             idempotency_key=idempotency_key,
         )
         self.ledger.put(record)
@@ -430,6 +433,47 @@ class NearExecutionPipeline:
 
     # -- evidence chain ----------------------------------------------------
 
+    def _record_facts(self, record: SubmissionRecord) -> dict[str, Any]:
+        """Facts recovered from the exact signed bytes the ledger holds.
+
+        This is what lets the evidence chain be assembled (and the signature
+        re-verified) after a restart, when the original ``PreparedOperation`` is
+        gone: the signer public key, the transaction digest and the signature all
+        come from the persisted bytes, cross-checked against the record's own
+        fields. A decode that fails or disagrees returns an empty dict - the chain
+        then records a limitation rather than a value it cannot vouch for.
+        """
+        facts: dict[str, Any] = {}
+        if not record.signed_b64:
+            return facts
+        try:
+            raw = base64.b64decode(record.signed_b64, validate=True)
+        except (ValueError, TypeError):
+            return facts
+        unsigned = NearTransaction.unsigned_from_signed(raw)
+        facts["transaction_digest"] = "sha256:" + hashlib.sha256(unsigned).hexdigest()
+        signature = NearTransaction.signature_from_signed(raw)
+        if signature:
+            facts["signature_b64"] = base64.b64encode(signature).decode("ascii")
+        try:
+            network = NearNetwork(record.network)
+            decoded = decode_signed_b64(record.signed_b64, network=network)
+        except (ValueError, TypeError):
+            return facts
+        # Only trust the decoded fields when they agree with the durable record;
+        # a disagreement means we cannot vouch for what was signed.
+        if record.signer_id and decoded.signer_id != record.signer_id:
+            return facts
+        if record.receiver_id and decoded.receiver_id != record.receiver_id:
+            return facts
+        if record.amount_base and str(decoded.amount_base) != str(record.amount_base):
+            return facts
+        facts["public_key"] = decoded.public_key
+        facts["signer_id"] = decoded.signer_id
+        facts["receiver_id"] = decoded.receiver_id
+        facts["amount_base"] = str(decoded.amount_base)
+        return facts
+
     def _build_chain(
         self,
         record: SubmissionRecord,
@@ -438,10 +482,14 @@ class NearExecutionPipeline:
     ) -> EvidenceChain | None:
         """Assemble the authorization-to-settlement chain from the real facts.
 
-        Everything here is read from the objects the pipeline already holds. When
-        the prepared operation is absent (a recovery of a record we did not
-        rebuild) the earlier stages are simply absent — never invented.
+        Everything here is read from the objects the pipeline already holds, or
+        from the exact signed bytes the ledger durably stores. When the prepared
+        operation is absent (a recovery of a record we did not rebuild) the
+        authorization stage is simply absent - never invented - but the signature,
+        the digest and the signer key are still recovered from the recorded bytes,
+        so the chain can be re-verified after a restart.
         """
+        durable = self._record_facts(record)
         digest = ""
         authorization = None
         transaction = None
@@ -473,17 +521,26 @@ class NearExecutionPipeline:
             }
         if not digest:
             # Recover the digest from the exact signed bytes, which the record holds.
-            digest = (
-                "sha256:" + hashlib.sha256(self._unsigned_from_record(record)).hexdigest()
-                if record.signed_b64
-                else ""
-            )
+            digest = durable.get("transaction_digest", "")
+        public_key = (
+            prepared.transaction.public_key if prepared is not None else durable.get("public_key", "")
+        )
+
+        # The independent provider-policy / TEE provenance, when a durable
+        # execution record exists for this operation. Read, never invented.
+        execution = None
+        if prepared is not None and prepared.execution_id and self.boundary.tee_authorizer is not None:
+            execution = self.boundary.tee_authorizer.get(prepared.execution_id)
 
         signing = {
             "route": "onchain",
-            "public_key": getattr(prepared.transaction, "public_key", "") if prepared else "",
+            "provider": getattr(execution, "provider", "") if execution is not None else "",
+            "execution_id": prepared.execution_id if prepared is not None else "",
+            "public_key": public_key,
+            "approved_build": self._approved_build(prepared),
             "transaction_digest": digest,
             "tx_hash": record.tx_hash,
+            "signature_algorithm": record.signature_algorithm,
             # The record only holds ``signed_b64`` because ``accept_signature``
             # verified the ed25519 signature over this transaction's hash and then
             # consumed the single-use authorization. A record without signed bytes
@@ -495,20 +552,17 @@ class NearExecutionPipeline:
         # ledger holds, so a reviewer can re-verify it rather than trust the
         # ``signature_verified`` flag. ``accept_signature`` already checked it, so
         # this is recovery of a recorded fact, not a new trust.
-        if record.signed_b64:
-            try:
-                raw_signature = NearTransaction.signature_from_signed(
-                    base64.b64decode(record.signed_b64)
-                )
-                if raw_signature:
-                    signing["signature_b64"] = base64.b64encode(raw_signature).decode("ascii")
-            except (ValueError, TypeError):
-                pass
+        if durable.get("signature_b64"):
+            signing["signature_b64"] = durable["signature_b64"]
+
+        attestation = self._attestation_stage(execution)
+
         chain = build_evidence_chain(
             transaction_digest=digest,
             authorization=authorization,
             transaction=transaction,
             signing=signing,
+            attestation=attestation,
             submission={"tx_hash": record.tx_hash, "state": record.state},
             settlement={
                 "state": verification.state.value,
@@ -523,6 +577,42 @@ class NearExecutionPipeline:
             tx_hash=record.tx_hash,
         )
         return chain
+
+    def _approved_build(self, prepared: PreparedOperation | None) -> str:
+        """The operator-pinned approved build, when one is configured.
+
+        Read from whatever the boundary exposes (the execution boundary itself or
+        a TEE signing boundary it holds). Absent means the chain records a
+        limitation, never a fabricated pin.
+        """
+        for owner in (self.boundary, getattr(self.boundary, "tee_signing_boundary", None)):
+            value = getattr(owner, "approved_build", "")
+            if value:
+                return str(value)
+        return ""
+
+    def _attestation_stage(self, execution: Any) -> dict[str, Any] | None:
+        """The verified-attestation facts for the chain, or ``None`` when absent.
+
+        Only a genuinely bound, verified attestation is recorded. A missing or
+        unverified one leaves the stage absent (a limitation the reviewer sees),
+        never a fabricated claim.
+        """
+        binding = getattr(execution, "tee_binding", None) if execution is not None else None
+        if binding is None:
+            return None
+        verification = dict(binding.verification or {})
+        return {
+            "level": binding.status,
+            "verified": binding.verified,
+            "quote_verified": bool(verification.get("quote_verified", binding.verified)),
+            "worker_measurement": binding.measurement_fingerprint,
+            "measurement_approved": binding.measurement_pinned,
+            # The build the attestation observed, when the verifier recorded it.
+            # Absent means the chain records a limitation, never a fabricated pin.
+            "wasm_hash": str(verification.get("wasm_hash", "") or ""),
+            "failures": list(verification.get("failures", []) or []),
+        }
 
     def _unsigned_from_record(self, record: SubmissionRecord) -> bytes:
         """The exact signed transaction bytes, without the signature trailer."""
@@ -546,6 +636,138 @@ class NearExecutionPipeline:
             "checks": binding.checks,
             "failures": binding.failures,
         }
+
+    def verify_recorded_signature(self, tx_hash: str) -> dict[str, Any]:
+        """Independently re-verify the signing event from the durable record alone.
+
+        This is the capability that must survive a process restart. It reads the
+        exact signed bytes the ledger persisted, **recomputes** the NEAR digest
+        from them (``sha256`` of the Borsh ``Transaction``), and re-runs the
+        ed25519 verification over that digest under the signer key the bytes
+        themselves name. Nothing is re-signed, re-sent or reconstructed from an
+        in-memory object - a fresh process reaches the same verdict.
+
+        The checks are separate and each is named, so a reviewer can see exactly
+        what held:
+
+        * ``signed_bytes_present`` — the durable record carries the signed bytes;
+        * ``digest_recomputed`` — the digest was recomputed from the bytes;
+        * ``decode_round_trips`` — the bytes decode faithfully and re-serialize
+          to the same bytes (an independent, strict decoder);
+        * ``signature_verifies_over_digest`` — the ed25519 signature verifies over
+          the recomputed digest under the signer's own public key;
+        * ``record_matches_signed_bytes`` — the decoded signer, receiver, amount
+          and destination agree with the durable record.
+
+        Fail closed: a missing field, an unparseable blob, a mismatch, or a
+        signature that does not verify all produce ``verified: False`` with the
+        failing check named. ``verified`` is true only when every check holds.
+        """
+        record = self.ledger.get(tx_hash)
+        if record is None:
+            return {
+                "tx_hash": tx_hash,
+                "verified": False,
+                "state": "NOT_FOUND",
+                "note": "no durable submission record exists for this transaction",
+                "checks": [],
+            }
+
+        checks: list[dict[str, Any]] = []
+
+        def add(name: str, holds: bool, detail: str = "") -> None:
+            checks.append({"name": name, "holds": bool(holds), "detail": detail})
+
+        result: dict[str, Any] = {
+            "tx_hash": tx_hash,
+            "signer_id": record.signer_id,
+            "receiver_id": record.receiver_id,
+            "amount_base": record.amount_base,
+            "destination": record.destination,
+            "signature_algorithm": record.signature_algorithm,
+            "verified": False,
+            "state": "UNVERIFIED",
+            "checks": checks,
+        }
+
+        if not record.signed_b64:
+            add("signed_bytes_present", False, "the record carries no signed bytes")
+            result["note"] = "the exact signed bytes were not persisted; cannot re-verify"
+            result["failures"] = [c["name"] for c in checks if not c["holds"]]
+            return result
+        add("signed_bytes_present", True, f"{len(record.signed_b64)} base64 chars")
+
+        try:
+            signed = base64.b64decode(record.signed_b64, validate=True)
+        except (ValueError, TypeError) as exc:
+            add("signed_bytes_parse", False, f"not valid base64: {exc}")
+            result["state"] = "MALFORMED"
+            result["failures"] = [c["name"] for c in checks if not c["holds"]]
+            return result
+        if len(signed) <= SIGNATURE_TRAILER_LEN:
+            add("signed_bytes_parse", False, "too short to carry a signature")
+            result["state"] = "MALFORMED"
+            result["failures"] = [c["name"] for c in checks if not c["holds"]]
+            return result
+
+        unsigned = NearTransaction.unsigned_from_signed(signed)
+        signature = NearTransaction.signature_from_signed(signed)
+        digest = hashlib.sha256(unsigned).digest()
+        result["transaction_digest"] = "sha256:" + digest.hex()
+        result["digest_source"] = "recomputed_from_persisted_signed_bytes"
+        add("digest_recomputed", True, "sha256 of the persisted unsigned bytes")
+
+        # The strict decoder re-serializes from its parse and re-verifies the
+        # signature itself, so a faithful decode is an independent second check.
+        decoded = None
+        try:
+            decoded = decode_signed_b64(record.signed_b64, network=NearNetwork(record.network))
+            add("decode_round_trips", True, "the bytes re-serialize to the same bytes")
+        except (ValueError, TypeError) as exc:
+            add("decode_round_trips", False, f"the bytes do not decode faithfully: {exc}")
+
+        public_key = decoded.public_key if decoded is not None else ""
+        result["public_key"] = public_key
+
+        if decoded is not None:
+            verified = ed25519.verify(
+                signature, digest, decoded.public_key_raw
+            ) and decoded.signature_raw == signature
+            add(
+                "signature_verifies_over_digest",
+                verified,
+                "ed25519 signature re-verified over the recomputed digest"
+                if verified
+                else "the signature does not verify against the recomputed digest and signer key",
+            )
+            agree = (
+                (not record.signer_id or decoded.signer_id == record.signer_id)
+                and (not record.receiver_id or decoded.receiver_id == record.receiver_id)
+                and (not record.amount_base or str(decoded.amount_base) == str(record.amount_base))
+                and (not record.destination or decoded.destination == record.destination)
+            )
+            add(
+                "record_matches_signed_bytes",
+                agree,
+                "the decoded fields agree with the durable record"
+                if agree
+                else "the decoded fields disagree with the durable record",
+            )
+        else:
+            # Without a faithful decode we can still verify the signature over the
+            # recomputed digest *if* the record names the signer key. It does not
+            # store the raw key, so the honest answer is "cannot verify".
+            add(
+                "signature_verifies_over_digest",
+                False,
+                "the signer public key could not be recovered from the bytes",
+            )
+            add("record_matches_signed_bytes", False, "the bytes could not be decoded")
+
+        result["verified"] = all(c["holds"] for c in checks)
+        result["state"] = "VERIFIED" if result["verified"] else "UNVERIFIED"
+        result["failures"] = [c["name"] for c in checks if not c["holds"]]
+        return result
 
     # -- recovery ----------------------------------------------------------
 

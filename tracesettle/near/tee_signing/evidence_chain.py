@@ -210,6 +210,18 @@ def _check_signature_over_digest(binding: ChainBinding, sig: Mapping[str, Any]) 
     digest = str(sig.get("transaction_digest") or "")
     if not (signature_b64 and public_key and digest):
         return
+    # The signature must be verified with the rule its algorithm names. A record
+    # that states an algorithm this product cannot verify is a failure, never a
+    # pass on a signature checked with the wrong scheme.
+    algorithm = str(sig.get("signature_algorithm") or "ed25519").lower()
+    if algorithm not in ("ed25519",):
+        _add(
+            binding,
+            "signature_verifies_over_the_digest",
+            False,
+            f"the signature algorithm {algorithm!r} is not one this product verifies",
+        )
+        return
     try:
         import base64
 
@@ -318,6 +330,7 @@ def build_evidence_chain(
             "SIGNATURE",
             public_key=signing.get("public_key", ""),
             signature_b64=signing.get("signature_b64", ""),
+            signature_algorithm=signing.get("signature_algorithm", ""),
             transaction_digest=signing.get("transaction_digest", transaction_digest),
             receiver_account=signing.get("receiver_account", ""),
             amount_base=str(signing.get("amount_base", "")),

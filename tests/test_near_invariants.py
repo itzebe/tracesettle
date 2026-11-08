@@ -16,7 +16,7 @@ FIXTURE_DIR = pathlib.Path(__file__).resolve().parent.parent / "tracesettle" / "
 
 def test_near_invariants_are_registered():
     near = [name for name in inv.INVARIANTS if name.startswith("near_")]
-    assert len(near) == 21
+    assert len(near) == 22
     assert all(name in inv.INVARIANT_DESCRIPTIONS for name in near)
 
 
@@ -551,4 +551,39 @@ def test_evidence_chain_invariant_notices_a_string_only_check(monkeypatch):
         lambda binding, sig: None,
     )
     result = inv.INVARIANTS["near_evidence_chain_reverifies_the_signature"]()
+    assert result.holds is False
+
+
+def test_durable_signature_invariant_notices_persistence_being_dropped(monkeypatch):
+    """If the ledger stopped persisting the signed bytes, the invariant must fail.
+
+    This is exactly the Mission 27 defect: the serializer omitted ``signed_b64``,
+    so a restart could not re-verify anything. The invariant must notice.
+    """
+    from tracesettle.near import ledger as ledger_mod
+
+    original = ledger_mod.SubmissionRecord.to_dict
+
+    def without_signed_bytes(self):
+        data = original(self)
+        data.pop("signed_b64", None)
+        return data
+
+    monkeypatch.setattr(ledger_mod.SubmissionRecord, "to_dict", without_signed_bytes)
+    result = inv.INVARIANTS["near_recorded_signature_survives_a_restart"]()
+    assert result.holds is False
+
+
+def test_durable_signature_invariant_notices_a_verifier_that_accepts_anything(monkeypatch):
+    """A verifier that reported success without checking must fail the invariant."""
+    from tracesettle.near import pipeline as pipeline_mod
+
+    monkeypatch.setattr(
+        pipeline_mod.NearExecutionPipeline,
+        "verify_recorded_signature",
+        lambda self, tx_hash: {"verified": True, "state": "VERIFIED", "checks": []},
+    )
+    # The invariant also checks a tampered byte is refused, so a blanket accept
+    # must be caught there even though the happy path now always passes.
+    result = inv.INVARIANTS["near_recorded_signature_survives_a_restart"]()
     assert result.holds is False

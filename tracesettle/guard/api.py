@@ -290,6 +290,9 @@ class GuardAPI:
         if path.startswith("/api/guard/near/execution/chain/"):
             tx_hash = path[len("/api/guard/near/execution/chain/") :].strip("/")
             return self._near_execution_chain(tx_hash)
+        if path.startswith("/api/guard/near/execution/signature/"):
+            tx_hash = path[len("/api/guard/near/execution/signature/") :].strip("/")
+            return self._near_execution_signature(tx_hash)
         if path == "/api/guard/near/execution/chains":
             return self._near_execution_chains()
         if path == "/api/guard/near/lifecycle":
@@ -996,14 +999,18 @@ class GuardAPI:
         from ..near.tee_signing import verify_chain_bindings
 
         binding = verify_chain_bindings(chain)
-        return ApiResponse(
-            200,
-            {
-                "enabled": True,
-                "chain": chain.to_dict(),
-                "binding": binding.to_dict(),
-            },
-        )
+        payload: dict[str, Any] = {
+            "enabled": True,
+            "chain": chain.to_dict(),
+            "binding": binding.to_dict(),
+        }
+        # The independent signature re-verification from the persisted bytes. This
+        # is a *separate* claim from the chain binding: the chain compares the
+        # stages, this recomputes the digest from the durable bytes and re-runs
+        # the ed25519 check, so it survives a restart.
+        if hasattr(pipeline, "verify_recorded_signature"):
+            payload["signature_verification"] = pipeline.verify_recorded_signature(tx_hash)
+        return ApiResponse(200, payload)
 
     def _near_execution_chains(self) -> ApiResponse:
         """List the stored evidence chains, each with its binding verdict."""
@@ -1026,6 +1033,29 @@ class GuardAPI:
                 }
             )
         return ApiResponse(200, {"enabled": True, "chains": chains})
+
+    def _near_execution_signature(self, tx_hash: str) -> ApiResponse:
+        """Re-verify the recorded signing event from the durable record alone.
+
+        This is the reviewer's independent check: it recomputes the NEAR digest
+        from the persisted signed bytes and re-runs the ed25519 verification over
+        it, so a fresh process reaches the same verdict without re-signing,
+        re-sending or reconstructing anything in memory.
+        """
+        pipeline = getattr(self.near_execution, "pipeline", None) if self.near_execution else None
+        if pipeline is None or not hasattr(pipeline, "verify_recorded_signature"):
+            return ApiResponse(
+                200,
+                {
+                    "enabled": False,
+                    "note": (
+                        "No durable execution pipeline is configured. Enable the NEAR "
+                        "execution boundary (with a ledger) to re-verify a recorded "
+                        "signature from its persisted bytes."
+                    ),
+                },
+            )
+        return ApiResponse(200, {"enabled": True, "verification": pipeline.verify_recorded_signature(tx_hash)})
 
     def _near_execution_owner(self, authenticated_service_id: str | None) -> str:
         """The owner a prepared operation belongs to.
