@@ -90,6 +90,14 @@ last verified run on this exact commit (`b14110b`, CI run 42513752395) was all
 five jobs green; filesystem `1990 passed / 34 skipped`, PostgreSQL `2014 passed /
 10 skipped`.
 
+On the evidence commit `278456d`, all five GitHub Actions jobs are green
+(Tests and static analysis; PostgreSQL shared-state integration; Docker build and
+runtime; TEE guest digest parity; Vercel container image). The commit's combined
+status is `failure` **only** because the separate Vercel *preview deployment*
+status is rate-limited ("Deployment rate limited — retry in 24 hours"). That is a
+non-code infrastructure limit on the Vercel free tier, not a test, build, or
+security failure; it does not affect any CI job.
+
 ## 8. Exact unblock
 
 1. Start a **fresh OpenHands runtime** (new session) so
