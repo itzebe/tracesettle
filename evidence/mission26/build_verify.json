@@ -2,7 +2,7 @@
   "artifact_present": true,
   "checks": [
     {
-      "detail": "inputs edb57b30e7f993d3\u2026 vs recorded edb57b30e7f993d3\u2026",
+      "detail": "inputs 224f93f7356cb3a4\u2026 vs recorded 224f93f7356cb3a4\u2026",
       "holds": true,
       "name": "build_inputs_match"
     },
@@ -24,8 +24,8 @@
   ],
   "failures": [],
   "holds": true,
-  "input_digest": "edb57b30e7f993d32c5be05bed9218859762452727cbc86df8eb22ab674b25e2",
+  "input_digest": "224f93f7356cb3a4a874c95ed7833fdc0b90f7ebd39d63a39a7676d53aae63f9",
   "observed_sha256": "eb705a61554fc9823e9e11a61aa0192d2d9fdf51280379098c1b480c025dd6d0",
-  "recorded_input_digest": "edb57b30e7f993d32c5be05bed9218859762452727cbc86df8eb22ab674b25e2",
+  "recorded_input_digest": "224f93f7356cb3a4a874c95ed7833fdc0b90f7ebd39d63a39a7676d53aae63f9",
   "recorded_sha256": "eb705a61554fc9823e9e11a61aa0192d2d9fdf51280379098c1b480c025dd6d0"
 }

@@ -743,10 +743,15 @@ a third party can re-check it without running the product.
   same source, `Cargo.lock`, profile and **compiler** reproduce them byte for
   byte. `rust-toolchain.toml` pins rustc `1.99.1`; a clean `cargo clean && bash
   build.sh` rebuilds `eb705a61554fc982…` exactly (the compiler commit is embedded
-  in the wasm, so a different rustc is a different build by design). `python3 -m
-  tracesettle guest verify` checks the inputs, the toolchain pin and the artifact
-  hash from the shipped package; CI runs `build.sh` and then `guest verify`, so a
-  silent change to any input fails the build. See
+  in the wasm, so a different rustc is a different build by design). The compiler
+  also embeds the absolute path of each dependency source it reads, so `build.sh`
+  remaps the builder's `CARGO_HOME` to the fixed prefix baked into the approved
+  artifact — otherwise the same source built in another directory would produce a
+  different hash (this was a real defect: the first CI run caught it, because CI's
+  `/home/runner/.cargo` did not match the committed `/home/openhands/.cargo`).
+  `python3 -m tracesettle guest verify` checks the inputs, the toolchain pin and
+  the artifact hash from the shipped package; CI runs `build.sh` and then `guest
+  verify`, so a silent change to any input fails the build. See
   `evidence/mission26/reproducible_build.md`.
 - **Independent attestation verification.** OutLayer publishes the execution's
   TDX quote at a **free, unauthenticated** endpoint. `tracesettle/near/tee_signing/

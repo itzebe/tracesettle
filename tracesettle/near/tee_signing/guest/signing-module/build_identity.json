@@ -11,7 +11,7 @@
       "sha256": "eb705a61554fc9823e9e11a61aa0192d2d9fdf51280379098c1b480c025dd6d0",
       "size_bytes": 186462,
       "used_by_live_run": true,
-      "input_digest": "edb57b30e7f993d32c5be05bed9218859762452727cbc86df8eb22ab674b25e2"
+      "input_digest": "224f93f7356cb3a4a874c95ed7833fdc0b90f7ebd39d63a39a7676d53aae63f9"
     },
     "project": {
       "file": "dist/tracesettle-signing-module.wasm",
@@ -20,7 +20,7 @@
       "sha256": "7ff8fbcb6748159729f5c6b4ff5659ba99d3c5c906ecc9d1bde7478e37f57691",
       "size_bytes": 186438,
       "used_by_live_run": false,
-      "input_digest": "edb57b30e7f993d32c5be05bed9218859762452727cbc86df8eb22ab674b25e2"
+      "input_digest": "224f93f7356cb3a4a874c95ed7833fdc0b90f7ebd39d63a39a7676d53aae63f9"
     }
   },
   "live_run": {

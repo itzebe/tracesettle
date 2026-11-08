@@ -112,12 +112,61 @@ artifact, from the shipped package:
 ```
 $ python3 -m tracesettle guest verify
 checks:
-  [OK ] build_inputs_match - inputs edb57b30e7f993d3… vs recorded edb57b30e7f993d3…
+  [OK ] build_inputs_match - inputs 224f93f7356cb3a4… vs recorded 224f93f7356cb3a4…
   [OK ] toolchain_pinned - rust-toolchain.toml pins 1.99.1
   [OK ] artifact_sha256 - observed eb705a61554fc982… vs recorded eb705a61554fc982…
   [OK ] artifact_size - 186462 bytes
 RESULT: PASS
 ```
+
+## Machine independence — a defect CI caught
+
+The first CI run of this branch **failed**, and the failure was real: the
+committed artifact did not match a clean rebuild on the runner.
+
+```
+observed_sha256: dd47be883742a7c1fad178b615b55aeeaadcb71cf63f49d140cbb474e9b21875
+recorded_sha256: eb705a61554fc9823e9e11a61aa0192d2d9fdf51280379098c1b480c025dd6d0
+artifact_size:   186414 bytes (recorded 186462)
+```
+
+The cause was not the toolchain (the runner installed the pinned `1.99.1`,
+`rustc 1.99.1 (58cf8f9c3 2026-10-13)`). It was that **rustc embeds the absolute
+path of every dependency source it reads** — cargo's registry cache — into the
+wasm. The committed artifact carried `/home/openhands/.cargo/registry/…` fifteen
+times; the runner built under `/home/runner/.cargo/…`, so the same source, the
+same lockfile and the same compiler produced different bytes. The artifact was
+reproducible only on a machine whose home happened to be `/home/openhands`.
+
+The fix is in `build.sh`: remap the builder's cargo home to the fixed prefix the
+approved artifact was built under, so the bytes identify the *inputs*, not the
+machine.
+
+```
+CANONICAL_CARGO_HOME="${TRACESETTLE_BUILD_CARGO_HOME:-/home/openhands/.cargo}"
+… --remap-path-prefix="$ACTUAL_CARGO_HOME=$CANONICAL_CARGO_HOME"
+```
+
+Measured, building from a *different* cargo home and a *different* crate
+directory:
+
+```
+$ CARGO_HOME=/tmp/rebuildcargo3 bash build.sh     # in /tmp/rebuild3/signing-module
+Path remap: /tmp/rebuildcargo3 -> /home/openhands/.cargo
+SHA256: 7ff8fbcb6748159729f5c6b4ff5659ba99d3c5c906ecc9d1bde7478e37f57691   (project)
+SHA256: eb705a61554fc9823e9e11a61aa0192d2d9fdf51280379098c1b480c025dd6d0   (wasm)
+```
+
+Both variants now reproduce the approved hashes from an arbitrary directory. The
+canonical prefix is `…/home/openhands/.cargo` — not because that is "correct", but
+because that is the prefix baked into the artifact the Mission 25 on-chain run
+attested (`eb705a61…`); changing it would change the hash and break the on-chain
+binding. Every other machine remaps *to* it. Two regression tests guard this
+(`test_the_build_remaps_the_cargo_home_so_paths_do_not_leak_in`,
+`test_the_approved_artifact_embeds_only_the_canonical_cargo_home`).
+
+Because `build.sh` is itself a hashed build input, the recorded `input_digest`
+was updated to `224f93f7356cb3a4…`; the artifact hashes are unchanged.
 
 ## What CI does
 

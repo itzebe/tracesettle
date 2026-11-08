@@ -106,3 +106,46 @@ def test_the_artifact_is_present_in_this_checkout():
     verdict = verify_build()
     assert verdict.artifact_present
     assert verdict.observed_sha256 == verdict.recorded_sha256
+
+
+def test_the_build_remaps_the_cargo_home_so_paths_do_not_leak_in():
+    """The compiler embeds the dependency-source path; it must be canonical.
+
+    A build under a different ``CARGO_HOME`` otherwise produces different bytes
+    (measured: the committed artifact embedded ``/home/openhands/.cargo``), so
+    the artifact would identify the *machine*, not the inputs. ``build.sh`` must
+    remap the builder's cargo home to the fixed prefix baked into the approved
+    artifact.
+    """
+    text = (GUEST_DIR / "build.sh").read_text(encoding="utf-8")
+    assert "--remap-path-prefix" in text
+    assert "TRACESETTLE_BUILD_CARGO_HOME" in text
+    # The canonical prefix must be the one the approved artifact was built under,
+    # or the remap would change the bytes and break the pinned hash.
+    assert "/home/openhands/.cargo" in text
+
+
+def test_the_approved_artifact_embeds_only_the_canonical_cargo_home():
+    """The artifact must carry exactly one cargo-home prefix, and it is canonical.
+
+    The compiler embeds the dependency-source path, so a build under a different
+    ``CARGO_HOME`` produces different bytes. ``build.sh`` remaps the builder's
+    home to the fixed prefix baked into the approved artifact, so the bytes are
+    reproducible from any machine while the pinned hash is unchanged.
+
+    That prefix is ``/home/openhands/.cargo`` because it is what the Mission 25
+    on-chain TEE run attested (``eb705a61…``); changing it would change the hash
+    and break the on-chain binding. It is therefore a build *constant*, not a
+    leaked machine path — every other machine remaps to it. The toolchain's own
+    ``/rustc/<commit>/`` paths are identical for every builder of the release.
+    """
+    import re
+
+    artifact = GUEST_DIR / "dist/tracesettle-signing-module-wasm.wasm"
+    blob = artifact.read_bytes()
+    cargo_homes = set(re.findall(rb"/[^ \x00]*?/\.cargo", blob))
+    assert cargo_homes == {b"/home/openhands/.cargo"}, cargo_homes
+    # No *other* machine path may appear: a workspace, tmp or user dir would make
+    # the artifact depend on where it was built.
+    for prefix in (b"/workspace/", b"/tmp/", b"/Users/", b"/root/"):
+        assert prefix not in blob, f"the artifact embeds a machine path {prefix!r}"
