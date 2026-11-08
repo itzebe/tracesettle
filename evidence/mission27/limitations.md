@@ -61,3 +61,35 @@ in-place edit of a stage is detected. A whole-store rewrite with recomputed
 digests is **not** detected by the chain alone — the same honesty note that
 applies to the guard's audit log applies here. External anchoring (publishing a
 chain digest) is the mitigation, and is out of scope for this mission.
+
+---
+
+# Mission 28 addendum — what genuine TEE provenance does and does not prove
+
+Established (independently verified, offline and live):
+
+* A **real Intel TDX enclave** (Mission 25/26 capture) produced the signed
+  transaction `F27Erv42…`, running the **approved build** `eb705a61554fc982…`,
+  and the Intel-signed `output_hash` commits to that exact signing output.
+* The signature verifies over the **recomputed** NEAR digest of the exact signed
+  bytes, under the key the bytes name. This was re-checked live against
+  `testnet-api.outlayer.ai` and `rpc.testnet.near.org` (2026-11-08).
+
+Not established (stated plainly):
+
+* **The signed transaction was broadcast and settled by the enclave key.** The
+  Mission 25 run signed `F27Erv42…`; the *transfer* `F27Erv42…` is FINAL on
+  chain, but the enclave signed it and a separate funded account relayed the
+  call — the enclave holds no NEAR and does not broadcast. Settlement is
+  established by the independent on-chain read, never by the enclave.
+* **The guest is a reproducible build of *OutLayer's* interface.** The pin is a
+  `sha256` of our artifact; it is not a verified build of the OutLayer host.
+* **A live, paid enclave signature was produced this mission.** The OutLayer
+  `/call` route is paid; Mission 25 used the free on-chain route and its capture
+  is what is verified here. Mission 28 made **no** paid call and produced **no**
+  new enclave signature — it proves the existing one end to end and makes the
+  proof reproducible.
+* **Mainnet.** Everything here is testnet. No mainnet transaction exists.
+* **Certificate revocation / TCB freshness** are checked only as far as Mission 26
+  implemented them (Intel PCS collateral, `UpToDate`); continuous revocation
+  monitoring is out of scope.

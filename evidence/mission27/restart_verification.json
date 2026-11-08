@@ -1,102 +1,118 @@
 {
-  "generated_by": "tests/test_near_durable_signature.py + demo run (real code paths; RPC transport substituted)",
-  "durability_model": "SQLite ledger + evidence-chain store closed and reopened from the same files",
-  "transaction_hash": "2ek4WJevFsMYXdjhUSVYXp7fj2uT3ic2SYcBE6THZpPK",
-  "run_state": "SETTLED",
-  "settlement_state": "VERIFIED",
-  "durable_record_fields": {
-    "signed_b64_present": true,
-    "signed_b64_chars": 260,
-    "signature_algorithm": "ed25519",
-    "signer_id": "agent.testnet",
-    "receiver_id": "alice.testnet",
-    "amount_base": "1000000000000000000000000",
-    "destination": "alice.testnet"
-  },
-  "post_restart_signature_verification": {
-    "tx_hash": "2ek4WJevFsMYXdjhUSVYXp7fj2uT3ic2SYcBE6THZpPK",
-    "signer_id": "agent.testnet",
-    "receiver_id": "alice.testnet",
-    "amount_base": "1000000000000000000000000",
-    "destination": "alice.testnet",
-    "signature_algorithm": "ed25519",
-    "verified": true,
-    "state": "VERIFIED",
+  "attested_signing_provenance": {
+    "attestation_level": "INDEPENDENTLY_VERIFIED",
+    "attestation_verified": true,
     "checks": [
       {
-        "name": "signed_bytes_present",
+        "detail": "255 signed bytes",
         "holds": true,
-        "detail": "260 base64 chars"
+        "name": "signed_bytes_parse"
       },
       {
-        "name": "digest_recomputed",
+        "detail": "recomputed sha256:d04c4090dd83727874a059b2260d2fb7073155141c3cd91a4482e42ecf61aa8a vs recorded sha256:d04c4090dd83727874a059b2260d2fb7073155141c3cd91a4482e42ecf61aa8a",
         "holds": true,
-        "detail": "sha256 of the persisted unsigned bytes"
+        "name": "digest_matches_signed_bytes"
       },
       {
-        "name": "decode_round_trips",
+        "detail": "b58(digest) = F27Erv42DhGhaTqNXPhsf5KXedfQvP3cd1Vbz9aZnQPj",
         "holds": true,
-        "detail": "the bytes re-serialize to the same bytes"
+        "name": "tx_hash_is_b58_of_digest"
       },
       {
-        "name": "signature_verifies_over_digest",
+        "detail": "ed25519 signature verified over the recomputed digest",
         "holds": true,
-        "detail": "ed25519 signature re-verified over the recomputed digest"
+        "name": "signature_verifies_over_digest"
       },
       {
-        "name": "record_matches_signed_bytes",
+        "detail": "a receipt SuccessValue hashes to the attested output hash 5ef45840e066e25e6ee75eab\u2026",
         "holds": true,
-        "detail": "the decoded fields agree with the durable record"
+        "name": "enclave_output_hash_binds_the_receipt"
+      },
+      {
+        "detail": "the attested output, parsed, equals the signing output field-for-field",
+        "holds": true,
+        "name": "attested_output_is_this_signing_output"
+      },
+      {
+        "detail": "INDEPENDENTLY_VERIFIED",
+        "holds": true,
+        "name": "attestation_verified"
       }
     ],
-    "transaction_digest": "sha256:1886dd8e3ba4df1d7473b46d27ccc408f40671fd2e557235b4fa54cde88d4aaa",
-    "digest_source": "recomputed_from_persisted_signed_bytes",
-    "public_key": "ed25519:FAe4sisG95oZ42w7buUn5qEE4TAnfTTFPiguZUHmhiF",
-    "failures": []
-  },
-  "post_restart_chain_binding": {
-    "bound": true,
+    "enclave_output_hash": "5ef45840e066e25e6ee75eab164242145246c3dc12658ff64bc8555e8f0555af",
     "failures": [],
-    "checks": [
-      {
-        "name": "transaction_digest_agrees",
-        "holds": true,
-        "detail": "['sha256:1886dd8e3ba4df1d7473b46d27ccc408f40671fd2e557235b4fa54cde88d4aaa', 'sha256:1886dd8e3ba4df1d7473b46d27ccc408f40671fd2e557235b4fa54cde88d4aaa', 'sha256:1886dd8e3ba4df1d7473b46d27ccc408f40671fd2e557235b4fa54cde88d4aaa', 'sha256:1886dd8e3ba4df1d7473b46d27ccc408f40671fd2e557235b4fa54cde88d4aaa', 'sha256:1886dd8e3ba4df1d7473b46d27ccc408f40671fd2e557235b4fa54cde88d4aaa']"
-      },
-      {
-        "name": "network_agrees",
-        "holds": true,
-        "detail": "['testnet', 'testnet', 'testnet', 'testnet']"
-      },
-      {
-        "name": "receiver_agrees",
-        "holds": true,
-        "detail": "['alice.testnet', 'alice.testnet']"
-      },
-      {
-        "name": "amount_agrees",
-        "holds": true,
-        "detail": "['1000000000000000000000000', '1000000000000000000000000']"
-      },
-      {
-        "name": "signer_public_key_agrees",
-        "holds": true,
-        "detail": "['ed25519:FAe4sisG95oZ42w7buUn5qEE4TAnfTTFPiguZUHmhiF', 'ed25519:FAe4sisG95oZ42w7buUn5qEE4TAnfTTFPiguZUHmhiF']"
-      },
-      {
-        "name": "broadcast_hash_agrees",
-        "holds": true,
-        "detail": "['2ek4WJevFsMYXdjhUSVYXp7fj2uT3ic2SYcBE6THZpPK', '2ek4WJevFsMYXdjhUSVYXp7fj2uT3ic2SYcBE6THZpPK', '2ek4WJevFsMYXdjhUSVYXp7fj2uT3ic2SYcBE6THZpPK']"
-      },
-      {
-        "name": "signature_verifies_over_the_digest",
-        "holds": true,
-        "detail": "ed25519 signature re-verified over the recorded digest"
-      }
-    ]
+    "level": "TEE_SIGNING_VERIFIED",
+    "note": "",
+    "public_key": "ed25519:H3dd94sk1df1t2PVyQWjD9cyzDAKh2WceAFmP3tWdC2a",
+    "recomputed_output_hash": "5ef45840e066e25e6ee75eab164242145246c3dc12658ff64bc8555e8f0555af",
+    "tee_signing_verified": true,
+    "transaction_digest": "sha256:d04c4090dd83727874a059b2260d2fb7073155141c3cd91a4482e42ecf61aa8a",
+    "tx_hash": "F27Erv42DhGhaTqNXPhsf5KXedfQvP3cd1Vbz9aZnQPj",
+    "verified": true
   },
-  "digest_binding": {
-    "digest_recomputed_from_persisted_bytes": "sha256:1886dd8e3ba4df1d7473b46d27ccc408f40671fd2e557235b4fa54cde88d4aaa",
-    "b58_of_digest_equals_tx_hash": true
+  "durability": {
+    "durable_record_fields": {
+      "amount_base": "100000000000000000000000",
+      "receiver_id": "ts-m25-recipient.testnet",
+      "signature_algorithm": "ed25519",
+      "signed_b64_chars": 340,
+      "signer_id": "ee678ff2b2243fa83e63582f7e017027470be84c55f8deaef87f72244f1a6fb7",
+      "tx_hash": "F27Erv42DhGhaTqNXPhsf5KXedfQvP3cd1Vbz9aZnQPj"
+    },
+    "original_bytes_are_immutable": true,
+    "post_restart_signature_verification": {
+      "amount_base": "100000000000000000000000",
+      "checks": [
+        {
+          "detail": "340 base64 chars",
+          "holds": true,
+          "name": "signed_bytes_present"
+        },
+        {
+          "detail": "sha256 of the persisted unsigned bytes",
+          "holds": true,
+          "name": "digest_recomputed"
+        },
+        {
+          "detail": "the bytes re-serialize to the same bytes",
+          "holds": true,
+          "name": "decode_round_trips"
+        },
+        {
+          "detail": "ed25519 signature re-verified over the recomputed digest",
+          "holds": true,
+          "name": "signature_verifies_over_digest"
+        },
+        {
+          "detail": "the decoded fields agree with the durable record",
+          "holds": true,
+          "name": "record_matches_signed_bytes"
+        }
+      ],
+      "destination": "ts-m25-recipient.testnet",
+      "digest_source": "recomputed_from_persisted_signed_bytes",
+      "failures": [],
+      "public_key": "ed25519:H3dd94sk1df1t2PVyQWjD9cyzDAKh2WceAFmP3tWdC2a",
+      "receiver_id": "ts-m25-recipient.testnet",
+      "signature_algorithm": "ed25519",
+      "signer_id": "ee678ff2b2243fa83e63582f7e017027470be84c55f8deaef87f72244f1a6fb7",
+      "state": "VERIFIED",
+      "transaction_digest": "sha256:d04c4090dd83727874a059b2260d2fb7073155141c3cd91a4482e42ecf61aa8a",
+      "tx_hash": "F27Erv42DhGhaTqNXPhsf5KXedfQvP3cd1Vbz9aZnQPj",
+      "verified": true
+    },
+    "tampered_byte_is_refused": true,
+    "tampered_byte_state": "UNVERIFIED"
+  },
+  "generated_by": "evidence/mission28/generate_evidence.py (real code paths)",
+  "invariants": {
+    "near_attested_signing_binds_the_enclave_output_to_the_transaction": {
+      "detail": "the real Intel TDX signing run reaches TEE_SIGNING_VERIFIED through the enclave's attested output_hash bound to the receipt that carries the signed transaction; a swapped transaction is refused and a bare valid signature is never TEE-verified",
+      "holds": true
+    },
+    "near_recorded_signature_survives_a_restart": {
+      "detail": "the exact signed bytes survive a restart; a fresh process recomputes the digest and re-verifies the ed25519 signature from them, a tampered byte is refused, and the durable evidence chain still carries a re-verifiable signature",
+      "holds": true
+    }
   }
 }

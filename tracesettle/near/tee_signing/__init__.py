@@ -82,6 +82,11 @@ from .outlayer_attestation import (
     task_hash_v1,
     verify_outlayer_attestation,
 )
+from .signing_provenance import (
+    AttestedSigningVerdict,
+    ProvenanceCheck,
+    verify_attested_signing,
+)
 
 __all__ = [
     "SIGNING_DOMAIN",
@@ -122,4 +127,7 @@ __all__ = [
     "fetch_attestation",
     "task_hash_v1",
     "verify_outlayer_attestation",
+    "AttestedSigningVerdict",
+    "ProvenanceCheck",
+    "verify_attested_signing",
 ]

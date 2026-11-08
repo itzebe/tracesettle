@@ -122,3 +122,30 @@ def test_chain_verify_fails_on_a_broken_binding(tmp_path):
     proc = _run("chain", "verify", str(path))
     assert proc.returncode != 0
     assert "receiver_agrees" in proc.stdout
+
+
+def test_signing_provenance_passes_on_the_real_tee_capture():
+    proc = _run(
+        "signing-provenance",
+        "verify",
+        "--run",
+        str(RUN_FIXTURE),
+        "--attestation",
+        str(FIXTURE),
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "TEE_SIGNING_VERIFIED" in proc.stdout
+    assert "RESULT: PASS" in proc.stdout
+
+
+def test_signing_provenance_refuses_a_swapped_transaction(tmp_path):
+    run = json.loads(RUN_FIXTURE.read_text(encoding="utf-8"))
+    signed = bytearray(base64.b64decode(run["sign_transaction"]["output"]["signed_transaction"]))
+    signed[-1] ^= 0x01
+    run["sign_transaction"]["output"]["signed_transaction"] = base64.b64encode(bytes(signed)).decode()
+    path = tmp_path / "swapped.json"
+    path.write_text(json.dumps(run), encoding="utf-8")
+    proc = _run("signing-provenance", "verify", "--run", str(path), "--attestation", str(FIXTURE))
+    assert proc.returncode != 0
+    assert "RESULT: PASS" not in proc.stdout
+    assert "TEE_SIGNING_VERIFIED" not in proc.stdout

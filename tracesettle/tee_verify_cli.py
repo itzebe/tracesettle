@@ -307,6 +307,78 @@ def cmd_chain_verify(args: argparse.Namespace) -> int:
     return _emit(payload, as_json=args.json, title="evidence chain", ok=binding.bound)
 
 
+def cmd_signing_provenance(args: argparse.Namespace) -> int:
+    """Prove a genuine TEE enclave produced the signed transaction, end to end."""
+    from .near.tee_signing.signing_provenance import verify_attested_signing
+
+    run_record = json.loads(Path(args.run).read_text(encoding="utf-8"))
+
+    recorded_approval = None
+    if args.fetch:
+        # Re-fetch the attestation and the on-chain result from the free,
+        # unauthenticated endpoints, so a reviewer can reproduce the verdict
+        # against live data rather than a capture.
+        from .near.rpc import NearRpc
+        from .near.networks import network_config, parse_network
+        from .near.tee_signing.outlayer_attestation import fetch_attestation
+
+        if not args.execution_tx:
+            print("--fetch needs --execution-tx (the request_execution transaction hash)", file=sys.stderr)
+            return 2
+        try:
+            att_record = fetch_attestation(args.execution_tx, network=args.network)
+        except OutLayerAttestationError as exc:
+            print(f"cannot fetch the attestation: {exc}", file=sys.stderr)
+            return 2
+        rpc_live = NearRpc(network_config(parse_network(args.network)))
+        res = rpc_live.tx_status(args.execution_tx, str(att_record.get("caller_account_id", "")))
+        tx_result = res.data if res.ok else None
+        if tx_result is None:
+            print(f"the on-chain execution result could not be read ({res.status.value})", file=sys.stderr)
+            return 2
+    else:
+        att_record = json.loads(Path(args.attestation).read_text(encoding="utf-8"))
+        tx_result = None
+        if args.tx_result:
+            tx_result = json.loads(Path(args.tx_result).read_text(encoding="utf-8"))
+        elif isinstance(att_record, dict) and "tx_result" in att_record:
+            tx_result = att_record.get("tx_result")
+        if isinstance(att_record, dict) and "worker_approval" in att_record:
+            recorded_approval = att_record["worker_approval"]
+        if isinstance(att_record, dict) and "attestation" in att_record:
+            att_record = att_record["attestation"]
+
+    rpc = None
+    if not args.no_worker_approval and not args.live_worker_approval and recorded_approval:
+        from .near.tee_signing.outlayer_attestation import RecordedApprovalRpc
+
+        rpc = RecordedApprovalRpc(recorded_approval)
+
+    try:
+        verdict = verify_attested_signing(
+            run_record,
+            att_record,
+            network=args.network,
+            tx_result=tx_result,
+            rpc=rpc,
+            expected_wasm_sha256=args.approved_build or str(run_record.get("wasm_sha256", "")),
+        )
+    except OutLayerAttestationError as exc:
+        print(f"cannot verify the attested signing run: {exc}", file=sys.stderr)
+        return 2
+    payload = verdict.to_dict()
+    payload["source"] = "live" if args.fetch else "recorded"
+    payload["worker_approval_source"] = (
+        "live" if (args.live_worker_approval or args.fetch) else ("recorded" if rpc is not None else "none")
+    )
+    return _emit(
+        payload,
+        as_json=args.json,
+        title="attested TEE signing provenance",
+        ok=verdict.level == "TEE_SIGNING_VERIFIED",
+    )
+
+
 def add_reviewer_subcommands(sub: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
     """Attach the reviewer commands to the main CLI's subparser group."""
     guest = sub.add_parser("guest", help="reproducible-build commands for the TEE signing guest")
@@ -348,6 +420,24 @@ def add_reviewer_subcommands(sub: argparse._SubParsersAction) -> None:  # type: 
     cv.add_argument("record", help="a JSON evidence-chain record")
     cv.add_argument("--json", action="store_true")
     cv.set_defaults(func=cmd_chain_verify)
+
+    prov = sub.add_parser(
+        "signing-provenance",
+        help="prove a genuine Intel TDX enclave produced the signed transaction",
+    )
+    prov_sub = prov.add_subparsers(dest="provenance_command", required=True)
+    pv = prov_sub.add_parser("verify", help="check every link from the quote to the signature")
+    pv.add_argument("--run", required=True, help="a recorded TEE signing run (sign_transaction.output)")
+    pv.add_argument("--attestation", default="", help="the OutLayer attestation record (or a fixture wrapping it)")
+    pv.add_argument("--fetch", action="store_true", help="fetch the attestation and tx result live instead of reading a record")
+    pv.add_argument("--execution-tx", default="", help="the request_execution transaction hash (with --fetch)")
+    pv.add_argument("--tx-result", default="", help="the on-chain request_execution tx result")
+    pv.add_argument("--approved-build", default="", help="the pinned approved wasm sha256")
+    pv.add_argument("--network", default="testnet", choices=["testnet", "mainnet"])
+    pv.add_argument("--no-worker-approval", action="store_true", help="skip the on-chain register read")
+    pv.add_argument("--live-worker-approval", action="store_true", help="read worker approval live")
+    pv.add_argument("--json", action="store_true")
+    pv.set_defaults(func=cmd_signing_provenance)
 
 
 __all__ = [

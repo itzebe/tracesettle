@@ -1,0 +1,51 @@
+{
+  "attestation_level": "INDEPENDENTLY_VERIFIED",
+  "attestation_verified": true,
+  "checks": [
+    {
+      "detail": "255 signed bytes",
+      "holds": true,
+      "name": "signed_bytes_parse"
+    },
+    {
+      "detail": "recomputed sha256:d04c4090dd83727874a059b2260d2fb7073155141c3cd91a4482e42ecf61aa8a vs recorded sha256:d04c4090dd83727874a059b2260d2fb7073155141c3cd91a4482e42ecf61aa8a",
+      "holds": true,
+      "name": "digest_matches_signed_bytes"
+    },
+    {
+      "detail": "b58(digest) = F27Erv42DhGhaTqNXPhsf5KXedfQvP3cd1Vbz9aZnQPj",
+      "holds": true,
+      "name": "tx_hash_is_b58_of_digest"
+    },
+    {
+      "detail": "ed25519 signature verified over the recomputed digest",
+      "holds": true,
+      "name": "signature_verifies_over_digest"
+    },
+    {
+      "detail": "a receipt SuccessValue hashes to the attested output hash 5ef45840e066e25e6ee75eab\u2026",
+      "holds": true,
+      "name": "enclave_output_hash_binds_the_receipt"
+    },
+    {
+      "detail": "the attested output, parsed, equals the signing output field-for-field",
+      "holds": true,
+      "name": "attested_output_is_this_signing_output"
+    },
+    {
+      "detail": "INDEPENDENTLY_VERIFIED",
+      "holds": true,
+      "name": "attestation_verified"
+    }
+  ],
+  "enclave_output_hash": "5ef45840e066e25e6ee75eab164242145246c3dc12658ff64bc8555e8f0555af",
+  "failures": [],
+  "level": "TEE_SIGNING_VERIFIED",
+  "note": "",
+  "public_key": "ed25519:H3dd94sk1df1t2PVyQWjD9cyzDAKh2WceAFmP3tWdC2a",
+  "recomputed_output_hash": "5ef45840e066e25e6ee75eab164242145246c3dc12658ff64bc8555e8f0555af",
+  "tee_signing_verified": true,
+  "transaction_digest": "sha256:d04c4090dd83727874a059b2260d2fb7073155141c3cd91a4482e42ecf61aa8a",
+  "tx_hash": "F27Erv42DhGhaTqNXPhsf5KXedfQvP3cd1Vbz9aZnQPj",
+  "verified": true
+}

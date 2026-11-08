@@ -474,12 +474,12 @@ def test_the_attestation_verifier_answers_from_a_package_only_copy(tmp_path):
     root = _package_only_copy(tmp_path)
     script = (
         "from tracesettle.near.tee_signing.outlayer_attestation "
-        "import verify_outlayer_attestation\n"
+        "import verify_outlayer_attestation, RecordedApprovalRpc\n"
         "import json, pathlib\n"
         "p = pathlib.Path('tracesettle/near/fixtures/onchain_tee_attestation.json')\n"
         "rec = json.loads(p.read_text())\n"
         "v = verify_outlayer_attestation(rec['attestation'], network='testnet',\n"
-        "    tx_result=rec['tx_result'])\n"
+        "    tx_result=rec['tx_result'], rpc=RecordedApprovalRpc(rec['worker_approval']))\n"
         "print('RESULT:' + str(v.verified) + ':' + str(v.level))\n"
     )
     out = subprocess.run(
@@ -488,6 +488,31 @@ def test_the_attestation_verifier_answers_from_a_package_only_copy(tmp_path):
     assert out.returncode == 0, out.stderr
     line = [ln for ln in out.stdout.splitlines() if ln.startswith("RESULT:")][-1]
     assert line == "RESULT:True:INDEPENDENTLY_VERIFIED", line
+
+
+def test_the_attested_signing_provenance_answers_from_a_package_only_copy(tmp_path):
+    """The end-to-end TEE-signing proof must run inside the image (package only)."""
+    root = _package_only_copy(tmp_path)
+    out = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "tracesettle",
+            "signing-provenance",
+            "verify",
+            "--run",
+            "tracesettle/near/fixtures/onchain_tee_run.json",
+            "--attestation",
+            "tracesettle/near/fixtures/onchain_tee_attestation.json",
+        ],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert "TEE_SIGNING_VERIFIED" in out.stdout
+    assert "RESULT: PASS" in out.stdout
 
 
 def test_the_pinned_guest_artifact_ships_in_the_package():

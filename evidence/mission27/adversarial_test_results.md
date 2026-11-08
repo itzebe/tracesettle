@@ -73,3 +73,59 @@ mutation was reverted.
 `tests/test_near_durable_signature.py`: **29 passed**.
 `tests/test_near_invariants.py`: **35 passed** (including the two new mutation
 tests). No test was deleted, skipped or weakened.
+
+---
+
+# Mission 28 addendum — adversarial results (2026-11-08)
+
+Mission 27's table covers the **durability** half. Mission 28 adds the
+**genuine-enclave-provenance** half and its own adversarial cases. Every test
+drives the real verifier over the real Mission 25 capture; the only substitution
+is the on-chain approval RPC (`RecordedApprovalRpc`, a transport stand-in that
+replays the recorded contract answer — every line of the verifier runs).
+
+Commands:
+`python3 -m pytest tests/test_near_signing_provenance.py tests/test_near_outlayer_attestation.py tests/test_near_invariants.py -q`
+
+## The new adversarial cases (`tests/test_near_signing_provenance.py`, 11 tests)
+
+| Case | Test | Observed fail-closed behaviour |
+|---|---|---|
+| Genuine run reaches TEE_SIGNING_VERIFIED | `test_the_real_run_is_tee_signing_verified` | all 7 checks hold; level `TEE_SIGNING_VERIFIED` |
+| Attested output binds the signed transaction | `test_the_attested_output_hash_binds_the_signed_transaction` | `enclave_output_hash_binds_the_receipt` holds |
+| **Modified transaction bytes** | `test_a_swapped_signed_transaction_is_refused` | digest recompute disagrees with the recorded digest → not TEE-verified |
+| **Modified transaction digest** | `test_a_changed_digest_is_refused` | `digest_matches_signed_bytes` fails |
+| **Replayed / wrong attestation** | `test_a_different_attestation_for_another_execution_is_refused` | Task-Hash / execution binding fails → `REFUTED` |
+| **Valid signature, no attestation** | `test_a_valid_signature_without_attestation_is_only_signature_verified` | level capped at `SIGNATURE_VERIFIED`, never TEE |
+| Missing on-chain result | `test_no_on_chain_result_cannot_bind_the_enclave_output` | cannot bind → not TEE-verified |
+| **Replaced build digest** | `test_a_different_approved_build_is_refused` | approved-build binding fails |
+| Non-success signing output | `test_a_non_success_signing_output_is_a_structural_error` | structural error, never a pass |
+| Missing signing output | `test_a_missing_signing_output_is_a_structural_error` | structural error, never a pass |
+| No secrets in the verdict | `test_the_verdict_serialises_without_secrets` | verdict carries no key material |
+
+## The live-fetch defect (found and fixed this mission)
+
+`fetch_attestation` built its HTTP client as
+`HttpClient(timeout=20.0, attempts=2)`, but `HttpClient.__init__` takes
+`max_attempts`. Every unit test injected a stub client, so the defect was latent;
+the reviewer's real `--tx-hash` path raised `TypeError` before any request.
+Regression test `test_fetch_attestation_builds_its_http_client_with_max_attempts`
+spies on the constructor and requires the exact keyword. Mutation-checked: with
+`attempts=` restored the test fails; with `max_attempts=` it passes.
+
+## Mutation tests for the new invariant
+
+`tests/test_near_invariants.py` gained two mutation tests for
+`near_attested_signing_binds_the_enclave_output_to_the_transaction`:
+
+| Mutation | Test | Result |
+|---|---|---|
+| A verifier that always returns `TEE_SIGNING_VERIFIED` | `test_attested_signing_invariant_notices_a_verifier_that_accepts_anything` | invariant reports `holds: False` |
+| A verifier that drops the enclave-output binding | `test_attested_signing_invariant_notices_a_verifier_that_ignores_the_output_binding` | invariant reports `holds: False` |
+
+## Result
+
+`tests/test_near_signing_provenance.py`: **11 passed**.
+`tests/test_near_invariants.py`: **37 passed** (was 35; +2 mutation tests).
+`tests/test_near_outlayer_attestation.py`: passes including the new regression.
+No test was deleted, skipped or weakened.

@@ -52,3 +52,33 @@ The remap is the mechanism that makes the bytes independent of the builder's
 cargo home; the CI job reproduces the artifact under the runner's own home and
 compares it to the recorded hash. This mission added no build input, so parity is
 unchanged; the local `guest verify` above is the positive control.
+
+---
+
+# Mission 28 addendum — parity re-verified independently (2026-11-08)
+
+The Mission 26 fix is preserved and was re-checked from the shipped package
+without changing any input:
+
+```
+$ sha256sum tracesettle/near/tee_signing/guest/signing-module/dist/tracesettle-signing-module-wasm.wasm
+eb705a61554fc9823e9e11a61aa0192d2d9fdf51280379098c1b480c025dd6d0
+$ stat -c%s …-wasm.wasm
+186462
+$ python3 -m tracesettle guest verify
+  [OK ] build_inputs_match - inputs 224f93f7356cb3a4… vs recorded 224f93f7356cb3a4…
+  [OK ] toolchain_pinned - rust-toolchain.toml pins 1.99.1
+  [OK ] artifact_sha256 - observed eb705a61554fc982… vs recorded eb705a61554fc982…
+  [OK ] artifact_size - 186462 bytes
+RESULT: PASS
+```
+
+The path-remap fix is present in `build.sh` and holds in the committed bytes:
+`strings` over the artifact finds the canonical prefix `…/home/openhands/.cargo`
+**15 times** and the string `home/runner` **0 times**, so no builder path leaked
+into the approved artifact. The project variant is also unchanged
+(`7ff8fbcb6748159729f5c6b4ff5659ba99d3c5c906ecc9d1bde7478e37f57691`).
+
+The approved-build hash `eb705a61554fc982…` is the same value the Mission 25
+on-chain run attested, so the attestation binding remains valid; the canonical
+prefix was **not** changed.

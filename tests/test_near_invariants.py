@@ -16,7 +16,7 @@ FIXTURE_DIR = pathlib.Path(__file__).resolve().parent.parent / "tracesettle" / "
 
 def test_near_invariants_are_registered():
     near = [name for name in inv.INVARIANTS if name.startswith("near_")]
-    assert len(near) == 22
+    assert len(near) == 23
     assert all(name in inv.INVARIANT_DESCRIPTIONS for name in near)
 
 
@@ -586,4 +586,46 @@ def test_durable_signature_invariant_notices_a_verifier_that_accepts_anything(mo
     # The invariant also checks a tampered byte is refused, so a blanket accept
     # must be caught there even though the happy path now always passes.
     result = inv.INVARIANTS["near_recorded_signature_survives_a_restart"]()
+    assert result.holds is False
+
+
+def test_attested_signing_invariant_notices_a_verifier_that_accepts_anything(monkeypatch):
+    """If the attested-signing verifier always reported TEE-verified, the invariant
+    must fail on the swapped-transaction probe."""
+    from tracesettle.near.tee_signing import signing_provenance as sp
+
+    def _always_verified(run_record, attestation_record, **kwargs):
+        verdict = sp.AttestedSigningVerdict(level=sp.LEVEL_TEE_SIGNING_VERIFIED, verified=True)
+        return verdict
+
+    monkeypatch.setattr(sp, "verify_attested_signing", _always_verified)
+    result = inv.INVARIANTS["near_attested_signing_binds_the_enclave_output_to_the_transaction"]()
+    assert result.holds is False
+
+
+def test_attested_signing_invariant_notices_a_verifier_that_ignores_the_output_binding(monkeypatch):
+    """A verifier that skipped the enclave-output binding would still pass the happy
+    path but must fail the downgrade probe (a broken attestation must not be
+    TEE-verified)."""
+    from tracesettle.near.tee_signing import signing_provenance as sp
+
+    original = sp.verify_attested_signing
+
+    def _ignores_binding(run_record, attestation_record, **kwargs):
+        kwargs["tx_result"] = None  # drop the binding input
+        verdict = original(run_record, attestation_record, **kwargs)
+        # Force the enclave-provenance link to hold regardless, simulating a
+        # verifier that trusts a valid signature as TEE proof.
+        verdict.failures = [
+            f
+            for f in verdict.failures
+            if f not in ("enclave_output_is_the_signed_transaction", "attestation_verified")
+        ]
+        verdict.verified = not verdict.failures
+        if verdict.verified:
+            verdict.level = sp.LEVEL_TEE_SIGNING_VERIFIED
+        return verdict
+
+    monkeypatch.setattr(sp, "verify_attested_signing", _ignores_binding)
+    result = inv.INVARIANTS["near_attested_signing_binds_the_enclave_output_to_the_transaction"]()
     assert result.holds is False

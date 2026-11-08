@@ -104,3 +104,61 @@ operation, so the rebuilt chain recorded an empty `public_key` and the
   verify with the named algorithm (refuse one it cannot verify).
 * `guard/api.py` + `console.py`: expose the re-verification per transaction and
   render the separate, truthful claims.
+
+---
+
+# Mission 28 addendum — genuine enclave provenance (2026-11-08)
+
+Mission 27 established the **durability** half: the exact signed bytes survive a
+restart, so the ed25519 signature can be re-checked. It stated plainly that a
+stored signature does **not** prove genuine TEE execution. Mission 28 closes that
+gap with a chain of commitments that reaches from the Intel-signed quote to the
+signature.
+
+## The chain, and where each link is checked
+
+```
+Intel-signed TDX quote
+  └─ report_data[0:32] = Task Hash V1(record fields)      outlayer_attestation.task_hash_v1
+       └─ output_hash = sha256(enclave stdout, verbatim)   outlayer_attestation._check_payloads
+            └─ that stdout, parsed, IS sign_transaction.output   signing_provenance._outputs_equal
+                 └─ output.signed_transaction bytes
+                      └─ sha256(borsh(unsigned)) == output.transaction_digest   NearTransaction.unsigned_from_signed
+                           └─ b58(digest) == output.tx_hash
+                                └─ ed25519(sig, digest, output.public_key) verifies   near/ed25519.verify
+```
+
+`near/tee_signing/signing_provenance.py::verify_attested_signing` runs each link
+as a **separately named check** and returns a verdict whose level is
+all-of:
+
+| Level | Meaning |
+|---|---|
+| `TEE_SIGNING_VERIFIED` | every link holds: a genuine Intel TDX enclave, running the approved build, produced this exact signed transaction |
+| `SIGNATURE_VERIFIED` | the signature is genuine for the exact transaction, but the enclave provenance did not hold |
+| `NOT_VERIFIED` | the attestation could not be established |
+| `REFUTED` | the quote verified but a binding did not |
+
+## The decisive link
+
+The enclave's `output_hash` — which Intel signed into the quote — equals
+`sha256(receipt SuccessValue)`, and that SuccessValue *is* the signing output that
+carries `signed_transaction`. A host that swapped the signed transaction after the
+enclave produced it would change the stdout bytes, so `output_hash` would no
+longer match. This is why the verdict is not a restatement: the bytes are
+re-hashed here and compared to a value the attacker cannot forge without Intel's
+signature.
+
+## Reviewer commands
+
+```
+$ python3 -m tracesettle signing-provenance verify \
+      --run tracesettle/near/fixtures/onchain_tee_run.json \
+      --attestation tracesettle/near/fixtures/onchain_tee_attestation.json
+RESULT: PASS   (level TEE_SIGNING_VERIFIED, 7/7 checks)
+
+$ python3 -m tracesettle signing-provenance verify \
+      --run tracesettle/near/fixtures/onchain_tee_run.json \
+      --fetch --execution-tx 9aqdmyBq4GE7zhvnwHcgGVU9mfyUrx4KbKRG26TuierY
+RESULT: PASS   (fetched live from the free OutLayer endpoint + public NEAR RPC)
+```

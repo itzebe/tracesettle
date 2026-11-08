@@ -239,6 +239,42 @@ def test_fetch_attestation_reports_a_missing_record_without_raising_a_pass():
         fetch_attestation("nonexistent", network="testnet", http=_NotFound())
 
 
+def test_fetch_attestation_builds_its_http_client_with_max_attempts(monkeypatch):
+    """Regression: the live fetch path must construct its HTTP client correctly.
+
+    The default client is built with ``max_attempts``; the code once passed
+    ``attempts``, so ``fetch_attestation`` raised ``TypeError`` *before any
+    request* — the live path (``--tx-hash``) crashed instead of fetching. This
+    spies on the constructor and requires the exact keyword, so the defect cannot
+    return, without making a network call.
+    """
+    import tracesettle.httpclient as httpclient_mod
+
+    calls: list[dict] = []
+
+    class _SpyClient:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+
+        def get_json(self, url):
+            from tracesettle.model import SourceStatus
+
+            class R:
+                status = SourceStatus.NOT_FOUND
+                data = None
+                error = "not found"
+
+            return R()
+
+    monkeypatch.setattr(httpclient_mod, "HttpClient", _SpyClient)
+    with pytest.raises(OutLayerAttestationError):
+        fetch_attestation("no-such-tx", network="testnet")
+
+    assert calls, "fetch_attestation must build its own HTTP client when none is supplied"
+    assert calls[0].get("max_attempts") == 2
+    assert "attempts" not in calls[0], "the constructor keyword is max_attempts, not attempts"
+
+
 class _UnreachableRpc:
     """A NearRpc stand-in that cannot reach the register contract."""
 

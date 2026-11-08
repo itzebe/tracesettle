@@ -71,3 +71,49 @@ The console "Durable signature evidence" panel renders each row from the real
 verdict; the provider/TEE/build/settlement rows are shown as "no" with the reason
 when the durable record does not carry that evidence, never inferred from a valid
 signature.
+
+---
+
+# Mission 28 addendum — the enclave-provenance fields (2026-11-08)
+
+Mission 27's contract covers the *durability* half. Mission 28 adds the
+*provenance* half: the fields that let a reviewer prove the signature came from a
+genuine Intel TDX enclave running the approved build, not merely from some key.
+
+These are **not** new durable fields — they are read from the attestation the
+provider publishes and the run capture, both of which are public on-chain data.
+Nothing here is stored in the ledger, so no schema changed.
+
+| Provenance evidence | Source | Claim it supports |
+|---|---|---|
+| Intel TDX quote (signed) | `attestation.tdx_quote` | the platform is a genuine Intel TDX enclave |
+| Task-Hash commitment | `attestation` fields → `task_hash_v1` recomputed | this quote is for **this** run's request |
+| Attested `output_hash` | `attestation.output_hash` | the enclave produced **this** output |
+| Attested `input_hash` | `attestation.input_hash` | the enclave received **this** input |
+| Worker measurement | `attestation.worker_measurement` | which measured enclave identity ran |
+| Worker approved on-chain | register `is_measurements_approved` | the measurement is the operator-approved one |
+| Approved build / WASM digest | `attestation.wasm_hash`, `executed_wasm_sha256` | the approved build ran |
+| Execution binding | `attestation.transaction_hash` | this attestation is for this execution |
+| Provider execution id | `attestation.request_id` / `task_id` | which provider run |
+
+## The level ladder (kept separate, never collapsed)
+
+`signing_provenance.verify_attested_signing` returns exactly one of:
+
+* `TEE_SIGNING_VERIFIED` — the enclave provenance **and** the signature both hold;
+* `SIGNATURE_VERIFIED` — the signature is genuine for the exact transaction, but
+  the enclave provenance did not hold;
+* `NOT_VERIFIED` — the attestation could not be established (e.g. not published);
+* `REFUTED` — the quote verified but a binding failed.
+
+A valid signature alone reaches `SIGNATURE_VERIFIED` at most. This is the
+distinction Mission 27 said must be preserved, now enforced in code and covered by
+the invariant `near_attested_signing_binds_the_enclave_output_to_the_transaction`.
+
+## The decisive binding
+
+`enclave_output_hash_binds_the_receipt` requires the Intel-attested
+`output_hash` to equal `sha256(receipt SuccessValue)`; `attested_output_is_this_
+signing_output` requires that parsed output to equal the recorded signing output
+field for field. Together they are why substituting the signed transaction is
+refused: the enclave's own signed commitment no longer matches.

@@ -4618,6 +4618,93 @@ def _near_recorded_signature_survives_a_restart():
     )
 
 
+def _near_attested_signing_binds_the_enclave_output_to_the_transaction():
+    """A genuine TDX enclave must be provably the signer of the exact transaction.
+
+    Probes, so the check is not a blanket refusal. It replays the real 2026-11-07
+    Intel TDX capture (``near/fixtures/onchain_tee_attestation.json`` — the
+    attestation OutLayer published for the ``request_execution`` call — together
+    with the signing run ``onchain_tee_run.json``) and:
+
+    (a) requires the whole chain to verify, reaching ``TEE_SIGNING_VERIFIED``: the
+        Intel quote, the Task-Hash commitment, the attested ``output_hash`` bound
+        to the receipt that carries the signed transaction, the recomputed digest,
+        and the ed25519 signature over it;
+    (b) swaps the signed transaction and requires a refusal — the decisive link is
+        that the enclave's ``output_hash`` no longer matches the changed bytes;
+    (c) drops the attestation's output binding and requires the run to fall below
+        ``TEE_SIGNING_VERIFIED`` — a valid signature alone is never TEE-verified.
+
+    A verifier that ignored the attestation, or that promoted a bare valid
+    signature, would fail one of these.
+    """
+    import base64 as _b64
+    import copy as _copy
+    import json as _json
+    import pathlib as _pathlib
+
+    from ..near.tee_signing.outlayer_attestation import RecordedApprovalRpc
+    from ..near.tee_signing.signing_provenance import (
+        LEVEL_TEE_SIGNING_VERIFIED,
+        verify_attested_signing,
+    )
+
+    name = "near_attested_signing_binds_the_enclave_output_to_the_transaction"
+    base = _pathlib.Path(__file__).resolve().parents[1] / "near" / "fixtures"
+    run = _json.loads((base / "onchain_tee_run.json").read_text(encoding="utf-8"))
+    fixture = _json.loads((base / "onchain_tee_attestation.json").read_text(encoding="utf-8"))
+
+    def _verify(record, run_record):
+        rpc = RecordedApprovalRpc(fixture["worker_approval"])
+        return verify_attested_signing(
+            run_record,
+            record,
+            network="testnet",
+            tx_result=fixture["tx_result"],
+            rpc=rpc,
+            expected_wasm_sha256=fixture["approved_wasm_sha256"],
+        )
+
+    # (a) the real capture verifies end to end.
+    good = _verify(fixture["attestation"], run)
+    if good.level != LEVEL_TEE_SIGNING_VERIFIED or not good.verified:
+        return InvariantResult(
+            name,
+            False,
+            "the real attested signing run did not reach TEE_SIGNING_VERIFIED: "
+            + str(good.failures),
+        )
+
+    # (b) a swapped signed transaction is refused.
+    swapped = _copy.deepcopy(run)
+    signed = bytearray(_b64.b64decode(swapped["sign_transaction"]["output"]["signed_transaction"]))
+    signed[-1] ^= 0x01
+    swapped["sign_transaction"]["output"]["signed_transaction"] = _b64.b64encode(bytes(signed)).decode()
+    if _verify(fixture["attestation"], swapped).verified:
+        return InvariantResult(
+            name, False, "a swapped signed transaction was still reported TEE-verified"
+        )
+
+    # (c) a valid signature without the enclave-output binding is not TEE-verified.
+    no_binding = _copy.deepcopy(fixture["attestation"])
+    raw = bytearray(_b64.b64decode(no_binding["tdx_quote"]))
+    raw[48 + 520] ^= 0x01
+    no_binding["tdx_quote"] = _b64.b64encode(bytes(raw)).decode()
+    downgraded = _verify(no_binding, run)
+    if downgraded.level == LEVEL_TEE_SIGNING_VERIFIED:
+        return InvariantResult(
+            name, False, "a run whose attestation did not verify was still TEE-verified"
+        )
+
+    return InvariantResult(
+        name,
+        True,
+        "the real Intel TDX signing run reaches TEE_SIGNING_VERIFIED through the enclave's "
+        "attested output_hash bound to the receipt that carries the signed transaction; a "
+        "swapped transaction is refused and a bare valid signature is never TEE-verified",
+    )
+
+
 def _near_evidence_chain_reverifies_the_signature():
     """The evidence chain must re-verify the signature, not only compare strings.
 
@@ -4821,6 +4908,9 @@ INVARIANTS: dict[str, Callable[[], InvariantResult]] = {
     "near_onchain_tee_signing_reproduces_the_products_digest": (
         _near_onchain_tee_signing_reproduces_the_products_digest
     ),
+    "near_attested_signing_binds_the_enclave_output_to_the_transaction": (
+        _near_attested_signing_binds_the_enclave_output_to_the_transaction
+    ),
     "near_evidence_chain_reverifies_the_signature": (
         _near_evidence_chain_reverifies_the_signature
     ),
@@ -4900,6 +4990,7 @@ INVARIANT_DESCRIPTIONS: dict[str, str] = {
     "agent_surface_is_sandbox_scoped": "The agent integration is sandbox-scoped: a sandbox credential resolves to a sandbox- identity, the sandbox policy registers no operator service, a cross-service request is refused, and the approval secret is separate from the API credential.",
     "hostile_input_never_crashes_the_guard": "A malformed request is always a decision or a typed refusal, never an unhandled exception: a non-token authorization, an absurd amount exponent and a non-string destination each fail closed.",
     "near_onchain_tee_signing_reproduces_the_products_digest": "The free on-chain TEE route binds the enclave's answer to the product's own digest: the product's transaction builder reproduces the live run's exact digest and hash from the enclave's recorded parameters, the provider parses the real captured answer, and an answer whose digest differs is refused.",
+    "near_attested_signing_binds_the_enclave_output_to_the_transaction": "A genuine Intel TDX enclave is provably the signer of the exact transaction: the enclave's Intel-attested output_hash equals sha256 of the on-chain receipt output, that output IS the signing output carrying the signed transaction, the NEAR digest is recomputed from the bytes and the ed25519 signature verifies over it; a swapped transaction is refused and a bare valid signature is never reported TEE-verified.",
     "near_evidence_chain_reverifies_the_signature": "The authorization-to-settlement evidence chain re-verifies the ed25519 signature it carries over the recorded digest, so a well-formed signature that does not actually verify breaks the chain even though every string field still agrees.",
     "near_recorded_signature_survives_a_restart": "The exact signed transaction bytes are durably persisted, so after a process restart a fresh instance recomputes the NEAR digest from them and independently re-verifies the ed25519 signature over it; a tampered byte is refused and the durable evidence chain still carries a re-verifiable signature.",
 }

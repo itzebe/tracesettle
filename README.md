@@ -1003,8 +1003,8 @@ a bare interpreter.
 **1. Run the tests.**
 
 ```sh
-python -m pytest tests/ --collect-only -q   # 1968 tests collected
-python -m pytest tests/ -q                  # 1934 passed, 34 skipped
+python -m pytest tests/ --collect-only -q   # 1986 tests collected
+python -m pytest tests/ -q                  # 1952 passed, 34 skipped
 ```
 → `1934 passed, 34 skipped`. The skips are the PostgreSQL integration
 tests; set `TRACESETTLE_TEST_PG_DSN` to a real server to run them
@@ -1539,7 +1539,7 @@ transaction request ──▶ │ guard/rules.py      7 controls, all run  │
                         │                     validate, then execute │
                         │ guard/audit.py      hash-chained records  │
                         │ guard/monitor.py    counters + incidents  │
-                        │ guard/invariants.py 63 checked guarantees │
+                        │ guard/invariants.py 64 checked guarantees │
                         └────────────────────┬─────────────────────┘
                                              │ ALLOW + authorization
                                              ▼
@@ -1629,7 +1629,7 @@ identical decisions.
 | `tracesettle/near/agent_demo.py` | The one implementation of the offline end-to-end demonstration (policy, harness, `run_agent_payment_demo`); used by the CLI, the `/api/guard/near/agent-demo` endpoint, and the console panel. |
 | `demo/replay_opener.py` | Offline transport that replays `evidence/raw/` through the real code. |
 | `tracesettle/static/near-connect.js` | Vendored `@hot-labs/near-connect` (MIT) wallet connector, served same-origin at `/assets/near-connect.js`. |
-| `tests/` | 1855 tests (34 skip without `TRACESETTLE_TEST_PG_DSN`; further tests are opt-in live tests that skip without a live testnet key, live Agent API credentials, `TRACESETTLE_ENCLAVE_HARNESS=1`, `TRACESETTLE_TEST_ONCHAIN_TEE=1`, or live OutLayer signing credentials). `evidence/raw/` fixtures are real captures; `tests/fixtures/synthetic/` are clearly labelled synthetic. |
+| `tests/` | 1986 tests (34 skip without `TRACESETTLE_TEST_PG_DSN`; further tests are opt-in live tests that skip without a live testnet key, live Agent API credentials, `TRACESETTLE_ENCLAVE_HARNESS=1`, `TRACESETTLE_TEST_ONCHAIN_TEE=1`, or live OutLayer signing credentials). `evidence/raw/` fixtures are real captures; `tests/fixtures/synthetic/` are clearly labelled synthetic. |
 | `JUDGE_GUIDE.md` | The independent evaluation guide, rendered at `/JUDGE_GUIDE`. |
 | `docs/API.md` | The complete HTTP surface: routes, auth, request/response shape. |
 | `PHASE1_FEASIBILITY.md` | Phase 1 feasibility and API verification. |
@@ -1964,7 +1964,7 @@ immutable commit SHA (not a moving tag), and cancels superseded runs.
 ## Tests
 
 ```sh
-python3 -m pytest tests/ -q          # 1821 passed, 34 skipped (1845 passed, 10 skipped with PostgreSQL)
+python3 -m pytest tests/ -q          # 1952 passed, 34 skipped (1976 passed, 10 skipped with PostgreSQL)
 python3 -m pytest tests/test_guard_authorization.py -q
 python3 -m pytest tests/test_guard_invariants.py -q
 python3 -m pytest tests/test_guard_end_to_end.py -q
