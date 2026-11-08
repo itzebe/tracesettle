@@ -1,0 +1,30 @@
+# Mission 33R — live CLI outcomes (read-only; no key present in this runtime)
+
+Base URL: https://api.agentsonintents.com
+
+## python3 -m tracesettle provider auth --json
+{
+  "api_key_id": null,
+  "authenticated": false,
+  "base_url_configured": true,
+  "detail": "No Agent API key is configured. The provider requires X-API-Key; refusing to make an unauthenticated whoami call.",
+  "endpoint": null,
+  "http_status": null,
+  "key_configured": false,
+  "tenant_id": null
+}
+exit=1
+
+## python3 -m tracesettle provider agents --json
+{
+  "agents": [],
+  "availability": "UNAUTHENTICATED",
+  "base_url_configured": true,
+  "count": 0,
+  "detail": "No Agent API key is configured. The provider requires X-API-Key; refusing to make an unauthenticated agent list call.",
+  "endpoint": null,
+  "http_status": null,
+  "key_configured": false,
+  "next_cursor": null
+}
+exit=1
