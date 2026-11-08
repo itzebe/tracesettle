@@ -146,8 +146,10 @@ Where each capability stands:
   aliases. Authenticate a configured key (read-only, free) with
   `python3 -m tracesettle provider auth`; the key is read only from the
   environment and is never printed. Discover an accessible agent with
-  `python3 -m tracesettle provider agents` (the documented `GET /v1/agents`).
-  See `evidence/mission30/` and `evidence/mission31/`.
+  `python3 -m tracesettle provider agents` (the documented `GET /v1/agents`) and
+  read its live policy with `python3 -m tracesettle provider policy <agent_id>`
+  (`GET /v1/agents/{agent_id}/policy`). See `evidence/mission30/`,
+  `evidence/mission31/` and `evidence/mission32/`.
 - **TEE:** no TEE *confidentiality* protection is claimed for execution, and the
   default path does not require one (see
   [`docs/TEE_RESEARCH.md`](docs/TEE_RESEARCH.md)). Two honest capabilities are

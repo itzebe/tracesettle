@@ -244,3 +244,35 @@ def test_provider_agents_never_prints_the_key():
     )
     assert "super-secret-value-xyz" not in proc.stdout
     assert "super-secret-value-xyz" not in proc.stderr
+
+
+def test_provider_policy_fails_closed_without_configuration():
+    proc = _run_env({}, "provider", "policy", "some-agent-id", "--json")
+    assert proc.returncode != 0
+    payload = json.loads(proc.stdout)
+    assert payload["availability"] == "UNCONFIGURED"
+    assert payload["agent_id_requested"] == "some-agent-id"
+    assert "No Agent API base URL" in payload["detail"]
+
+
+def test_provider_policy_fails_closed_without_a_key():
+    proc = _run_env(
+        {"TRACESETTLE_NEAR_AGENT_API_URL": "https://api.agentsonintents.com"},
+        "provider", "policy", "some-agent-id", "--json",
+    )
+    assert proc.returncode != 0
+    payload = json.loads(proc.stdout)
+    assert payload["availability"] == "UNAUTHENTICATED"
+    assert "No Agent API key" in payload["detail"]
+
+
+def test_provider_policy_never_prints_the_key():
+    proc = _run_env(
+        {
+            "NEAR_INTENTS_AGENT_API_URL": "http://127.0.0.1:1",
+            "NEAR_INTENTS_AGENT_API_KEY": "super-secret-value-xyz",
+        },
+        "provider", "policy", "some-agent-id", "--json",
+    )
+    assert "super-secret-value-xyz" not in proc.stdout
+    assert "super-secret-value-xyz" not in proc.stderr

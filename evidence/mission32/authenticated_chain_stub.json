@@ -1,0 +1,135 @@
+{
+  "generated_at": "2026-11-08T18:04:46.395033+00:00",
+  "key_is_stub": true,
+  "note": "No live key was available; this proves the code path, not live provider state.",
+  "steps": {
+    "authenticate": {
+      "api_key_id": "key_stub_01",
+      "authenticated": true,
+      "detail": "authenticated against the Agent API",
+      "endpoint": "http://127.0.0.1:42987/v1/whoami",
+      "http_status": 200,
+      "tenant_id": "tenant_stub"
+    },
+    "authenticate_wrong_key": {
+      "api_key_id": null,
+      "authenticated": false,
+      "detail": "the provider rejected the key (invalid or retired credentials)",
+      "endpoint": "http://127.0.0.1:42987/v1/whoami",
+      "http_status": 401,
+      "tenant_id": null
+    },
+    "gate_in_force": {
+      "agent_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "as_of": "2026-11-08T00:00:00Z",
+      "decision": "ALLOW",
+      "detail": "the provider policy (revision 7) is applied and synced, not frozen, and enables native.near.transfer",
+      "endpoint": "http://127.0.0.1:42987/v1/agents/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/policy",
+      "local_fixture": false,
+      "outcome": "IN_FORCE",
+      "permitted": true,
+      "policy_hash": "823412d1eacb67956220e532959f0104603057c88704863ca38e7cd188fda812",
+      "provider_policy_synced": true,
+      "revision": 7,
+      "source": "live",
+      "status": "APPLIED",
+      "usage_counters": {}
+    },
+    "gate_malformed": {
+      "agent_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "as_of": null,
+      "decision": "HOLD",
+      "detail": "the provider policy is not in force (status=UNKNOWN, provider_policy_synced=False); a requested or signed update is not active, so no operation is authorized under it",
+      "endpoint": "http://127.0.0.1:42987/v1/agents/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/policy",
+      "local_fixture": false,
+      "outcome": "NOT_IN_FORCE",
+      "permitted": false,
+      "policy_hash": null,
+      "provider_policy_synced": false,
+      "revision": 0,
+      "source": "live",
+      "status": "UNKNOWN",
+      "usage_counters": {}
+    },
+    "gate_native_transfer_disabled": {
+      "agent_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "as_of": "2026-11-08T00:00:00Z",
+      "decision": "BLOCK",
+      "detail": "the provider policy does not enable native.near.transfer; a native NEAR transfer is refused by this policy",
+      "endpoint": "http://127.0.0.1:42987/v1/agents/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/policy",
+      "local_fixture": false,
+      "outcome": "NATIVE_TRANSFER_DISABLED",
+      "permitted": false,
+      "policy_hash": "823412d1eacb67956220e532959f0104603057c88704863ca38e7cd188fda812",
+      "provider_policy_synced": true,
+      "revision": 7,
+      "source": "live",
+      "status": "APPLIED",
+      "usage_counters": {}
+    },
+    "gate_not_in_force": {
+      "agent_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "as_of": "2026-11-08T00:00:00Z",
+      "decision": "HOLD",
+      "detail": "the provider policy is not in force (status=SIGNED, provider_policy_synced=False); a requested or signed update is not active, so no operation is authorized under it",
+      "endpoint": "http://127.0.0.1:42987/v1/agents/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/policy",
+      "local_fixture": false,
+      "outcome": "NOT_IN_FORCE",
+      "permitted": false,
+      "policy_hash": "823412d1eacb67956220e532959f0104603057c88704863ca38e7cd188fda812",
+      "provider_policy_synced": false,
+      "revision": 7,
+      "source": "live",
+      "status": "SIGNED",
+      "usage_counters": {}
+    },
+    "gate_outage": {
+      "agent_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "as_of": null,
+      "decision": "HOLD",
+      "detail": "provider policy could not be established (UNAVAILABLE): the provider returned an unusable response (status 503)",
+      "endpoint": "http://127.0.0.1:42987/v1/agents/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/policy",
+      "local_fixture": false,
+      "outcome": "UNAVAILABLE",
+      "permitted": false,
+      "policy_hash": null,
+      "provider_policy_synced": null,
+      "revision": null,
+      "source": "live",
+      "status": null,
+      "usage_counters": {}
+    },
+    "list_agents": {
+      "agents": [
+        {
+          "agent_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "archived": false,
+          "deleted": false,
+          "name": "treasury",
+          "status": "ACTIVE"
+        }
+      ],
+      "availability": "AVAILABLE",
+      "count": 1,
+      "detail": "1 accessible agent(s)",
+      "endpoint": "http://127.0.0.1:42987/v1/agents",
+      "http_status": 200,
+      "next_cursor": null
+    },
+    "read_policy_in_force": {
+      "agent_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "availability": "AVAILABLE",
+      "endpoint": "http://127.0.0.1:42987/v1/agents/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/policy",
+      "in_force": true,
+      "native_near_transfer": true,
+      "policy_hash": "823412d1eacb67956220e532959f0104603057c88704863ca38e7cd188fda812",
+      "provider_policy_synced": true,
+      "revision": 7,
+      "status": "APPLIED"
+    },
+    "read_policy_no_key": {
+      "availability": "UNAUTHENTICATED"
+    }
+  },
+  "transport": "real urllib against a local stub that enforces X-API-Key"
+}
