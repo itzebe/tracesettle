@@ -43,6 +43,15 @@ def attestation_fixture() -> dict:
 
 
 def _verify(run: dict, att_fixture: dict, **kwargs):
+    # The register-contract approval is an on-chain fact, but this suite is
+    # offline and deterministic: replay the approval recorded in the fixture
+    # rather than reaching the chain (a rate-limited RPC must not decide a unit
+    # test). ``worker_is_approved`` is exercised against the live contract in
+    # the opt-in live test and in evidence/mission29.
+    if "rpc" not in kwargs and att_fixture.get("worker_approval") is not None:
+        from tracesettle.near.tee_signing.outlayer_attestation import RecordedApprovalRpc
+
+        kwargs["rpc"] = RecordedApprovalRpc(att_fixture["worker_approval"])
     return verify_attested_signing(
         run,
         att_fixture["attestation"],

@@ -474,12 +474,12 @@ def test_the_attestation_verifier_answers_from_a_package_only_copy(tmp_path):
     root = _package_only_copy(tmp_path)
     script = (
         "from tracesettle.near.tee_signing.outlayer_attestation "
-        "import verify_outlayer_attestation\n"
+        "import verify_outlayer_attestation, RecordedApprovalRpc\n"
         "import json, pathlib\n"
         "p = pathlib.Path('tracesettle/near/fixtures/onchain_tee_attestation.json')\n"
         "rec = json.loads(p.read_text())\n"
         "v = verify_outlayer_attestation(rec['attestation'], network='testnet',\n"
-        "    tx_result=rec['tx_result'])\n"
+        "    tx_result=rec['tx_result'], rpc=RecordedApprovalRpc(rec['worker_approval']))\n"
         "print('RESULT:' + str(v.verified) + ':' + str(v.level))\n"
     )
     out = subprocess.run(
