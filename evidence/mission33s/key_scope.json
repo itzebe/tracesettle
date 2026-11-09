@@ -1,0 +1,16 @@
+{
+  "agent_api": {
+    "auth_header": "X-API-Key",
+    "body": "{\"errors\":[{\"status\":\"401\",\"code\":\"invalid_api_key\",\"layer\":\"auth\",\"title\":\"Invalid api key\",\"detail\":\"Send a live API key in the X-API-Key header.\"}],\"meta\":{\"request_id\":\"db3325ea-9472-481b-8e2b-9172d00e707a\"}}",
+    "endpoint": "https://api.agentsonintents.com/v1/whoami",
+    "http_status": 401
+  },
+  "explorer_api": {
+    "accepted": true,
+    "auth_header": "Authorization: Bearer",
+    "endpoint": "https://explorer.near-intents.org/api/v0/transactions",
+    "http_status": 200
+  },
+  "generated_at": "2026-11-09T06:33:07.761930+00:00",
+  "jwt_key_type": "explorer"
+}
