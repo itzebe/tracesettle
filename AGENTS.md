@@ -2574,3 +2574,58 @@ It did not: this mission found and fixed the defect and proved the fixed path.
   execution, provider identity, approved build or settlement; those are separate
   claims with separate evidence and are reported separately. No live enclave
   signature was produced (the OutLayer route is paid); no mainnet; no cost.
+
+## Mission 30 — NEAR Intents Agent API authentication + documented PolicyView (2026-11-08)
+
+Read-only, zero-cost. Makes the provider read path work against the provider's
+**actual** documented response shapes. No security control was weakened; the
+settlement engine, the guard controls and the provider-policy gate are untouched.
+
+- **Defect found and fixed — `parse_policy` did not accept the documented
+  `PolicyView`.** `GET /v1/agents/{agent_id}/policy` returns a **PolicyView**: the
+  lifecycle (`status`, `provider_policy_synced`, `revision`, `policy_hash`,
+  `applied_at`) sits at the **top level** and the rules are nested under `policy`
+  (a **Policy**). The old parser treated `raw["policy"]` as the whole document, so
+  against the real shape it (1) raised `PolicyParseError: policy.budget_usd is not
+  a valid decimal number` (the documented `budget` is an object), (2) read
+  `status`/`provider_policy_synced` as absent → `in_force == False`, (3) lost
+  `max_actions_per_hour` (documented **beside** `limits`), and (4) read the
+  documented array-form native switches with `bool()`. Every one made the gate
+  *stricter or wrong*, never fail-open — but a genuine in-force policy reading as
+  "malformed / not in force" makes the whole provider-policy layer useless in
+  production. The parser now reads the envelope + nested rules, `max_actions_per_hour`
+  from beside `limits`, `budget.daily_usd|weekly_usd|monthly_usd` (tightest), a new
+  `budget_spent_usd` from `usage.budget` only, and native switches by the documented
+  array rule (empty ⇒ off, non-empty ⇒ on). A flat fixture still parses unchanged.
+- **New: `PolicyAdapter.authenticate()`** — `GET /v1/whoami`, read-only and free.
+  Returns a `ProviderAuth` (only the provider's non-secret `api_key_id`/`tenant_id`);
+  distinguishes valid (200), rejected (401/403), unavailable (5xx/timeout) and
+  unconfigured. The key is sent only as `X-API-Key`, never logged or returned.
+- **New CLI: `python3 -m tracesettle provider auth`** — authenticates a configured
+  key. The key is read only from the environment; an obvious invalid key was used
+  to prove the path reaches the provider (`401 invalid_api_key`), never printed.
+- **Provider env-name aliases.** `config.py` now also accepts the provider's own
+  documented names `NEAR_INTENTS_AGENT_API_URL` / `NEAR_INTENTS_AGENT_API_KEY`
+  (in addition to `TRACESETTLE_NEAR_AGENT_API_*`).
+- **Regression tests:** +14 (`tests/test_near_policy.py` PolicyView shape — 7 new;
+  `tests/test_tee_verify_cli.py` provider auth CLI — 4 new; plus 3 earlier policy
+  tests). Mutation-checked: neutralising the envelope handling fails 3 tests. New
+  synthetic fixture `tracesettle/near/fixtures/policy_view_applied.json`
+  (`_provenance: synthetic`, names the live OpenAPI it reproduces).
+- **Live, read-only probes (no key sent):** `GET /openapi.json` 200 (40 `/v1/…`
+  paths, securitySchemes `ApiKey`+`GrantToken`); `GET /v1/network` 200
+  (`mainnet`, `outlayer.near`, operational); `GET /v1/whoami` **401
+  `invalid_api_key`** — the documented auth boundary, not an outage. Capture:
+  `evidence/mission30/provider_probe.json`.
+- **A successful live authenticated read is ACCESS-BLOCKED.** The key
+  (`NEAR_INTENTS_AGENT_API_KEY`) is absent from this runtime (`len == 0`; not in
+  the injected-secret set), and a key must never be pasted into source, a command
+  line, or a log. The read path is implemented, tested and proven to reach the
+  provider; only the live `200` is deferred.
+- **Counts:** filesystem **1970 passed, 34 skipped**; PostgreSQL 16 **1994 passed,
+  10 skipped**. pyflakes clean; compileall OK; offline demo byte-identical (md5
+  `4864f13c…`); 141 invariant tests pass. CI on `efd28ba` is **green** (Tests and
+  static analysis; PostgreSQL shared-state integration; Docker build and runtime;
+  TEE guest digest parity; Vercel container image).
+- **Not done, requires explicit human confirmation:** no merge, no deploy, no
+  mainnet, no write to provider state, no cost.

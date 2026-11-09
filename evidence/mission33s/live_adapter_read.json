@@ -1,0 +1,10 @@
+{
+  "availability": "UNAUTHENTICATED",
+  "detail": "the provider refused the request (missing or wrong credentials)",
+  "endpoint": "https://api.agentsonintents.com/v1/agents/treasury-agent/policy",
+  "generated_at": "2026-11-09T06:33:08.150968+00:00",
+  "http_status": null,
+  "in_force": null,
+  "local_fixture": false,
+  "policy_present": false
+}

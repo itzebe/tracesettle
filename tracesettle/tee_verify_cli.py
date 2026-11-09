@@ -290,6 +290,98 @@ def _action_bytes(action: dict[str, Any]) -> bytes:
 # -- evidence chain ----------------------------------------------------------
 
 
+def cmd_provider_auth(args: argparse.Namespace) -> int:
+    """Authenticate against the NEAR Intents Agent API and report the identity.
+
+    Read-only and free (``GET /v1/whoami``). The key is read only from the
+    environment (``TRACESETTLE_NEAR_AGENT_API_KEY``); it is never taken from the
+    command line, never logged, and never printed. Only the provider's own
+    non-secret ``api_key_id``/``tenant_id`` are shown.
+    """
+    from . import config
+    from .httpclient import HttpClient
+    from .near.policy import PolicyAdapter
+
+    base_url = args.base_url or config.NEAR_AGENT_API_URL
+    adapter = PolicyAdapter(
+        base_url=base_url,
+        api_key=config.NEAR_AGENT_API_KEY,
+        http_client=HttpClient(),
+        expected_host=config.NEAR_AGENT_API_EXPECTED_HOST,
+    )
+    auth = adapter.authenticate()
+    payload = auth.to_dict()
+    payload["base_url_configured"] = bool(base_url)
+    payload["key_configured"] = bool(config.NEAR_AGENT_API_KEY)
+    return _emit(payload, as_json=args.json, title="agent api authentication", ok=auth.authenticated)
+
+
+def cmd_provider_agents(args: argparse.Namespace) -> int:
+    """List the agents the authenticated partner can access (``GET /v1/agents``).
+
+    Read-only and free. It is the only way to discover an agent id without
+    inventing one. Authentication does **not** imply policy authorization: an
+    empty list is reported honestly, and the caller must still read (and verify)
+    the agent's policy. The key is read only from the environment and never
+    printed.
+    """
+    from . import config
+    from .httpclient import HttpClient
+    from .near.policy import PolicyAdapter
+
+    base_url = args.base_url or config.NEAR_AGENT_API_URL
+    adapter = PolicyAdapter(
+        base_url=base_url,
+        api_key=config.NEAR_AGENT_API_KEY,
+        http_client=HttpClient(),
+        expected_host=config.NEAR_AGENT_API_EXPECTED_HOST,
+    )
+    listing = adapter.list_agents()
+    payload = listing.to_dict()
+    payload["base_url_configured"] = bool(base_url)
+    payload["key_configured"] = bool(config.NEAR_AGENT_API_KEY)
+    return _emit(
+        payload,
+        as_json=args.json,
+        title="accessible agents",
+        ok=listing.availability.value == "AVAILABLE",
+    )
+
+
+def cmd_provider_policy(args: argparse.Namespace) -> int:
+    """Read one agent's policy from the live provider (``GET /v1/agents/{id}/policy``).
+
+    Read-only and free. The adapter verifies the provider host, the agent
+    association, the revision freshness (when a bound is set) and that the body
+    parsed before reporting the read ``AVAILABLE``; any failure is reported as a
+    non-available read so the caller fails closed. The key is read only from the
+    environment and is never printed. A ``PolicyView`` envelope is parsed (rules
+    under ``policy``, lifecycle at the top level).
+    """
+    from . import config
+    from .httpclient import HttpClient
+    from .near.policy import PolicyAdapter
+
+    base_url = args.base_url or config.NEAR_AGENT_API_URL
+    adapter = PolicyAdapter(
+        base_url=base_url,
+        api_key=config.NEAR_AGENT_API_KEY,
+        http_client=HttpClient(),
+        expected_host=config.NEAR_AGENT_API_EXPECTED_HOST,
+    )
+    read = adapter.read_policy(args.agent_id)
+    payload = read.to_dict()
+    payload["agent_id_requested"] = args.agent_id
+    payload["base_url_configured"] = bool(base_url)
+    payload["key_configured"] = bool(config.NEAR_AGENT_API_KEY)
+    return _emit(
+        payload,
+        as_json=args.json,
+        title="agent policy",
+        ok=read.availability.value == "AVAILABLE",
+    )
+
+
 def cmd_chain_verify(args: argparse.Namespace) -> int:
     data = json.loads(Path(args.record).read_text(encoding="utf-8"))
     chain = EvidenceChain.from_dict(data)
@@ -420,6 +512,27 @@ def add_reviewer_subcommands(sub: argparse._SubParsersAction) -> None:  # type: 
     cv.add_argument("record", help="a JSON evidence-chain record")
     cv.add_argument("--json", action="store_true")
     cv.set_defaults(func=cmd_chain_verify)
+
+    pauth = sub.add_parser(
+        "provider",
+        help="authenticate against the NEAR Intents Agent API (read-only, free)",
+    )
+    pauth_sub = pauth.add_subparsers(dest="provider_command", required=True)
+    pa = pauth_sub.add_parser("auth", help="call GET /v1/whoami and report the identity")
+    pa.add_argument("--base-url", default="", help="override TRACESETTLE_NEAR_AGENT_API_URL")
+    pa.add_argument("--json", action="store_true")
+    pa.set_defaults(func=cmd_provider_auth)
+
+    plist = pauth_sub.add_parser("agents", help="list accessible agents (GET /v1/agents)")
+    plist.add_argument("--base-url", default="", help="override TRACESETTLE_NEAR_AGENT_API_URL")
+    plist.add_argument("--json", action="store_true")
+    plist.set_defaults(func=cmd_provider_agents)
+
+    ppolicy = pauth_sub.add_parser("policy", help="read one agent's live policy")
+    ppolicy.add_argument("agent_id", help="the agent id to read the policy for")
+    ppolicy.add_argument("--base-url", default="", help="override TRACESETTLE_NEAR_AGENT_API_URL")
+    ppolicy.add_argument("--json", action="store_true")
+    ppolicy.set_defaults(func=cmd_provider_policy)
 
     prov = sub.add_parser(
         "signing-provenance",

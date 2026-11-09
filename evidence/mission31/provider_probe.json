@@ -1,0 +1,121 @@
+{
+  "base_url": "https://api.agentsonintents.com",
+  "key_sent": false,
+  "probed_at": "2026-11-08T17:24:50.200906+00:00",
+  "probes": {
+    "agents_no_key": {
+      "body": {
+        "errors": [
+          {
+            "code": "invalid_api_key",
+            "detail": "Send a live API key in the X-API-Key header.",
+            "layer": "auth",
+            "status": "401",
+            "title": "Invalid api key"
+          }
+        ],
+        "meta": {
+          "request_id": "f4724a1c-8981-47f0-b5cb-ad55f11eb3eb"
+        }
+      },
+      "http_status": 401
+    },
+    "network": {
+      "body": {
+        "contract_id": "outlayer.near",
+        "network": "mainnet",
+        "status": {
+          "checked_at": "2026-11-08T17:24:00.103Z",
+          "components": [
+            {
+              "affects": [
+                "swap",
+                "withdraw",
+                "deposit"
+              ],
+              "checked_at": "2026-11-08T17:24:00.423Z",
+              "id": "one_click",
+              "reason": null,
+              "since": "2026-11-08T02:31:59.878Z",
+              "status": "operational"
+            },
+            {
+              "affects": [
+                "swap",
+                "withdraw",
+                "transfer",
+                "shield",
+                "unshield",
+                "deposit",
+                "owner_intents",
+                "balances"
+              ],
+              "checked_at": "2026-11-08T17:24:00.103Z",
+              "id": "custody",
+              "reason": null,
+              "since": "2026-11-08T06:13:00.015Z",
+              "status": "operational"
+            },
+            {
+              "affects": [
+                "owner_intents",
+                "balances"
+              ],
+              "checked_at": "2026-11-08T17:24:00.250Z",
+              "id": "near",
+              "reason": null,
+              "since": "2026-11-07T10:17:59.050Z",
+              "status": "operational"
+            }
+          ],
+          "overall": "operational"
+        },
+        "supported_owner_types": [
+          "near",
+          "passkey"
+        ]
+      },
+      "http_status": 200
+    },
+    "openapi": {
+      "agents_security": [
+        {
+          "ApiKey": []
+        }
+      ],
+      "has_agents": true,
+      "has_policy": true,
+      "has_whoami": true,
+      "http_status": 200,
+      "security_schemes": [
+        "ApiKey",
+        "GrantToken"
+      ],
+      "title": "NEAR Intents Agent API",
+      "v1_path_count": 40,
+      "version": "1.0.0",
+      "whoami_security": [
+        {
+          "ApiKey": []
+        }
+      ]
+    },
+    "whoami_no_key": {
+      "body": {
+        "errors": [
+          {
+            "code": "invalid_api_key",
+            "detail": "Send a live API key in the X-API-Key header.",
+            "layer": "auth",
+            "status": "401",
+            "title": "Invalid api key"
+          }
+        ],
+        "meta": {
+          "request_id": "9610a85d-da34-400c-abc8-836da671d4c0"
+        }
+      },
+      "http_status": 401
+    }
+  }
+}

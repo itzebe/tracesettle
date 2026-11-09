@@ -1,0 +1,61 @@
+{
+  "authorization_discarded": true,
+  "binding": {
+    "amount": "1",
+    "asset": "NEAR:NATIVE",
+    "chain": "near-testnet",
+    "destination": "alice.testnet",
+    "operation": "WITHDRAWAL",
+    "service_id": "treasury-agent",
+    "transaction_digest": "sha256:1886dd8e3ba4df1d7473b46d27ccc408f40671fd2e557235b4fa54cde88d4aaa"
+  },
+  "decision_changed_by_provider_policy": true,
+  "explanation_mentions_provider": true,
+  "findings": [
+    {
+      "code": "PROVIDER_POLICY_UNAUTHENTICATED",
+      "detail": "provider policy could not be established (UNAUTHENTICATED): the provider refused the request (missing or wrong credentials)",
+      "observed": {
+        "provider_policy_outcome": "UNAUTHENTICATED",
+        "provider_policy_revision": "unknown",
+        "provider_policy_source": "live"
+      },
+      "policy": "near provider policy (NEAR Intents Agent API)",
+      "severity": "HIGH",
+      "title": "NEAR provider policy"
+    }
+  ],
+  "key_configured": true,
+  "operator_policy_only": {
+    "authorization_id": "auth_812a92cfe67d69e09a7ad5c0",
+    "authorized": true,
+    "decision": "ALLOW",
+    "provider_policy": null
+  },
+  "provider": {
+    "base_url": "https://api.agentsonintents.com",
+    "layer": "near provider policy (NEAR Intents Agent API)"
+  },
+  "transaction_binding_identical": true,
+  "with_live_provider_policy": {
+    "authorization_id": null,
+    "authorized": false,
+    "decision": "HOLD",
+    "provider_policy": {
+      "agent_id": "treasury-agent",
+      "as_of": null,
+      "decision": "HOLD",
+      "detail": "provider policy could not be established (UNAUTHENTICATED): the provider refused the request (missing or wrong credentials)",
+      "endpoint": "https://api.agentsonintents.com/v1/agents/treasury-agent/policy",
+      "local_fixture": false,
+      "outcome": "UNAUTHENTICATED",
+      "permitted": false,
+      "policy_hash": null,
+      "provider_policy_synced": null,
+      "revision": null,
+      "source": "live",
+      "status": null,
+      "usage_counters": {}
+    }
+  }
+}

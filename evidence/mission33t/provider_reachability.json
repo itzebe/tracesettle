@@ -1,0 +1,13 @@
+{
+  "api_key_scheme": "X-API-Key",
+  "base_url": "https://api.agentsonintents.com",
+  "generated_at": "2026-11-09T10:21:52.033816+00:00",
+  "network_http_status": 200,
+  "openapi_http_status": 200,
+  "openapi_title": "NEAR Intents Agent API",
+  "openapi_version": "1.0.0",
+  "tokens_http_status": 200,
+  "unauthenticated_agents_body": "{\"errors\":[{\"status\":\"401\",\"code\":\"invalid_api_key\",\"layer\":\"auth\",\"title\":\"Invalid api key\",\"detail\":\"Send a live API key in the X-API-Key header.\"}],\"meta\":{\"request_id\":\"05e5507f-ff36-4e7b-ad88-9c3240f4570e\"}}",
+  "unauthenticated_agents_http_status": 401,
+  "v1_path_count": 40
+}

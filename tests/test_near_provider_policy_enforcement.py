@@ -206,3 +206,149 @@ def test_prepared_operation_reports_provider_policy_provenance():
     payload = prepared.to_dict()
     assert payload["provider_policy"] is not None
     assert payload["provider_policy"]["agent_id"] == "treasury-agent"
+
+
+# -- real parser -> real gate -> real boundary (no substituted parser) --------
+
+
+class _FakeHttpClient:
+    """A transport stand-in that returns one canned provider response.
+
+    Only the network boundary is substituted; the real ``PolicyAdapter`` (its
+    URL building, header handling, status classification) and the real
+    ``parse_policy`` run.
+    """
+
+    def __init__(self, result):
+        self._result = result
+        self.calls: list[str] = []
+
+    def get_json(self, url, params=None, headers=None):
+        self.calls.append(url)
+        return self._result
+
+
+class _FakeResult:
+    def __init__(self, *, ok, data=None, http_status=None, status=None):
+        self.ok = ok
+        self.data = data
+        self.http_status = http_status
+        self.status = status
+
+
+def _policy_view_envelope(**overrides):
+    """The documented PolicyView shape: lifecycle at the top level, rules nested."""
+    body = {
+        "wallet_id": "treasury-agent.near",
+        "revision": 4,
+        "status": "APPLIED",
+        "provider_policy_synced": True,
+        "applied_at": "2026-11-08T00:00:00Z",
+        "policy_hash": "c" * 64,
+        "policy": {
+            "agent_id": "treasury-agent",
+            "actions": ["transfer"],
+            "asset_ids": ["near:native"],
+            "max_actions_per_hour": 5,
+            "native": {"near": {"transfer": True, "call": [], "sign_message": []}},
+        },
+    }
+    body.update(overrides)
+    return body
+
+
+def _boundary_with_real_adapter(envelope, *, require=True):
+    boundary, rpc = make_boundary()
+    adapter = PolicyAdapter(
+        base_url="https://provider.invalid",
+        api_key="secret",
+        http_client=_FakeHttpClient(_FakeResult(ok=True, data=envelope, http_status=200)),
+    )
+    from tracesettle.near.provider_policy_gate import ProviderPolicyGate
+
+    boundary._policy_adapter = adapter
+    boundary._provider_policy_agent_id = "treasury-agent"
+    boundary._require_provider_policy = require
+    boundary._policy_gate = ProviderPolicyGate(
+        adapter, agent_id="treasury-agent", require=require, native_chain="near"
+    )
+    return boundary, rpc
+
+
+def test_the_real_parser_connects_a_documented_policy_view_to_enforcement():
+    """The corrected PolicyView parser feeds the real gate: an in-force policy allows."""
+    boundary, _ = _boundary_with_real_adapter(_policy_view_envelope())
+    prepared = _prepare(boundary)
+    assert prepared.decision.decision is Decision.ALLOW
+    assert prepared.authorized
+    assert prepared.provider_policy is not None
+    assert prepared.provider_policy.outcome.value == "IN_FORCE"
+
+
+def test_a_documented_policy_view_that_is_not_synced_is_refused_by_the_gate():
+    """The envelope's top-level ``provider_policy_synced`` must be honoured."""
+    envelope = _policy_view_envelope(provider_policy_synced=False)
+    boundary, _ = _boundary_with_real_adapter(envelope)
+    prepared = _prepare(boundary)
+    assert not prepared.authorized
+    assert prepared.decision.decision is not Decision.ALLOW
+
+
+def test_a_documented_policy_view_with_native_transfer_off_is_blocked():
+    envelope = _policy_view_envelope()
+    envelope["policy"]["native"] = {"near": {"transfer": False, "call": [], "sign_message": []}}
+    boundary, _ = _boundary_with_real_adapter(envelope)
+    prepared = _prepare(boundary)
+    assert not prepared.authorized
+
+
+def test_the_retrieved_policy_changes_the_decision_for_the_same_transaction():
+    """The strongest requirement: identical transaction, opposite outcomes.
+
+    The same approved transaction is prepared twice; the *only* difference is the
+    policy the provider returned. An in-force policy that enables the transfer
+    authorizes; the same policy with the transfer disabled does not. So the
+    retrieved provider policy demonstrably changes the authorization decision.
+    """
+    enabled = _boundary_with_real_adapter(_policy_view_envelope())[0]
+    disabled_env = _policy_view_envelope()
+    disabled_env["policy"]["native"] = {"near": {"transfer": False, "call": [], "sign_message": []}}
+    disabled = _boundary_with_real_adapter(disabled_env)[0]
+
+    allowed = _prepare(enabled)
+    refused = _prepare(disabled)
+
+    assert allowed.decision.decision is Decision.ALLOW
+    assert allowed.authorized
+    assert refused.decision.decision is not Decision.ALLOW
+    assert not refused.authorized
+    # The prepared request is byte-for-byte the same; only the policy differed.
+    assert allowed.transaction.tx_hash_bytes == refused.transaction.tx_hash_bytes
+
+
+def test_a_provider_outage_fails_closed_on_the_execution_path():
+    """A transport failure is HOLD (cannot establish), never an authorization."""
+    boundary, _ = make_boundary()
+    adapter = PolicyAdapter(
+        base_url="https://provider.invalid",
+        api_key="secret",
+        http_client=_FakeHttpClient(_FakeResult(ok=False, data=None, http_status=503)),
+    )
+    from tracesettle.near.provider_policy_gate import ProviderPolicyGate
+
+    boundary._policy_adapter = adapter
+    boundary._provider_policy_agent_id = "treasury-agent"
+    boundary._require_provider_policy = True
+    boundary._policy_gate = ProviderPolicyGate(
+        adapter, agent_id="treasury-agent", require=True, native_chain="near"
+    )
+    prepared = _prepare(boundary)
+    assert not prepared.authorized
+    assert prepared.decision.decision is not Decision.ALLOW
+
+
+def test_a_malformed_provider_body_fails_closed_on_the_execution_path():
+    boundary, _ = _boundary_with_real_adapter({"not": "a policy view"})
+    prepared = _prepare(boundary)
+    assert not prepared.authorized
+    assert prepared.decision.decision is not Decision.ALLOW

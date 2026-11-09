@@ -139,7 +139,17 @@ Where each capability stands:
 - **NEAR Intents provider reads (tokens, quote, status):** Mainnet verified
   read-only against the public provider endpoints. Live provider-*policy*
   integration is **not** claimed: it is unverified unless an operator configures
-  `TRACESETTLE_NEAR_AGENT_API_URL` and the read succeeds.
+  `TRACESETTLE_NEAR_AGENT_API_URL` and the read succeeds. The Agent API adapter
+  parses the provider's documented `PolicyView` envelope (lifecycle fields at the
+  top level, rules under `policy`), and the provider's own documented env names
+  (`NEAR_INTENTS_AGENT_API_URL` / `NEAR_INTENTS_AGENT_API_KEY`) are accepted as
+  aliases. Authenticate a configured key (read-only, free) with
+  `python3 -m tracesettle provider auth`; the key is read only from the
+  environment and is never printed. Discover an accessible agent with
+  `python3 -m tracesettle provider agents` (the documented `GET /v1/agents`) and
+  read its live policy with `python3 -m tracesettle provider policy <agent_id>`
+  (`GET /v1/agents/{agent_id}/policy`). See `evidence/mission30/`,
+  `evidence/mission31/` and `evidence/mission32/`.
 - **TEE:** no TEE *confidentiality* protection is claimed for execution, and the
   default path does not require one (see
   [`docs/TEE_RESEARCH.md`](docs/TEE_RESEARCH.md)). Two honest capabilities are
@@ -1006,9 +1016,9 @@ a bare interpreter.
 python -m pytest tests/ --collect-only -q   # 1986 tests collected
 python -m pytest tests/ -q                  # 1952 passed, 34 skipped
 ```
-→ `1934 passed, 34 skipped`. The skips are the PostgreSQL integration
+→ `1952 passed, 34 skipped`. The skips are the PostgreSQL integration
 tests; set `TRACESETTLE_TEST_PG_DSN` to a real server to run them
-(**1958 passed, 10 skipped** — the remaining 10 are opt-in *live-infrastructure*
+(**1976 passed, 10 skipped** — the remaining 10 are opt-in *live-infrastructure*
 tests that need real provider credentials, a testnet key, a TDX enclave
 harness, or a live OutLayer signing credential, none of which a zero-budget
 local run has).

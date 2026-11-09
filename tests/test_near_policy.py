@@ -334,3 +334,246 @@ def test_policy_dict_round_trips_the_key_facts():
     assert data["provider_policy_synced"] is True
     assert data["required_approval"] == "NONE"
     assert data["limits"]["max_actions_per_hour"] == 20
+
+
+# --- the documented PolicyView envelope ------------------------------------
+#
+# GET /v1/agents/{agent_id}/policy returns a PolicyView: lifecycle fields at the
+# top level, the rules nested under ``policy``. Reading a real, in-force policy
+# must not depend on the flat fixture shape.
+
+
+def test_policy_view_envelope_is_parsed_and_in_force():
+    """The live response shape must parse; a genuine policy must read in force."""
+    policy = parse_policy(load("policy_view_applied.json"))
+    assert policy.status is PolicyStatus.APPLIED
+    assert policy.provider_policy_synced is True
+    assert policy.in_force is True
+    # Lifecycle read from the envelope.
+    assert policy.revision == 7
+    assert policy.policy_hash == "0" * 64
+    assert policy.as_of == "2026-11-08T00:00:00Z"
+
+
+def test_policy_view_rules_are_read_from_the_nested_policy():
+    policy = parse_policy(load("policy_view_applied.json"))
+    assert policy.actions == frozenset({"swap", "transfer", "withdraw"})
+    # ``max_actions_per_hour`` sits beside ``limits`` in the documented Policy.
+    assert policy.limits.max_actions_per_hour == 20
+    assert str(policy.limits.limit_for("per_transaction", "nep141:usdc.near")) == "100000000"
+    # ``budget`` is an object of window amounts; the tightest set window is used.
+    assert str(policy.budget_usd) == "500.00"
+    # Usage is read from ``usage.budget``, never from the policy budget object.
+    assert str(policy.budget_spent_usd) == "0"
+    assert policy.destination_allowed(
+        action="withdraw", chain="base", address="0x1111111111111111111111111111111111111111"
+    )
+    assert not policy.destination_allowed(
+        action="withdraw", chain="base", address="0x9999999999999999999999999999999999999999"
+    )
+
+
+def test_policy_view_native_methods_use_the_documented_array_form():
+    """A native method is an array of permitted values: empty is off, non-empty on."""
+    raw = load("policy_view_applied.json")
+    raw["policy"]["native"]["near"]["transfer"] = True
+    raw["policy"]["native"]["near"]["call"] = ["some-contract.near"]
+    raw["policy"]["native"]["near"]["sign_message"] = []
+    policy = parse_policy(raw)
+    assert policy.native_method_enabled("near", "transfer") is True
+    assert policy.native_method_enabled("near", "call") is True
+    assert policy.native_method_enabled("near", "sign_message") is False
+
+
+def test_policy_view_not_applied_reads_not_in_force():
+    raw = load("policy_view_applied.json")
+    raw["status"] = "SIGNED"
+    raw["provider_policy_synced"] = False
+    policy = parse_policy(raw)
+    assert policy.in_force is False
+
+
+def test_policy_view_flat_document_still_parses():
+    """The flat fixture shape (used offline) must keep working unchanged."""
+    policy = parse_policy(load("policy_in_force.json"))
+    assert policy.in_force is True
+    assert policy.limits.max_actions_per_hour == 20
+
+
+def test_adapter_reads_a_policy_view_from_the_provider():
+    client = _FakeClient(_FakeResult(ok=True, data=load("policy_view_applied.json"), http_status=200))
+    adapter = PolicyAdapter(base_url="https://example.invalid", api_key="secret", http_client=client)
+    read = adapter.read_policy("demo-agent.near")
+    assert read.availability is PolicyAvailability.AVAILABLE
+    assert read.policy.in_force is True
+    assert read.policy.limits.max_actions_per_hour == 20
+
+
+def test_adapter_enforces_freshness_using_applied_at():
+    from datetime import datetime, timezone
+
+    raw = load("policy_view_applied.json")
+    raw["applied_at"] = "2026-01-01T00:00:00Z"
+    client = _FakeClient(_FakeResult(ok=True, data=raw, http_status=200))
+    adapter = PolicyAdapter(
+        base_url="https://example.invalid",
+        api_key="secret",
+        http_client=client,
+        max_age_seconds=60,
+        now=lambda: datetime(2026, 6, 1, tzinfo=timezone.utc),
+    )
+    read = adapter.read_policy("demo-agent.near")
+    assert read.availability is PolicyAvailability.UNAVAILABLE
+    assert "old" in read.detail or "freshness" in read.detail
+
+
+# --- whoami authentication -------------------------------------------------
+
+
+def test_authenticate_reports_success_with_identifiers():
+    client = _FakeClient(
+        _FakeResult(ok=True, data={"api_key_id": "key_123", "tenant_id": "tracesettle"}, http_status=200)
+    )
+    adapter = PolicyAdapter(base_url="https://example.invalid", api_key="secret", http_client=client)
+    auth = adapter.authenticate()
+    assert auth.authenticated is True
+    assert auth.api_key_id == "key_123"
+    assert auth.tenant_id == "tracesettle"
+
+
+def test_authenticate_reports_invalid_credentials_on_401():
+    client = _FakeClient(_FakeResult(ok=False, http_status=401, status="SourceStatus.UNAUTHORIZED"))
+    adapter = PolicyAdapter(base_url="https://example.invalid", api_key="bad", http_client=client)
+    auth = adapter.authenticate()
+    assert auth.authenticated is False
+    assert "rejected" in auth.detail
+
+
+def test_authenticate_reports_unconfigured_without_a_base_url():
+    adapter = PolicyAdapter(base_url=None, api_key="secret")
+    auth = adapter.authenticate()
+    assert auth.authenticated is False
+    assert "No Agent API base URL" in auth.detail
+
+
+def test_authenticate_reports_unconfigured_without_a_key():
+    class _Never:
+        def get_json(self, url, params=None, headers=None):
+            raise AssertionError("must not call the provider without a key")
+
+    adapter = PolicyAdapter(base_url="https://example.invalid", api_key=None, http_client=_Never())
+    auth = adapter.authenticate()
+    assert auth.authenticated is False
+    assert "No Agent API key" in auth.detail
+
+
+def test_authenticate_reports_provider_unavailable_on_transport_failure():
+    class _Boom:
+        def get_json(self, url, params=None, headers=None):
+            raise TimeoutError("no route")
+
+    adapter = PolicyAdapter(base_url="https://example.invalid", api_key="secret", http_client=_Boom())
+    auth = adapter.authenticate()
+    assert auth.authenticated is False
+    assert "whoami request failed" in auth.detail
+
+
+def test_authenticate_reports_unavailable_on_a_5xx():
+    client = _FakeClient(_FakeResult(ok=False, http_status=503, status="SourceStatus.SERVER_ERROR"))
+    adapter = PolicyAdapter(base_url="https://example.invalid", api_key="secret", http_client=client)
+    auth = adapter.authenticate()
+    assert auth.authenticated is False
+
+
+def test_authenticate_never_returns_the_key():
+    client = _FakeClient(
+        _FakeResult(ok=True, data={"api_key_id": "key_123", "tenant_id": "tracesettle"}, http_status=200)
+    )
+    adapter = PolicyAdapter(base_url="https://example.invalid", api_key="super-secret", http_client=client)
+    auth = adapter.authenticate()
+    assert "super-secret" not in json.dumps(auth.to_dict())
+
+
+# --- agent discovery (GET /v1/agents) --------------------------------------
+
+
+def test_list_agents_parses_the_documented_agent_view_shape():
+    body = {
+        "data": [
+            {"id": "a" * 64, "name": "trader", "status": "ACTIVE", "archived": False, "deleted": False},
+            {"id": "b" * 64, "name": "archived-one", "status": "ARCHIVED", "archived": True, "deleted": False},
+        ],
+        "next_cursor": None,
+    }
+    client = _FakeClient(_FakeResult(ok=True, data=body, http_status=200))
+    adapter = PolicyAdapter(base_url="https://example.invalid", api_key="secret", http_client=client)
+    listing = adapter.list_agents()
+    assert listing.availability is PolicyAvailability.AVAILABLE
+    assert len(listing.agents) == 2
+    assert listing.agents[0].agent_id == "a" * 64
+    assert listing.agents[0].status == "ACTIVE"
+    assert listing.agents[1].archived is True
+    assert listing.next_cursor is None
+    assert client.calls == ["https://example.invalid/v1/agents"]
+    assert client.headers[0]["X-API-Key"] == "secret"
+
+
+def test_list_agents_reports_an_empty_list_honestly():
+    client = _FakeClient(_FakeResult(ok=True, data={"data": [], "next_cursor": None}, http_status=200))
+    adapter = PolicyAdapter(base_url="https://example.invalid", api_key="secret", http_client=client)
+    listing = adapter.list_agents()
+    assert listing.availability is PolicyAvailability.AVAILABLE
+    assert listing.agents == ()
+    assert "0 accessible agent" in listing.detail
+
+
+def test_list_agents_refuses_without_a_key_and_never_calls_the_provider():
+    class _Never:
+        def get_json(self, url, params=None, headers=None):
+            raise AssertionError("must not call the provider without a key")
+
+    adapter = PolicyAdapter(base_url="https://example.invalid", api_key=None, http_client=_Never())
+    listing = adapter.list_agents()
+    assert listing.availability is PolicyAvailability.UNAUTHENTICATED
+    assert listing.agents == ()
+
+
+def test_list_agents_reports_unauthenticated_on_401():
+    client = _FakeClient(_FakeResult(ok=False, http_status=401, status="SourceStatus.UNAUTHORIZED"))
+    adapter = PolicyAdapter(base_url="https://example.invalid", api_key="bad", http_client=client)
+    listing = adapter.list_agents()
+    assert listing.availability is PolicyAvailability.UNAUTHENTICATED
+
+
+def test_list_agents_reports_unavailable_on_a_transport_failure():
+    class _Boom:
+        def get_json(self, url, params=None, headers=None):
+            raise TimeoutError("no route")
+
+    adapter = PolicyAdapter(base_url="https://example.invalid", api_key="secret", http_client=_Boom())
+    listing = adapter.list_agents()
+    assert listing.availability is PolicyAvailability.UNAVAILABLE
+
+
+def test_list_agents_reports_malformed_when_data_is_not_an_array():
+    client = _FakeClient(_FakeResult(ok=True, data={"data": "nope"}, http_status=200))
+    adapter = PolicyAdapter(base_url="https://example.invalid", api_key="secret", http_client=client)
+    listing = adapter.list_agents()
+    assert listing.availability is PolicyAvailability.MALFORMED
+
+
+def test_list_agents_never_returns_the_key():
+    body = {"data": [{"id": "a" * 64, "name": "trader", "status": "ACTIVE"}], "next_cursor": None}
+    client = _FakeClient(_FakeResult(ok=True, data=body, http_status=200))
+    adapter = PolicyAdapter(base_url="https://example.invalid", api_key="super-secret", http_client=client)
+    listing = adapter.list_agents()
+    assert "super-secret" not in json.dumps(listing.to_dict())
+
+
+def test_list_agents_skips_entries_without_an_id():
+    body = {"data": [{"name": "no-id"}, {"id": "a" * 64, "status": "ACTIVE"}], "next_cursor": None}
+    client = _FakeClient(_FakeResult(ok=True, data=body, http_status=200))
+    adapter = PolicyAdapter(base_url="https://example.invalid", api_key="secret", http_client=client)
+    listing = adapter.list_agents()
+    assert len(listing.agents) == 1
+    assert listing.agents[0].agent_id == "a" * 64

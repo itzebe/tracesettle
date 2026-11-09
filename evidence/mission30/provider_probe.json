@@ -1,0 +1,131 @@
+{
+  "base_url": "https://api.agentsonintents.com",
+  "network": {
+    "body": {
+      "contract_id": "outlayer.near",
+      "network": "mainnet",
+      "status": {
+        "checked_at": "2026-11-08T16:29:58.939Z",
+        "components": [
+          {
+            "affects": [
+              "swap",
+              "withdraw",
+              "deposit"
+            ],
+            "checked_at": "2026-11-08T16:29:59.062Z",
+            "id": "one_click",
+            "reason": null,
+            "since": "2026-11-08T02:31:58.602Z",
+            "status": "operational"
+          },
+          {
+            "affects": [
+              "swap",
+              "withdraw",
+              "transfer",
+              "shield",
+              "unshield",
+              "deposit",
+              "owner_intents",
+              "balances"
+            ],
+            "checked_at": "2026-11-08T16:29:59.058Z",
+            "id": "custody",
+            "reason": null,
+            "since": "2026-11-06T14:17:56.838Z",
+            "status": "operational"
+          },
+          {
+            "affects": [
+              "owner_intents",
+              "balances"
+            ],
+            "checked_at": "2026-11-08T16:29:58.939Z",
+            "id": "near",
+            "reason": null,
+            "since": "2026-11-08T05:04:58.569Z",
+            "status": "operational"
+          }
+        ],
+        "overall": "operational"
+      },
+      "supported_owner_types": [
+        "near",
+        "passkey"
+      ]
+    },
+    "http_status": 200,
+    "path": "/v1/network"
+  },
+  "note": "No API key was supplied. /v1/whoami answering 401 with 'invalid_api_key' is the documented auth boundary, not an outage. A successful read requires a live key in the X-API-Key header.",
+  "openapi": {
+    "http_status": 200,
+    "security_schemes": [
+      "ApiKey",
+      "GrantToken"
+    ],
+    "title": "NEAR Intents Agent API",
+    "v1_paths": [
+      "/v1/agents",
+      "/v1/agents/{agent_id}",
+      "/v1/agents/{agent_id}/addresses/{chain}",
+      "/v1/agents/{agent_id}/approvals",
+      "/v1/agents/{agent_id}/approvals/{approval_id}",
+      "/v1/agents/{agent_id}/balances",
+      "/v1/agents/{agent_id}/containment",
+      "/v1/agents/{agent_id}/deposit",
+      "/v1/agents/{agent_id}/executions/scheduled",
+      "/v1/agents/{agent_id}/grants",
+      "/v1/agents/{agent_id}/history",
+      "/v1/agents/{agent_id}/native/evm/sign-message",
+      "/v1/agents/{agent_id}/native/evm/sign-transaction",
+      "/v1/agents/{agent_id}/native/evm/sign-typed-data",
+      "/v1/agents/{agent_id}/native/near/call",
+      "/v1/agents/{agent_id}/native/near/sign-message",
+      "/v1/agents/{agent_id}/native/near/transfer",
+      "/v1/agents/{agent_id}/native/solana/sign-message",
+      "/v1/agents/{agent_id}/native/solana/sign-transaction",
+      "/v1/agents/{agent_id}/operations/{correlation_id}/proof",
+      "/v1/agents/{agent_id}/policy",
+      "/v1/agents/{agent_id}/policy/history",
+      "/v1/agents/{agent_id}/provider/{kind}",
+      "/v1/agents/{agent_id}/recover",
+      "/v1/agents/{agent_id}/shield",
+      "/v1/agents/{agent_id}/swap",
+      "/v1/agents/{agent_id}/transfer",
+      "/v1/agents/{agent_id}/unshield",
+      "/v1/agents/{agent_id}/wallet",
+      "/v1/agents/{agent_id}/withdraw",
+      "/v1/generate-intent",
+      "/v1/network",
+      "/v1/quotas",
+      "/v1/releases",
+      "/v1/releases/latest",
+      "/v1/releases/{version}",
+      "/v1/status",
+      "/v1/submit-intent",
+      "/v1/tokens",
+      "/v1/whoami"
+    ],
+    "version": "1.0.0"
+  },
+  "whoami_without_key": {
+    "body": {
+      "errors": [
+        {
+          "code": "invalid_api_key",
+          "detail": "Send a live API key in the X-API-Key header.",
+          "layer": "auth",
+          "status": "401",
+          "title": "Invalid api key"
+        }
+      ],
+      "meta": {
+        "request_id": "014d6ae9-2ccd-423b-a094-9f6eb4005b8d"
+      }
+    },
+    "http_status": 401,
+    "path": "/v1/whoami"
+  }
+}
