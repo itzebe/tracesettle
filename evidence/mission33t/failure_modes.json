@@ -1,0 +1,130 @@
+{
+  "all_non_control_refused": true,
+  "control_authorized": true,
+  "live_key_configured": true,
+  "note": "The same transaction is prepared for every row; only the provider-policy read changes. The guard, the boundary and combine_provider_policy are the real product code.",
+  "provider": {
+    "base_url": "https://api.agentsonintents.com",
+    "layer": "near provider policy (NEAR Intents Agent API)"
+  },
+  "results": [
+    {
+      "authorization_id": "auth_a5ac21ce37b061c9b95b4d7f",
+      "authorized": true,
+      "decision": "ALLOW",
+      "description": "the provider policy is applied, synced and enables native.near.transfer",
+      "detail": "the provider policy (revision 5) is applied and synced, not frozen, and enables native.near.transfer",
+      "outcome": "IN_FORCE",
+      "provider_decision": "ALLOW",
+      "scenario": "IN_FORCE"
+    },
+    {
+      "authorization_id": null,
+      "authorized": false,
+      "decision": "HOLD",
+      "description": "a policy update that is not APPLIED / not provider-synced is never active",
+      "detail": "the provider policy is not in force (status=REQUESTED, provider_policy_synced=False); a requested or signed update is not active, so no operation is authorized under it",
+      "outcome": "NOT_IN_FORCE",
+      "provider_decision": "HOLD",
+      "scenario": "NOT_IN_FORCE"
+    },
+    {
+      "authorization_id": null,
+      "authorized": false,
+      "decision": "BLOCK",
+      "description": "the provider froze the agent's wallet (explicit denial)",
+      "detail": "the provider has frozen this agent's wallet; no operation is permitted",
+      "outcome": "FROZEN",
+      "provider_decision": "BLOCK",
+      "scenario": "FROZEN"
+    },
+    {
+      "authorization_id": null,
+      "authorized": false,
+      "decision": "BLOCK",
+      "description": "the policy does not enable native.near.transfer (explicit denial)",
+      "detail": "the provider policy does not enable native.near.transfer; a native NEAR transfer is refused by this policy",
+      "outcome": "NATIVE_TRANSFER_DISABLED",
+      "provider_decision": "BLOCK",
+      "scenario": "NATIVE_TRANSFER_DISABLED"
+    },
+    {
+      "authorization_id": null,
+      "authorized": false,
+      "decision": "BLOCK",
+      "description": "the provider returned a policy for a different agent (the gate's own AGENT_MISMATCH)",
+      "detail": "the provider returned a policy for agent 'some-other-agent', not 'treasury-agent'; refusing to treat it as this agent's policy",
+      "outcome": "AGENT_MISMATCH",
+      "provider_decision": "BLOCK",
+      "scenario": "AGENT_MISMATCH"
+    },
+    {
+      "authorization_id": null,
+      "authorized": false,
+      "decision": "HOLD",
+      "description": "the provider refused the read (401) - LIVE Agent API with the injected key",
+      "detail": "provider policy could not be established (UNAUTHENTICATED): the provider refused the request (missing or wrong credentials)",
+      "outcome": "UNAUTHENTICATED",
+      "provider_decision": "HOLD",
+      "scenario": "UNAUTHENTICATED"
+    },
+    {
+      "authorization_id": null,
+      "authorized": false,
+      "decision": "HOLD",
+      "description": "no policy exists for this agent (404)",
+      "detail": "provider policy could not be established (NOT_FOUND): no policy exists for this agent yet",
+      "outcome": "NOT_FOUND",
+      "provider_decision": "HOLD",
+      "scenario": "NOT_FOUND"
+    },
+    {
+      "authorization_id": null,
+      "authorized": false,
+      "decision": "HOLD",
+      "description": "the provider returned a body that cannot be interpreted",
+      "detail": "provider policy could not be established (MALFORMED): the provider policy could not be interpreted: policy must be a JSON object",
+      "outcome": "MALFORMED",
+      "provider_decision": "HOLD",
+      "scenario": "MALFORMED"
+    },
+    {
+      "authorization_id": null,
+      "authorized": false,
+      "decision": "HOLD",
+      "description": "the policy read raised a transport error",
+      "detail": "provider policy could not be established (UNAVAILABLE): policy read failed: TimeoutError",
+      "outcome": "UNAVAILABLE",
+      "provider_decision": "HOLD",
+      "scenario": "UNAVAILABLE"
+    },
+    {
+      "authorization_id": null,
+      "authorized": false,
+      "decision": "HOLD",
+      "description": "no Agent API base URL is configured",
+      "detail": "provider policy could not be established (UNCONFIGURED): No Agent API base URL is configured. Set TRACESETTLE_NEAR_AGENT_API_URL and TRACESETTLE_NEAR_AGENT_API_KEY to read live policy, or load a local fixture with PolicyAdapter.from_fixture.",
+      "outcome": "UNCONFIGURED",
+      "provider_decision": "HOLD",
+      "scenario": "UNCONFIGURED"
+    },
+    {
+      "authorization_id": null,
+      "authorized": false,
+      "decision": "HOLD",
+      "description": "the adapter reports a stale revision (the gate's own STALE vocabulary)",
+      "detail": "provider policy could not be established (STALE): the policy revision is older than the configured maximum age",
+      "outcome": "STALE",
+      "provider_decision": "HOLD",
+      "scenario": "STALE"
+    },
+    {
+      "authorized": false,
+      "decision": null,
+      "description": "the layer is required but no adapter is configured; must refuse outright",
+      "detail": "the independent NEAR provider policy is required but no policy adapter or agent id is configured; refusing to authorize without the second policy layer",
+      "outcome": "EXECUTION_ERROR",
+      "scenario": "REQUIRED_NO_ADAPTER"
+    }
+  ]
+}

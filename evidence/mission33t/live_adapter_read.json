@@ -1,0 +1,20 @@
+{
+  "authenticate": {
+    "api_key_id": null,
+    "authenticated": false,
+    "detail": "the provider rejected the key (invalid or retired credentials)",
+    "endpoint": "https://api.agentsonintents.com/v1/whoami",
+    "http_status": 401,
+    "tenant_id": null
+  },
+  "generated_at": "2026-11-09T10:21:55.227153+00:00",
+  "list_agents": {
+    "agents": [],
+    "availability": "UNAUTHENTICATED",
+    "count": 0,
+    "detail": "the provider refused the request (missing or wrong credentials)",
+    "endpoint": "https://api.agentsonintents.com/v1/agents",
+    "http_status": 401,
+    "next_cursor": null
+  }
+}
